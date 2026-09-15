@@ -1,0 +1,72 @@
+# Automotive GUI Agent — runtime configuration.
+# Every key here is optional; defaults live in autogui/config.py.
+
+# local = LangGraph calls bridge/tools.py functions in-process.
+# mcp   = the same calls go through a real MCP session against autogui/mcp_server.py.
+# If the MCP route misbehaves on Demo Day, flip this to local: 10 seconds, no refactor.
+exec_mode: local
+
+# Positioning path actually declared for judging. DO NOT EDIT until
+# `python main.py --dump-report` has been run on the borrowed head unit.
+# Rule 4.4: an overstated claim is scored down to what the code really does.
+# C = control tree primary + pure-VLM grid fallback (worth +10)
+declared_path: C
+
+device_serial: auto        # auto = pick up the only attached device, else fail loudly
+display_id: null           # leave null; set only if `--check` reports multiple displays
+                           # and the captured screen is not the centre console
+input_chain: [yadb, adbkeyboard, ascii]
+
+# Landscape head unit. 20x10 at 1920x1080 gives ~96x108px cells, about one touch
+# target each. Do NOT inherit LightGUIAgent's auto density — its row clamp of
+# max(15, ...) is a portrait assumption (技术方案评估.md §2 C-11).
+grid:
+  cols: 20
+  rows: 10
+  jpeg_quality: 85
+  max_side: 1568           # provisional; LightGUIAgent hardcoded this as "Claude optimal"
+                           # — re-measure for GLM in the 9/19 A/B test
+
+agent:
+  max_steps: 20
+  wall_clock_limit: 180    # seconds; a Demo Day slot is 8 minutes total
+  no_progress_limit: 3     # consecutive screens with an unchanged fingerprint
+  delay_after_action: 1.0
+  history_window: 5
+  token_budget: 8000       # approximate input tokens before trimming kicks in
+  tree_candidate_limit: 40
+  reflection: cheap        # cheap = only spend a VLM call when the screen looks unchanged
+                          # always = mirror Mobile-Agent-v2 (≈4 calls/step; do not ship this)
+                          # off    = fastest, loses the recovery behaviour entirely
+
+skills:
+  enabled: true
+  directory: skills
+
+glm:
+  # TODO 9/15: replace with the exact model id on the key the committee issues.
+  model: glm-4v-plus
+  base_url: https://open.bigmodel.cn/api/paas/v4/
+  api_key_env: GLM_API_KEY
+  temperature: 0.1
+  max_tokens: 1024
+  timeout: 30
+  max_retries: 2
+
+# Scope is fixed by rule 4.2: CEA1.3 preinstalled set plus Bilibili / Feishu / 外卖.
+# Fill package names from `python main.py --packages` once the head unit is borrowed —
+# the app list in LightGUIAgent's prompt (美团/淘宝/微信) is for phones and mostly wrong here.
+apps:
+  - name: 音乐
+    package: ""            # e.g. com.tencent.qqmusiccar — verify on device
+  - name: 导航
+    package: ""
+  - name: 哔哩哔哩
+    package: tv.danmaku.bili
+  - name: 飞书
+    package: com.lark.android.mcloud   # verify — Feishu's Android id varies by build
+  - name: 外卖
+    package: ""
+
+log_dir: artifacts/logs
+verbose: true

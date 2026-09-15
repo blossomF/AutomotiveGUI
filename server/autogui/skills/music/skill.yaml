@@ -1,0 +1,37 @@
+# 音乐（CEA1.3 预装）
+# Hint text values are placeholders until measured on the borrowed head unit:
+# run `python main.py --dump-report`, then replace each hint with a string that
+# actually appears in that app's UI tree. An unresolvable hint raises SkillMiss and
+# the step falls through to the generic tree/vlm route, so a wrong hint costs one
+# turn rather than failing the task.
+name: music
+app:
+  package: ""            # fill from `python main.py --packages`
+
+# App-level popup overrides; omit to use autogui/skills/base.py DEFAULT_POPUPS.
+popups:
+  - { detect: "用户协议", button: "同意" }
+  - { detect: "开启推送", button: "以后再说" }
+
+skills:
+  - name: play_song
+    summary: 在音乐 App 搜索指定歌曲并播放（对应 Easy 参考任务）
+    triggers: [播放, 来一首, 听一下, play]
+    params: [song]
+    steps:
+      - { act: launch }
+      - { act: dismiss_popups }
+      - { act: click, hint: { text: "搜索" } }
+      - { act: type, arg: song, clear_first: true }
+      - { act: wait_for, arg: song, timeout: 8 }
+      - { act: click, hint: { text: "{song}" } }   # {param} = substituted from params
+      - { act: sleep, seconds: 1.5 }
+      - { act: click, hint: { text: "播放全部" } }
+      - { act: complete }
+
+  - name: pause
+    summary: 暂停当前播放
+    triggers: [暂停]
+    steps:
+      - { act: click, hint: { desc: "暂停" } }
+      - { act: complete }

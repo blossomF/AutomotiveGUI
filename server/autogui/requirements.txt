@@ -1,0 +1,12 @@
+# Runtime requirements — the flat, pip-installable mirror of pyproject.toml.
+# README offers `pip install -r requirements.txt` as the no-uv path, because the
+# Demo Day machine may have neither uv nor make.
+# Versions are pinned here and mirrored in uv.lock; LangGraph in particular shifts
+# its public API between minor versions.
+mcp>=1.2,<2
+langgraph>=0.2,<0.3
+openai>=1.40
+pillow>=10
+pyyaml>=6
+pydantic>=2.7
+pytest>=8

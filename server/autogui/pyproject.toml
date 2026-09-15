@@ -1,0 +1,42 @@
+[project]
+name = "autogui"
+version = "0.1.0"
+description = "Automotive GUI Agent — CART Q3 AI Contest. LangGraph brain + thin MCP executor + own ADB bridge."
+requires-python = ">=3.10"
+readme = "README.md"
+
+# Runtime deps deliberately frozen at 6 (see 技术方案评估.md §6).
+# Demo-Day reproducibility is worth 10 points; every extra dep costs time there.
+dependencies = [
+  "mcp>=1.2,<2",
+  "langgraph>=0.2,<0.3",
+  "openai>=1.40",          # GLM 5.3 speaks the OpenAI-compatible protocol
+  "pillow>=10",
+  "pyyaml>=6",
+  "pydantic>=2.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+autogui = "main:main"
+autogui-mcp = "autogui.mcp_server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["main"]
+
+[tool.setuptools.packages.find]
+include = ["autogui*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"

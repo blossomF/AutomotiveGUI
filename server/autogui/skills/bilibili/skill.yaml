@@ -1,0 +1,24 @@
+# 哔哩哔哩车机版
+name: bilibili
+app:
+  package: tv.danmaku.bili     # verify on device
+
+popups:
+  - { detect: "青少年模式", button: "以后再说" }
+  - { detect: "用户协议", button: "同意" }
+
+skills:
+  - name: search_video
+    summary: 在 B 站搜索关键词并播放第一个视频
+    triggers: [B站, 哔哩哔哩, bilibili, 看视频]
+    params: [keyword]
+    steps:
+      - { act: launch }
+      - { act: dismiss_popups }
+      - { act: click, hint: { text: "搜索" } }
+      - { act: type, arg: keyword, clear_first: true }
+      - { act: keyevent, key: "KEYCODE_ENTER" }
+      - { act: wait_for, arg: keyword, timeout: 10 }
+      - { act: click, hint: { text: "{keyword}" }, nth: 0 }
+      - { act: sleep, seconds: 2.0 }
+      - { act: complete }

@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Runtime artifacts — the JSONL chains are deliverable *samples*, commit those
+# deliberately with `git add -f artifacts/logs/<file>.jsonl`, never the whole dir.
+artifacts/
+
+# Secrets: the committee-issued key goes in the environment, not the repo.
+.env
+.env.*

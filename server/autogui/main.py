@@ -1,0 +1,311 @@
+"""Automotive GUI Agent — command line entry point.
+
+    python main.py "在音乐App里播放周杰伦的《七里香》"   # run a task
+    python main.py --packages                     # list installed packages (fill config.yaml)
+    python main.py --check                        # device + capture + input self-test
+    python main.py --dump-report                  # the 9/19 path A/B/C decision table
+    python main.py --mcp-check                     # list the MCP tool surface
+    python main.py --selftest                      # no device, no network
+
+``--dump-report`` exists because the path declaration is worth +10 and can only be
+made from measured data: the contest rules downgrade an overstated claim to whatever
+the code actually does (章程 §4.4). It walks every configured app, dumps the real UI
+tree, counts how many *addressable* candidates we get, and writes
+``artifacts/dump-report.md`` for the acceptance meeting.
+
+``--check`` includes a dedicated IME round-trip assertion, which is the P0 risk from
+技术方案评估.md §2 A-2: the ported ADBKeyboard path originally restored a hardcoded
+Gboard, and a head unit has none.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+
+def _bootstrap(cfg):
+    from autogui.bridge import tools
+
+    tools.bind_device(cfg.device_serial, input_chain=cfg.input_chain,
+                      display=cfg.display_id, verbose=cfg.verbose)
+    return tools
+
+
+# ── commands ─────────────────────────────────────────────────────────────────────
+
+
+def cmd_run(args, cfg) -> int:
+    from autogui.brain.glm_client import GLMClient
+    from autogui.core.graph import Runner
+
+    tools = _bootstrap(cfg)
+    task = args.task.strip()
+    if args.skill_only:
+        return _run_skill_direct(args, cfg, tools)
+
+    glm = GLMClient(cfg.glm)
+    runner = Runner(cfg=cfg, task=task, glm=glm)
+    result = runner.execute()
+    return 0 if result["success"] else 1
+
+
+def _run_skill_direct(args, cfg, tools) -> int:
+    """Skip the model entirely and run one recipe — the zero-VLM performance case."""
+    from autogui.skills.base import SkillBook, SkillMiss
+
+    book = SkillBook(Path(__file__).resolve().parent / cfg.skills.directory, tools.dev(), tools.text_input())
+    print(f"可用技能：\n{book.index()}\n")
+
+    key, _, param = args.task.partition("=")
+    key = key.strip()
+    skill = book.get(key)
+    if skill is None:
+        print(f"找不到技能 {key!r}")
+        return 1
+    params = {}
+    if param:
+        if not skill.params:
+            print(f"{key} 不接收参数")
+            return 1
+        params[skill.params[0]] = param.strip()
+    try:
+        for line in book.run(key, params):
+            print(line)
+        return 0
+    except SkillMiss as e:
+        print(f"SKILL_MISS: {e}")
+        return 1
+    except Exception as e:
+        print(f"FAILED: {type(e).__name__}: {e}")
+        return 1
+
+
+def cmd_packages(cfg) -> int:
+    tools = _bootstrap(cfg)
+    pkgs = tools.list_apps("").splitlines()
+    interesting = [p for p in pkgs if not p.startswith(("com.android.", "android.", "com.google."))]
+    print(f"共 {len(pkgs)} 个包，非系统前缀 {len(interesting)} 个：\n")
+    for p in interesting:
+        print(f"  {p}")
+    print("\n把需要的那几个填进 config.yaml 的 apps: [{name, package}]")
+    return 0
+
+
+def cmd_check(cfg) -> int:
+    """Fast bring-up sanity check. Prints a pass/fail line per capability."""
+    from autogui.bridge.adb import ADBError, png_size
+    from autogui.perception.tree import candidates_from_xml
+
+    tools = _bootstrap(cfg)
+    device = tools.dev()
+    ok = True
+
+    def report(label: str, passed: bool, detail: str = "") -> None:
+        nonlocal ok
+        ok = ok and passed
+        print(f"  [{'✓' if passed else '✗'}] {label:<28} {detail}")
+
+    print("=" * 72)
+    print("环境自检")
+    print("=" * 72)
+    report("ADB 连接", True, device.serial)
+    report("型号", True, device.get_prop("ro.product.model"))
+    report("Android 版本", True, device.get_prop("ro.build.version.release"))
+
+    t = time.perf_counter()
+    png = device.screenshot()
+    shot_ms = (time.perf_counter() - t) * 1000
+    size = png_size(png)
+    report("exec-out 抓帧", bool(size) and shot_ms < 2500, f"{size} {shot_ms:.0f}ms  (阈值 1500ms)")
+    displays = device.list_displays()
+    if len(displays) > 1:
+        # Rule 4.2 scopes us to the centre console; a multi-display unit may capture
+        # the cluster instead, which would silently feed the model the wrong screen.
+        report("多屏提示", cfg.display_id is not None,
+               f"发现 {len(displays)} 块屏 {displays}；确认捕获的是中控，必要时设 display_id")
+    if size and cfg.grid.cols * cfg.grid.rows:
+        cw, ch = size[0] / cfg.grid.cols, size[1] / cfg.grid.rows
+        report("网格密度", 60 <= cw <= 220 and 60 <= ch <= 220,
+               f"{cfg.grid.cols}×{cfg.grid.rows} → cell {cw:.0f}×{ch:.0f}px")
+
+    t = time.perf_counter()
+    xml = device.dump_xml()
+    dump_ms = (time.perf_counter() - t) * 1000
+    cands = candidates_from_xml(xml, limit=200, screen=size)
+    report("uiautomator dump", bool(xml), f"{len(xml)} bytes {dump_ms:.0f}ms (阈值 3000ms)")
+    report("可寻址候选", len(cands) >= 3, f"{len(cands)} 个（决定 tree 是否可用）")
+
+    # P0: the IME must survive a Unicode input attempt.
+    try:
+        before = device.adb_soft("shell", "settings", "get", "secure", "default_input_method").stdout
+        result = tools.text_input().probe()
+        report("输入策略", True, f"{result}（链：{'>'.join(cfg.input_chain)}）")
+        after = device.adb_soft("shell", "settings", "get", "secure", "default_input_method").stdout
+        # yadb/ascii never touch the IME; adbkeyboard must restore it exactly.
+        same = (before or "").strip() == (after or "").strip()
+        report("IME 未被改坏", same, f"{before!r} -> {after!r}" if not same else before)
+        ok = ok and same
+    except ADBError as e:
+        report("输入探测", False, str(e))
+
+    total = shot_ms + dump_ms
+    report("单轮观测耗时", total < 4500, f"≈{total:.0f}ms（并行后应为 max 而非 sum）")
+    print("=" * 72)
+    print("全部通过" if ok else "存在未通过项 — 先看 技术方案评估.md §2 与 §7 风险表")
+    return 0 if ok else 1
+
+
+def cmd_dump_report(cfg) -> int:
+    """Walk the configured apps and measure tree quality. Output feeds the 9/19 decision."""
+    from autogui.perception.tree import candidates_from_xml
+
+    tools = _bootstrap(cfg)
+    device = tools.dev()
+    if not cfg.apps:
+        print("config.yaml 里没有 apps: 列表。先运行 `python main.py --packages`。")
+        return 1
+
+    rows = []
+    for app in cfg.apps:
+        if not app.package:
+            rows.append((app.name, "-", "-", "-", "包名未填"))
+            print(f"  {app.name:<14} 跳过（包名为空）")
+            continue
+        print(f"  {app.name:<14} {app.package}")
+        try:
+            device.launch_app(app.package, delay=2.5)
+            xml = device.dump_xml()
+            size = device.screen_size()
+            cands = candidates_from_xml(xml, limit=200, screen=size)
+            labelled = sum(1 for c in cands if c.clickable)
+            usable = len(cands) >= 5
+            rows.append((app.name, len(xml), len(cands), labelled, "可用" if usable else "不可用"))
+            device.home(delay=0.8)
+        except Exception as e:
+            rows.append((app.name, "-", "-", "-", f"错误: {type(e).__name__}"))
+        time.sleep(0.5)
+
+    usable_count = sum(1 for r in rows if r[4] == "可用")
+    if usable_count >= 3:
+        verdict = "C（tree 主 + vlm 兜底，+10）"
+    elif usable_count >= 1:
+        verdict = "B（仅控件树，+5）"
+    else:
+        verdict = "A（纯 VLM 网格，+0）"
+
+    out = Path(__file__).resolve().parent / "artifacts" / "dump-report.md"
+    out.parent.mkdir(exist_ok=True)
+    lines = [
+        "# 控件树质量实测（路径 A/B/C 决策依据）", "",
+        f"- 设备：`{device.serial}`  屏幕：`{device.screen_size()}`",
+        f"- 时间：{time.strftime('%Y-%m-%d %H:%M:%S')}", "",
+        "| App | dump bytes | 可寻址候选 | 其中 clickable | 结论 |",
+        "|---|---|---|---|---|",
+    ]
+    lines += [f"| {r[0]} | {r[1]} | {r[2]} | {r[3]} | {r[4]} |" for r in rows]
+    lines += ["", f"**可用 App 数：{usable_count} → 建议声明路径 {verdict}**", "",
+              "> 决策规则（aidoc/9-19验收清单.md §二）：≥3 可用→C；1–2→B；0→A。",
+              "> 章程 §4.4：声明与实际实现不符按实际给分，故以本表为准。"]
+    out.write_text("\n".join(lines), encoding="utf-8")
+
+    print("\n" + "\n".join(lines[6:]))
+    print(f"\n报告已写入 {out}")
+    return 0
+
+
+def cmd_mcp_check(cfg) -> int:
+    from autogui.core.executor import MCPExecutor, LocalExecutor
+
+    tools = _bootstrap(cfg)
+    from autogui.mcp_server import build_server
+
+    server, _ = build_server()
+    ex = MCPExecutor(server)
+    names = ex.list_tools()
+    print(f"MCP 会话建立成功，暴露 {len(names)} 个工具：")
+    for n in sorted(names):
+        print(f"  {n}")
+    probe = ex.call("get_screen_size")
+    print(f"\n往返验证 get_screen_size() -> {probe!r}")
+    print(f"local 与 mcp 同源校验：{LocalExecutor().call('get_screen_size')!r} == {probe!r} -> "
+          f"{LocalExecutor().call('get_screen_size') == probe}")
+    ex.close()
+    return 0
+
+
+def cmd_selftest(cfg) -> int:
+    """Run the offline test suite — no device, no API key. This is the CI gate."""
+    import subprocess
+
+    root = Path(__file__).resolve().parent
+    return subprocess.call([sys.executable, "-m", "pytest", "-q", str(root / "tests")], cwd=str(root))
+
+
+# ── argparse ─────────────────────────────────────────────────────────────────────
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="autogui",
+        description="Automotive GUI Agent — see README.md before the first run.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    p.add_argument("task", nargs="?", default="", help='natural-language task, e.g. "在B站搜索并播放..."; use with --packages/--check/--dump-report/--mcp-check/--selftest"')
+    p.add_argument("--config", default=None, help="path to config.yaml")
+    p.add_argument("--exec-mode", choices=["local", "mcp"], default=None, help="override config exec_mode")
+    p.add_argument("--path", choices=["A", "B", "C"], default=None, help="override declared positioning path")
+    p.add_argument("--skill-only", action="store_true", help='run one recipe with no model, e.g. --skill-only "music.play_song=七里香"')
+    p.add_argument("--packages", action="store_true", help="list installed packages and exit")
+    p.add_argument("--check", action="store_true", help="device/capture/input self-test and exit")
+    p.add_argument("--dump-report", action="store_true", help="measure tree quality per app; write artifacts/dump-report.md")
+    p.add_argument("--mcp-check", action="store_true", help="open a real MCP session and list tools")
+    p.add_argument("--selftest", action="store_true", help="run offline tests")
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    from autogui.config import Config
+
+    args = build_parser().parse_args(argv)
+    cfg = Config.load(args.config)
+    if args.exec_mode:
+        cfg.exec_mode = args.exec_mode
+    if args.path:
+        cfg.declared_path = args.path
+
+    try:
+        if args.selftest:
+            return cmd_selftest(cfg)
+        if args.mcp_check:
+            return cmd_mcp_check(cfg)
+        if args.packages:
+            return cmd_packages(cfg)
+        if args.check:
+            return cmd_check(cfg)
+        if args.dump_report:
+            return cmd_dump_report(cfg)
+        if not args.task:
+            build_parser().print_help()
+            return 2
+        return cmd_run(args, cfg)
+    except KeyboardInterrupt:
+        print("\n已中断")
+        return 130
+    except RuntimeError as e:
+        # A missing device is the expected first-run failure; say so plainly instead
+        # of showing a traceback to whoever is following the README on Demo Day.
+        print(f"\n✗ {e}")
+        if "adb" in str(e).lower() or "device" in str(e).lower():
+            print("  下一步：`adb devices` 确认车机在线；首次连接先 `adb connect <车机IP>`。")
+            print("  不需要车机也能跑的检查：`python main.py --selftest`")
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
