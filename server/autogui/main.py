@@ -1,21 +1,19 @@
-"""Automotive GUI Agent — command line entry point.
+"""Automotive GUI Agent —— 命令行入口。
 
-    python main.py "在音乐App里播放周杰伦的《七里香》"   # run a task
-    python main.py --packages                     # list installed packages (fill config.yaml)
-    python main.py --check                        # device + capture + input self-test
-    python main.py --dump-report                  # the 9/19 path A/B/C decision table
-    python main.py --mcp-check                     # list the MCP tool surface
-    python main.py --selftest                      # no device, no network
+    python main.py "在音乐App里播放周杰伦的《七里香》"   # 跑一个任务
+    python main.py --packages                     # 列出已安装的包（用于填 config.yaml）
+    python main.py --check                        # 设备 + 抓帧 + 输入自检
+    python main.py --dump-report                  # 9/19 路径 A/B/C 决策表
+    python main.py --mcp-check                     # 列出 MCP 工具面
+    python main.py --selftest                      # 不需要车机、不需要网络
 
-``--dump-report`` exists because the path declaration is worth +10 and can only be
-made from measured data: the contest rules downgrade an overstated claim to whatever
-the code actually does (章程 §4.4). It walks every configured app, dumps the real UI
-tree, counts how many *addressable* candidates we get, and writes
-``artifacts/dump-report.md`` for the acceptance meeting.
+``--dump-report`` 之所以存在，是因为路径声明值 +10 分，且只能由实测数据决定：
+竞赛规则规定声明高于实际实现的按实际给分（章程 §4.4）。它会遍历每个已配置的 App，
+dump 真实 UI 树，统计能拿到多少*可寻址*候选，并写出 ``artifacts/dump-report.md``
+供验收会使用。
 
-``--check`` includes a dedicated IME round-trip assertion, which is the P0 risk from
-技术方案评估.md §2 A-2: the ported ADBKeyboard path originally restored a hardcoded
-Gboard, and a head unit has none.
+``--check`` 包含一条专门的 IME 往返断言，对应 技术方案评估.md §2 A-2 的 P0 风险：
+移植来的 ADBKeyboard 路径原本会还原成写死的 Gboard，而车机上并没有 Gboard。
 """
 
 from __future__ import annotations
@@ -36,7 +34,7 @@ def _bootstrap(cfg):
     return tools
 
 
-# ── commands ─────────────────────────────────────────────────────────────────────
+# ── 命令 ─────────────────────────────────────────────────────────────────────
 
 
 def cmd_run(args, cfg) -> int:
@@ -55,7 +53,7 @@ def cmd_run(args, cfg) -> int:
 
 
 def _run_skill_direct(args, cfg, tools) -> int:
-    """Skip the model entirely and run one recipe — the zero-VLM performance case."""
+    """完全跳过模型直接跑一个配方——零 VLM 调用的性能场景。"""
     from autogui.skills.base import SkillBook, SkillMiss
 
     book = SkillBook(Path(__file__).resolve().parent / cfg.skills.directory, tools.dev(), tools.text_input())
@@ -97,7 +95,7 @@ def cmd_packages(cfg) -> int:
 
 
 def cmd_check(cfg) -> int:
-    """Fast bring-up sanity check. Prints a pass/fail line per capability."""
+    """快速点亮自检。每项能力打印一行通过/未通过。"""
     from autogui.bridge.adb import ADBError, png_size
     from autogui.perception.tree import candidates_from_xml
 
@@ -124,8 +122,8 @@ def cmd_check(cfg) -> int:
     report("exec-out 抓帧", bool(size) and shot_ms < 2500, f"{size} {shot_ms:.0f}ms  (阈值 1500ms)")
     displays = device.list_displays()
     if len(displays) > 1:
-        # Rule 4.2 scopes us to the centre console; a multi-display unit may capture
-        # the cluster instead, which would silently feed the model the wrong screen.
+        # 规则 4.2 把范围限定在中控屏；多屏车机可能抓到的是仪表屏，
+        # 那会悄悄把错误的屏幕喂给模型。
         report("多屏提示", cfg.display_id is not None,
                f"发现 {len(displays)} 块屏 {displays}；确认捕获的是中控，必要时设 display_id")
     if size and cfg.grid.cols * cfg.grid.rows:
@@ -140,13 +138,13 @@ def cmd_check(cfg) -> int:
     report("uiautomator dump", bool(xml), f"{len(xml)} bytes {dump_ms:.0f}ms (阈值 3000ms)")
     report("可寻址候选", len(cands) >= 3, f"{len(cands)} 个（决定 tree 是否可用）")
 
-    # P0: the IME must survive a Unicode input attempt.
+    # P0：IME 必须在一轮 Unicode 输入尝试后保持完好。
     try:
         before = device.adb_soft("shell", "settings", "get", "secure", "default_input_method").stdout
         result = tools.text_input().probe()
         report("输入策略", True, f"{result}（链：{'>'.join(cfg.input_chain)}）")
         after = device.adb_soft("shell", "settings", "get", "secure", "default_input_method").stdout
-        # yadb/ascii never touch the IME; adbkeyboard must restore it exactly.
+        # yadb/ascii 不会碰 IME；adbkeyboard 必须精确还原。
         same = (before or "").strip() == (after or "").strip()
         report("IME 未被改坏", same, f"{before!r} -> {after!r}" if not same else before)
         ok = ok and same
@@ -161,7 +159,7 @@ def cmd_check(cfg) -> int:
 
 
 def cmd_dump_report(cfg) -> int:
-    """Walk the configured apps and measure tree quality. Output feeds the 9/19 decision."""
+    """遍历已配置的 App，实测控件树质量。输出是 9/19 路径决策的依据。"""
     from autogui.perception.tree import candidates_from_xml
 
     tools = _bootstrap(cfg)
@@ -239,14 +237,14 @@ def cmd_mcp_check(cfg) -> int:
 
 
 def cmd_selftest(cfg) -> int:
-    """Run the offline test suite — no device, no API key. This is the CI gate."""
+    """跑离线测试套件——不需要车机、不需要 API Key。这是 CI 门禁。"""
     import subprocess
 
     root = Path(__file__).resolve().parent
     return subprocess.call([sys.executable, "-m", "pytest", "-q", str(root / "tests")], cwd=str(root))
 
 
-# ── argparse ─────────────────────────────────────────────────────────────────────
+# ── argparse 参数解析 ─────────────────────────────────────────────────────────
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -298,8 +296,8 @@ def main(argv: list[str] | None = None) -> int:
         print("\n已中断")
         return 130
     except RuntimeError as e:
-        # A missing device is the expected first-run failure; say so plainly instead
-        # of showing a traceback to whoever is following the README on Demo Day.
+        # 设备缺失是首次运行最常见的失败；把原因说清楚，
+        # 而不是给照着 README 操作的 Demo Day 现场的人看一堆 traceback。
         print(f"\n✗ {e}")
         if "adb" in str(e).lower() or "device" in str(e).lower():
             print("  下一步：`adb devices` 确认车机在线；首次连接先 `adb connect <车机IP>`。")

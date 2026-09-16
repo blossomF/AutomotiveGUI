@@ -1,16 +1,15 @@
-"""Model-facing prompt text.
+"""面向模型的提示词文本。
 
-The *shape* follows ``LightGUIAgent/lightguiagent/claude_client.py:18-164`` (system
-rules + per-action JSON examples + language matching + explain/summary fields), which
-is a good structure and worth keeping. Everything app-specific in that prompt was
-rewritten: it hardcodes phone packages (美团/淘宝/微信/支付宝, ``claude_client.py:160-163``)
-that are not on a CEA1.3 head unit, and its recovery advice is "look for back in grid
-A1-B3", which is wrong on a landscape dash.
+*结构*沿用 ``LightGUIAgent/lightguiagent/claude_client.py:18-164``（系统
+规则 + 每个动作的 JSON 示例 + 语言匹配 + explain/summary 字段）——这是好
+结构，值得保留。其中所有 App 相关内容全部重写：原文写死了手机端包名
+（美团/淘宝/微信/支付宝，``claude_client.py:160-163``），CEA1.3 车机上
+没有；其恢复建议是“在网格 A1-B3 附近找返回键”，在横屏中控上是错的。
 
-Reflection follows ``MobileAgent/Mobile-Agent-v2/MobileAgent/prompt.py:77-129``
-(before/after two-image A/B/C) but asks for a bare letter, because the original's
-caller does substring matching — ``run.py:401`` ``if 'A' in reflect`` — which any
-Latin letter or "ADB"/"Activity" in the model's free-form thought trips over.
+反思沿用 ``MobileAgent/Mobile-Agent-v2/MobileAgent/prompt.py:77-129``
+（动作前后两图 A/B/C），但要求只回一个大写字母——因为原文调用方做
+子串匹配（``run.py:401`` ``if 'A' in reflect``），模型自由思考里出现的
+任何拉丁字母或 "ADB"/"Activity" 都会误触发。
 """
 
 from __future__ import annotations
@@ -50,7 +49,7 @@ DECIDE_SCHEMA_TEXT = (
 
 
 def decide_user_text(context_text: str) -> list[dict]:
-    """Tree route — **no image**. This is the token-economy path."""
+    """tree 路由——**不发图**。这是 token 经济的路径。"""
     return [
         {"type": "text", "text": context_text},
         {
@@ -66,7 +65,7 @@ def decide_user_text(context_text: str) -> list[dict]:
 
 
 def decide_user_vlm(context_text: str, jpeg_b64: str, grid_spec: str) -> list[dict]:
-    """Fallback route — one annotated grid frame."""
+    """兜底路由——一张叠加了网格的截图。"""
     return [
         {"type": "text", "text": context_text},
         {
@@ -90,7 +89,8 @@ def build_decide_messages(context_text: str, jpeg_b64: str | None, grid_spec: st
     return msgs
 
 
-# ── reflection ───────────────────────────────────────────────────────────────────
+# ── 反思 ─────────────────────────────────────────────────────────────────────
+
 
 REFLECT_SYSTEM = (
     "你是操作效果审计器。给你同一台车机在**一个动作之前和之后**的两张截图，以及那个动作。"
@@ -116,14 +116,14 @@ def build_reflect_messages(action_desc: str, goal: str, before_b64: str, after_b
     ]
 
 
-# ── parsing ──────────────────────────────────────────────────────────────────────
+# ── 解析 ─────────────────────────────────────────────────────────────────────
 
 
 def strip_code_fence(text: str) -> str:
-    """Remove a ```json fence if the model wrapped its answer anyway.
+    """如果模型还是把答案包在 ```json 围栏里，剥掉它。
 
-    Follows ``claude_client.py:356-360``; ours also handles the fence appearing on
-    only one side, and trailing prose after the object.
+    跟随 ``claude_client.py:356-360``；我们额外处理围栏只出现在一边、
+    以及对象后面还有散文的情况。
     """
     t = (text or "").strip()
     if t.startswith("```"):
@@ -136,7 +136,7 @@ def strip_code_fence(text: str) -> str:
 
 
 def first_json_object(text: str) -> dict:
-    """Extract the first complete JSON object, tolerating surrounding prose."""
+    """提取第一个完整的 JSON 对象，容忍前后散文。"""
     t = strip_code_fence(text)
     try:
         obj = json.loads(t)
@@ -162,21 +162,21 @@ def first_json_object(text: str) -> dict:
 
 
 def parse_reflection(text: str) -> str:
-    """Strict A/B/C. Returns 'A', 'B', 'C', or 'UNKNOWN'.
+    """严格 A/B/C。返回 'A'、'B'、'C' 或 'UNKNOWN'。
 
-    Never substring-match (see module docstring on the v2 bug): the answer must be
-    the reply itself — a bare letter, a letter leading the reply ("A. ..."), or an
-    explicit "回答：A" / "ANSWER: A" label. Free-form reasoning that merely contains
-    an 'A' word ('ADB', 'App', 'Activity') stays UNKNOWN.
+    绝不做子串匹配（模块 docstring 里 v2 的 bug）：答案必须是回复本身——
+    一个裸字母、位于回复开头的字母（"A. ..."），或显式的
+    "回答：A" / "ANSWER: A" 标签。仅包含 'A' 单词（'ADB'、'App'、
+    'Activity'）的自由推理仍视为 UNKNOWN。
     """
     t = (text or "").strip().upper()
     if not t:
         return "UNKNOWN"
-    # Explicit "回答：C" / "ANSWER: C" — take the letter right after the label.
+    # 显式 "回答：C" / "ANSWER: C" —— 取标签后紧跟的字母。
     m = re.match(r"^(?:回答|ANSWER)\s*[:：]?\s*([ABC])(?![A-Z])", t)
     if m:
         return m.group(1)
-    # The very first word is the answer, optionally followed by punctuation ("A.").
+    # 第一个词就是答案，可跟标点（"A."）。
     first = re.split(r"\s+", t, maxsplit=1)[0].strip(".,;:!?。、，；：！？")
     return first if first in ("A", "B", "C") else "UNKNOWN"
 

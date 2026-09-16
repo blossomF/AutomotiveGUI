@@ -1,7 +1,7 @@
 # 哔哩哔哩车机版
 name: bilibili
 app:
-  package: tv.danmaku.bili     # verify on device
+  package: tv.danmaku.bili     # 需真机确认
 
 popups:
   - { detect: "青少年模式", button: "以后再说" }

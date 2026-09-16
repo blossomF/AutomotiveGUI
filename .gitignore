@@ -7,14 +7,14 @@ venv/
 .pytest_cache/
 .ruff_cache/
 
-# Runtime artifacts
+# 运行时产物
 artifacts/
 
-# Secrets
+# 密钥（只进环境变量）
 .env
 .env.*
 
-# IDE / OS
+# IDE / 操作系统
 .idea/
 .vscode/
 .DS_Store

@@ -1,20 +1,19 @@
-"""Executor: one call surface, two transports.
+"""执行器：一个调用面，两种传输。
 
-``exec_mode: local`` calls the plain functions in ``bridge/tools.py``.
-``exec_mode: mcp``   calls the *same* functions through a real MCP session against
-``mcp_server.py``, so the protocol, the generated schemas and the tool descriptions
-are all genuinely exercised — not decorative.
+``exec_mode: local`` 直接调用 ``bridge/tools.py`` 里的普通函数。
+``exec_mode: mcp``   通过一个真实的 MCP 会话调用*同样的*函数（对端
+``mcp_server.py``），协议、生成的 schema 和工具描述都被真实执行——
+不是摆设。
 
-Why this exists at all (技术方案评估.md §3 constraint 1): MCP is worth points on the
-Skills/MCP axis, but wiring a subprocess + stdio framing into a 16-day project is a
-way to lose a week to plumbing. Because the tool bodies are ordinary functions, the
-two modes cannot diverge, and if the MCP route misbehaves the flip is a config value
-rather than a refactor. The contest explicitly rewards having a degrade path.
+为什么要有这一层（技术方案评估.md §3 约束 1）：MCP 在 Skills/MCP 轴上
+值分，但把一个 16 天的项目接上 subprocess + stdio 帧处理，等于用一周
+时间做管道工程。因为工具本体就是普通函数，两种模式不可能漂移；MCP
+链路出问题时，切换只是一个配置值而不是重构。竞赛明确奖励有降级路径。
 
-The in-memory transport (``mcp.shared.memory``) speaks the actual JSON-RPC protocol
-over an object pair — no subprocess, no Windows-only pipe quirks on the Demo Day
-machine. An external client (Claude Code, another team's agent) connects over stdio
-to ``python -m autogui.mcp_server`` instead; both reach the identical tool list.
+内存传输（``mcp.shared.memory``）在对象对上讲真实的 JSON-RPC 协议——
+无 subprocess，也没有 Demo Day 机器上 Windows 专属的管道怪癖。外部
+客户端（Claude Code、其他团队的 agent）则通过 stdio 连接
+``python -m autogui.mcp_server``；两者到达完全相同的工具列表。
 """
 
 from __future__ import annotations
@@ -25,7 +24,7 @@ from typing import Any
 
 
 class LocalExecutor:
-    """Direct in-process calls. No MCP involved."""
+    """进程内直接调用。不经过 MCP。"""
 
     name = "local"
 
@@ -45,7 +44,7 @@ class LocalExecutor:
 
 
 class MCPExecutor:
-    """Synchronous facade over an async MCP client session pinned to a private loop."""
+    """异步 MCP 客户端会话之上的同步门面，固定在一个私有事件循环上。"""
 
     name = "mcp"
 
@@ -71,7 +70,7 @@ class MCPExecutor:
             self._loop.run_until_complete(self._enter(server))
             self._ready.set()
             self._loop.run_forever()
-        except BaseException as e:  # surfaced to the constructor
+        except BaseException as e:  # 暴露给构造函数
             self._failure = e
             self._ready.set()
         finally:
@@ -80,10 +79,10 @@ class MCPExecutor:
     async def _enter(self, server) -> None:
         from mcp.shared.memory import create_connected_server_and_client_session
 
-        # ``create_connected_server_and_client_session`` wants the low-level Server;
-        # FastMCP has exposed it under different attribute names across versions, so
-        # try the known ones before falling back to the object itself. A wrong guess
-        # here is cheap: make_executor catches it and degrades to local.
+        # ``create_connected_server_and_client_session`` 要的是底层 Server；
+        # FastMCP 在不同版本里用不同属性名暴露它，所以先试已知的几个，
+        # 最后回退到对象本身。这里猜错的代价很小：make_executor 会捕获
+        # 并降级到 local。
         target = server
         for attr in ("_mcp_server", "server", "_server"):
             inner = getattr(server, attr, None)
@@ -121,7 +120,7 @@ def _to_text(value: Any) -> str:
 
 
 def _result_to_text(result: Any) -> str:
-    """Flatten an MCP ``CallToolResult`` to text; a tool error must not read as success."""
+    """把 MCP ``CallToolResult`` 摊平成文本；工具错误不能被读成成功。"""
     parts = []
     for block in getattr(result, "content", []) or []:
         text = getattr(block, "text", None)
@@ -133,12 +132,11 @@ def _result_to_text(result: Any) -> str:
 
 
 def make_executor(mode: str, *, server=None):
-    """Build the executor for ``exec_mode``, degrading to local if MCP will not come up.
+    """按 ``exec_mode`` 构建执行器；MCP 起不来时降级到 local。
 
-    Returning a working local executor here is deliberate: an MCP handshake failure
-    should cost us a log line, not the run. ``bridge.tools`` is already bound by
-    ``main.py`` in either mode — binding is a property of the device, not of the
-    transport.
+    这里刻意返回可用的 local 执行器：MCP 握手失败只应让我们损失一行
+    日志，而不是整个运行。两种模式下 ``bridge.tools`` 都已被
+    ``main.py`` 绑定——绑定是设备的属性，不是传输的属性。
     """
     from autogui.bridge import tools
 

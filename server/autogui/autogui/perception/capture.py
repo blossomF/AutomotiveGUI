@@ -1,18 +1,16 @@
-"""One observation round: grab the frame and the UI tree concurrently.
+"""一次观测轮次：并行抓取帧和 UI 树。
 
-Two things happen here that the reference projects do worse:
+这里有两件事是参照项目做得更差的：
 
-  * **Parallel capture.** ``screencap`` and ``uiautomator dump`` are independent
-    device-side operations, and ``dump`` is the slow one (seconds on these head
-    units). Sequencing them — as ``LightGUIAgent/lightguiagent/agent.py:117-135`` does
-    for the frame alone — makes per-step latency the *sum*. Running them together
-    makes it the max. That difference is on the critical path of the 10-point
-    performance score.
-  * **Screen fingerprint.** A digest of visible text plus a heavily downsampled
-    image hash gives a *programmatic* no-progress detector. LightGUIAgent's stuck
-    handling is only a sentence appended to the prompt
-    (``claude_client.py:322-338``), so nothing actually stops a model that decides to
-    tap the same cell 20 times. See 技术方案评估.md §2 C-9.
+  * **并行抓取。** ``screencap`` 和 ``uiautomator dump`` 是相互独立的设备端操作，
+    而 ``dump`` 是慢的那一个（在这些车机上要好几秒）。按顺序执行——就像
+    ``LightGUIAgent/lightguiagent/agent.py:117-135`` 对截图所做的那样——
+    会让每步延迟变成两者的*和*。并行执行则让延迟变成两者的最大值。
+    这个差距正处在 10 分性能得分的关键路径上。
+  * **屏幕指纹。** 可见文本摘要 + 大幅降采样的图像哈希，构成*程序化的*
+    无进展检测器。LightGUIAgent 的卡死处理只是在提示词里追加一句话
+    （``claude_client.py:322-338``），所以没有任何东西能真正拦住一个
+    决定连续点同一个格子 20 次的模型。见 技术方案评估.md §2 C-9。
 """
 
 from __future__ import annotations
@@ -46,24 +44,24 @@ class Observation:
 
     @property
     def tree_usable(self) -> bool:
-        """Enough labelled, addressable nodes to try the path-B route.
+        """可寻址且有标签的节点足够多，可以走 B 路径。
 
-        A dump can be large yet useless — an all-FrameLayout tree with no text
-        yields zero candidates, which is the signal to fall back to the grid.
+        dump 可以很大却没用——一个全是 FrameLayout、没有任何文本的树
+        会产生零个候选，这就是回退到网格的信号。
         """
         return len(self.candidates) >= 3
 
 
 def _downsample_hash(png: bytes) -> str:
-    """Coarse pixel digest so purely-visual changes register.
+    """粗粒度像素摘要，让纯视觉变化也能被登记。
 
-    16x16 grayscale is deliberately lossy: we want "did the screen change at all",
-    not "did it change exactly". Compression noise and clock ticks change a few
-    buckets, which a strict full-image hash would over-react to.
+    16x16 灰度是刻意有损的：我们要的是“屏幕到底有没有变化”，
+    而不是“是否精确变化”。压缩噪声和时钟跳动会让个别桶变化，
+    严格的整图哈希对此会过度反应。
     """
     try:
         img = Image.open(io.BytesIO(png)).convert("L").resize((16, 16), Image.BILINEAR)
-    except Exception:  # pragma: no cover - corrupt capture
+    except Exception:  # pragma: no cover - 损坏的截图
         return "img?"
     return hashlib.md5(img.tobytes()).hexdigest()[:8]
 
@@ -80,7 +78,7 @@ def observe(
     candidate_limit: int = 40,
     last_size: tuple[int, int] | None = None,
 ) -> tuple[Observation, Grid]:
-    """Capture frame + tree in parallel and build the grid for this screen."""
+    """并行抓取帧 + 树，并为当前屏幕构建网格。"""
     import time
 
     timings: dict[str, float] = {}
@@ -121,7 +119,7 @@ def observe(
 
 
 def _resolve_size(png: bytes, fallback: tuple[int, int]) -> tuple[int, int]:
-    """Trust the decoded frame over ``wm size`` — they disagree on multi-display units."""
+    """信任解码出的帧而不是 ``wm size``——多屏设备上两者会不一致。"""
     from autogui.bridge.adb import png_size
 
     return png_size(png) or fallback

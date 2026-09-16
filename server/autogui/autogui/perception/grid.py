@@ -1,18 +1,17 @@
-"""Landscape grid overlay and label<->pixel mapping (the path-A fallback surface).
+"""横屏网格叠加与 标签<->像素 映射（A 路径的兜底面）。
 
-Reuses the *idea* of ``LightGUIAgent/lightguiagent/grid_converter.py`` (single-letter
-columns + 1-based rows, so the model answers "E5" instead of a pixel pair, which
-measurably reduces coordinate hallucination) but is implemented fresh for two
-reasons documented in 技术方案评估.md §2 C-11:
+借鉴 ``LightGUIAgent/lightguiagent/grid_converter.py`` 的*思路*（单字母
+列 + 从 1 开始的行，让模型回答 "E5" 而不是一对像素坐标，这被证实能
+减少坐标幻觉），但重新实现，原因有二，记录于 技术方案评估.md §2 C-11：
 
-  * that project's auto-density clamps rows to ``max(15, ...)``
-    (``settings.py:159-171``), tuned for a portrait phone; on a 1920x1080 landscape
-    head unit it yields ~128x72px cells. We take cols/rows from config verbatim.
-  * its ``GridStyle`` schema forbids ``rows < 10``, so a landscape grid is barely
-    expressible at all.
+  * 那个项目的自动密度把行数钳制到 ``max(15, ...)``
+    （``settings.py:159-171``），是按竖屏手机调优的；在 1920x1080
+    横屏车机上会得到 ~128x72px 的格子。我们原样从配置取 cols/rows。
+  * 它的 ``GridStyle`` schema 禁止 ``rows < 10``，导致横屏网格几乎
+    无法表达。
 
-A 20x10 landscape grid gives ~96x108px cells at 1920x1080 — roughly one touch target
-per cell, which is what makes the label unambiguous to a VLM.
+20x10 的横屏网格在 1920x1080 下得到 ~96x108px 的格子——大约每格
+一个触摸目标，这正是标签对 VLM 无歧义的原因。
 """
 
 from __future__ import annotations
@@ -40,10 +39,10 @@ class Grid:
         self.cell_w = self.width / self.cols
         self.cell_h = self.height / self.rows
 
-    # ── conversion ───────────────────────────────────────────────────────────
+    # ── 转换 ─────────────────────────────────────────────────────────────────
 
     def to_pixel(self, label: str) -> tuple[int, int]:
-        """``"E5"`` -> centre of that cell. Raises ``ValueError`` on malformed input."""
+        """``"E5"`` -> 该格子中心。输入非法时抛 ``ValueError``。"""
         s = (label or "").strip().upper()
         if len(s) < 2 or not s[0].isalpha() or not s[1:].isdigit():
             raise ValueError(f"invalid grid label {label!r}, expected like 'E5'")
@@ -67,13 +66,13 @@ class Grid:
         except ValueError:
             return False
 
-    # ── rendering ────────────────────────────────────────────────────────────
+    # ── 渲染 ─────────────────────────────────────────────────────────────────
 
     def annotate(self, png_bytes: bytes, style=None) -> Image.Image:
-        """Draw the grid and cell labels onto a screenshot, return the PIL image."""
+        """在截图上画网格和格子标签，返回 PIL 图像。"""
         img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
         if img.size != (self.width, self.height):
-            # Keep geometry honest: a resized capture would desync labels from pixels.
+            # 保持几何一致性：缩放过的截图会让标签与像素错位。
             self.width, self.height = img.size
             self.cell_w = self.width / self.cols
             self.cell_h = self.height / self.rows
@@ -106,7 +105,7 @@ class Grid:
         return img
 
     def mark_action(self, img: Image.Image, x: int, y: int, radius: int = 34) -> Image.Image:
-        """Crosshair the point we tapped — for the before/after reflection image."""
+        """给点过的点画十字线——用于反思用的前后对比图。"""
         marked = img.convert("RGB").copy()
         draw = ImageDraw.Draw(marked, "RGBA")
         draw.ellipse([x - radius, y - radius, x + radius, y + radius],
@@ -120,11 +119,11 @@ _font_cache: dict[int, object] = {}
 
 
 def _draw_centred(draw: ImageDraw.ImageDraw, xy: tuple[int, int], text: str, font, fill) -> None:
-    """Draw text centred on ``xy``.
+    """以 ``xy`` 为中心绘制文字。
 
-    ``anchor="mm"`` is only supported by TrueType fonts, and ``_load_font`` falls back
-    to Pillow's default bitmap font when none is installed — which is plausible on a
-    bare Windows test VM. Computing the offset from the measured size works either way.
+    ``anchor="mm"`` 只有 TrueType 字体支持，而 ``_load_font`` 在没有安装
+    字体时会回退到 Pillow 默认位图字体——在光秃秃的 Windows 测试机上
+    是可能的。用实测尺寸计算偏移，两种方式都有效。
     """
     x, y = xy
     try:
@@ -154,14 +153,14 @@ def _load_font(size: int):
 def label_height(font) -> int:
     try:
         return int(font.getbbox("Ag")[3])
-    except Exception:  # pragma: no cover - default font lacks getbbox in some Pillow
+    except Exception:  # pragma: no cover - 部分 Pillow 的默认字体没有 getbbox
         return 16
 
 
 def encode_jpeg(img: Image.Image, quality: int = 85, max_side: int = 1568) -> bytes:
-    """Downscale then JPEG-encode. ``max_side`` replaces LightGUIAgent's hardcoded
-    ``target_size: 1568 # Claude optimal`` (config.py:91) with a tunable — the
-    optimum for GLM-V is an open question for the 9/19 A/B test."""
+    """先降采样再 JPEG 编码。``max_side`` 取代 LightGUIAgent 写死的
+    ``target_size: 1568 # Claude optimal``（config.py:91），改为可配置——
+    GLM-V 的最优值是 9/19 A/B 测试要回答的开放问题。"""
     w, h = img.size
     if max(w, h) > max_side:
         scale = max_side / max(w, h)

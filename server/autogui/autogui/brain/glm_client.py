@@ -1,20 +1,20 @@
-"""GLM 5.3 client over the OpenAI-compatible protocol.
+"""GLM 5.3 客户端，走 OpenAI 兼容协议。
 
-Replaces ``LightGUIAgent/lightguiagent/claude_client.py``, which is bound to the
-``anthropic`` SDK (``from anthropic import Anthropic`` at :11, ``client.messages.create``
-at :270). The swap is not just a constructor change — three concrete differences:
+取代 ``LightGUIAgent/lightguiagent/claude_client.py``——那套代码绑定
+``anthropic`` SDK（:11 处 ``from anthropic import Anthropic``，:270 处
+``client.messages.create``）。替换不只是改构造函数，有三个具体差异：
 
-  * image payload: Anthropic's ``{type:"image", source:{media_type, data}}`` becomes
-    OpenAI's ``{type:"image_url", image_url:{url:"data:image/...;base64,..."}}``.
-    ``prompts.py`` already emits the OpenAI shape.
-  * usage fields: ``usage.input_tokens``/``output_tokens`` -> ``prompt_tokens``/
-    ``completion_tokens``.
-  * pricing: ``config.py:162-165`` hardcodes $5/$25 per million and reports USD.
-    GLM runs on a committee-issued quota, so a dollar figure is meaningless here —
-    we report token counts and call counts only.
+  * 图像载荷：Anthropic 的 ``{type:"image", source:{media_type, data}}`` 变为
+    OpenAI 的 ``{type:"image_url", image_url:{url:"data:image/...;base64,..."}}``。
+    ``prompts.py`` 已经按 OpenAI 形态输出。
+  * 用量字段：``usage.input_tokens``/``output_tokens`` -> ``prompt_tokens``/
+    ``completion_tokens``。
+  * 计费：``config.py:162-165`` 写死 $5/$25 每百万 token 并报美元。
+    GLM 走组委会发放的配额，美元数字在这里没有意义——我们只报
+    token 数和调用次数。
 
-We use ``openai`` directly rather than ``langchain-openai``: one fewer runtime
-dependency, and we need no chain composition (LangGraph owns the control flow).
+直接用 ``openai`` 而不是 ``langchain-openai``：少一个运行时依赖，
+而且不需要链式组合（控制流由 LangGraph 负责）。
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from autogui.config import GLMConfig
 
 
 class GLMError(RuntimeError):
-    """The model could not be reached or never produced a usable answer."""
+    """模型无法连通，或始终没有产出可用回答。"""
 
 
 @dataclass
@@ -63,7 +63,7 @@ class Usage:
 
 
 class GLMClient:
-    """Thin, JSON-strict chat wrapper with usage accounting."""
+    """薄的、JSON 严格的 chat 封装，带用量统计。"""
 
     def __init__(self, cfg: GLMConfig, client=None):
         self.cfg = cfg
@@ -77,15 +77,14 @@ class GLMClient:
 
             self._client = OpenAI(api_key=cfg.api_key, base_url=cfg.base_url, timeout=cfg.timeout)
 
-    # ── raw chat ─────────────────────────────────────────────────────────────
+    # ── 原始 chat ────────────────────────────────────────────────────────────
 
     def chat(self, messages: list[dict]) -> tuple[str, Usage]:
-        """One chat completion, retried on transport errors. Returns (text, usage).
+        """一次 chat 补全，传输错误时重试。返回 (text, usage)。
 
-        ``usage`` covers **this** logical call including its retries, and is mirrored
-        onto ``self.last_call``. Returning the cumulative ``self.usage`` here instead
-        would make the per-step numbers in the decision log grow every step and read
-        as nonsense to whoever is debugging.
+        ``usage`` 覆盖**这一次**逻辑调用（含其重试），并镜像到
+        ``self.last_call``。如果这里返回累计的 ``self.usage``，决策日志里
+        的每步数字会逐步递增，对排查问题的人是误导。
         """
         call = Usage()
         last: Exception | None = None
@@ -110,7 +109,7 @@ class GLMClient:
                 if not content:
                     raise GLMError("empty completion")
                 return content, call
-            except Exception as e:  # transport / auth / schema drift
+            except Exception as e:  # 传输 / 鉴权 / schema 漂移
                 last = e
                 if attempt < self.cfg.max_retries:
                     time.sleep(1.0 + attempt)
@@ -118,11 +117,10 @@ class GLMClient:
         raise GLMError(f"GLM call failed after {self.cfg.max_retries + 1} attempts: {last}")
 
     def chat_json(self, messages: list[dict]) -> dict:
-        """Chat then parse as JSON; on a parse failure, re-ask once with the complaint.
+        """chat 后按 JSON 解析；解析失败时带着抱怨重问一次。
 
-        The extra round trip is cheaper than a wasted step downstream, and it keeps
-        malformed-output handling out of the graph. ``last_call`` accumulates both
-        attempts so the decision log's per-step token figure is the true cost.
+        多一次往返比下游浪费一步便宜，也让畸形输出处理留在图之外。
+        ``last_call`` 累加两次尝试，所以决策日志的每步 token 数是真实成本。
         """
         text, first = self.chat(messages)
         try:
@@ -144,7 +142,7 @@ class GLMClient:
             self.last_call = merged
             return prompts.first_json_object(text2)
 
-    # ── high-level: decide ───────────────────────────────────────────────────
+    # ── 高层：decide ─────────────────────────────────────────────────────────
 
     def decide(
         self,
@@ -153,11 +151,11 @@ class GLMClient:
         jpeg_b64: str | None = None,
         grid_spec: str = "20x10",
     ) -> tuple[dict, Usage]:
-        """Ask for the next action. Returns a normalised action dict.
+        """请求下一个动作。返回归一化后的动作 dict。
 
-        Raises ``ValueError`` if even after the JSON retry the action is unusable —
-        the caller (graph) treats that as a decision failure and degrades route
-        tree->vlm or counts a no-progress step, never crashes the run.
+        即使 JSON 重试后动作仍不可用时抛 ``ValueError``——调用方（图）
+        将其视为决策失败，降级路由 tree->vlm 或计一次无进展步，
+        绝不崩溃。
         """
         messages = prompts.build_decide_messages(context_text, jpeg_b64, grid_spec)
         raw = self.chat_json(messages)
@@ -168,16 +166,16 @@ class GLMClient:
         action["_entities"] = _clean_entities(entities)
         return action, self.last_call
 
-    # ── high-level: reflect ──────────────────────────────────────────────────
+    # ── 高层：reflect ────────────────────────────────────────────────────────
 
     def reflect(self, action_desc: str, goal: str, before_b64: str, after_b64: str) -> str:
-        """A / B / C / UNKNOWN. See ``prompts.parse_reflection`` for why UNKNOWN exists."""
+        """A / B / C / UNKNOWN。UNKNOWN 的存在原因见 ``prompts.parse_reflection``。"""
         text, _ = self.chat(prompts.build_reflect_messages(action_desc, goal, before_b64, after_b64))
         return prompts.parse_reflection(text)
 
 
 def _clean_entities(raw: dict) -> dict:
-    """Keep entities small and stringly — they live in every future prompt."""
+    """保持实体小而字符串化——它们会出现在之后每一轮提示词里。"""
     out: dict[str, str] = {}
     try:
         items = json.loads(raw) if isinstance(raw, str) else raw

@@ -1,4 +1,4 @@
-"""Harness: the three hard limits and the decision-chain log."""
+"""Harness：三个硬性上限 + 决策链日志。"""
 
 import json
 
@@ -10,7 +10,7 @@ from autogui.core.decision_log import DecisionLog
 LIMITS = guard.GuardLimits(max_steps=20, no_progress_limit=3, wall_clock_limit=180)
 
 
-# ── guards (LightGUIAgent has none of these; see core/guard.py docstring) ─────────
+# ── 守卫（LightGUIAgent 一个都没有；见 core/guard.py docstring） ────────────────
 
 
 def test_running_under_all_limits_continues():
@@ -23,7 +23,7 @@ def test_step_ceiling():
 
 
 def test_no_progress_ceiling_fires_before_step_ceiling():
-    """Spinning in place must stop even at step 4 of 20."""
+    """原地打转必须在第 4/20 步就停下来。"""
     v = guard.check(step=4, no_progress=3, elapsed=12, limits=LIMITS)
     assert v.stop and v.stop_reason == "no_progress"
 
@@ -34,7 +34,7 @@ def test_wall_clock_is_the_last_resort():
 
 
 def test_timeout_reported_ahead_of_max_steps():
-    """Most actionable cause first: burning the clock explains why we ran out of steps."""
+    """先报告最具可操作性的原因：烧完时钟才解释得了为什么步数耗尽。"""
     v = guard.check(step=25, no_progress=5, elapsed=999, limits=LIMITS)
     assert v.stop_reason == "timeout"
 
@@ -44,7 +44,7 @@ def test_no_progress_exactly_at_limit():
     assert guard.check(1, 3, 5, LIMITS).stop is True
 
 
-# ── decision log (contest rule 4.7) ──────────────────────────────────────────────
+# ── 决策日志（竞赛规则 4.7） ────────────────────────────────────────────────────
 
 
 @pytest.fixture
@@ -65,10 +65,10 @@ def test_log_writes_one_json_object_per_line(log, tmp_path):
 
 
 def test_log_flushes_per_event_so_a_crash_keeps_the_chain(log):
-    """The file must be readable even if the process dies mid-demo."""
+    """进程在演示中途死掉时，文件也必须可读。"""
     log.step_begin(1)
     log.phase("act", "tap(960,86)")
-    text = log.path.read_text(encoding="utf-8")   # no close() called yet
+    text = log.path.read_text(encoding="utf-8")   # 尚未调用 close()
     assert text.strip() and json.loads(text.strip().splitlines()[-1])["phase"] == "act"
 
 
@@ -79,7 +79,7 @@ def test_summary_reports_vlm_calls_per_step(log):
         route_counts={"tree": 4, "vlm": 1, "skill": 1},
         vlm_reflections=1, elapsed=42.0,
     )
-    assert "0.83" in out          # 5 calls / 6 steps — the ≤1 target, shown
+    assert "0.83" in out          # 5 次调用 / 6 步——展示 ≤1 目标
     assert "9,400" in out
     assert "tree=4" in out and "vlm=1" in out
     assert "Mobile-Agent-v2" in out

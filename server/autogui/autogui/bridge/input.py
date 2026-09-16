@@ -1,17 +1,16 @@
-"""Unicode text input with an IME-safe degradation chain.
+"""带 IME 安全降级链的 Unicode 文本输入。
 
-Ported from ``android-agent/gitd/bots/common/adb.py:262-283`` (``type_unicode``) and
-``LightGUIAgent/lightguiagent/agent.py:295-333`` (``_setup_yadb``), with the P0 fix
-described in 技术方案评估.md §2 A-2.
+移植自 ``android-agent/gitd/bots/common/adb.py:262-283``（``type_unicode``）
+和 ``LightGUIAgent/lightguiagent/agent.py:295-333``（``_setup_yadb``），
+并包含 技术方案评估.md §2 A-2 所述的 P0 修复。
 
-The original enables ADBKeyboard, broadcasts the text, then restores the IME to a
-*hardcoded Gboard* component. A CEA1.3 head unit has no Gboard, so that line points
-``default_input_method`` at a non-existent IME: every subsequent keystroke silently
-does nothing, and the agent just sees an unchanged screen and starts looping. Here we
-read the current IME before switching and restore that exact value.
+原文先启用 ADBKeyboard、广播文本，然后把 IME 还原到*写死的 Gboard*
+组件。CEA1.3 车机上没有 Gboard，于是那行代码把 ``default_input_method``
+指向一个不存在的 IME：之后每次击键都静默无效，agent 只会看到不变的
+屏幕并开始打转。这里在切换前先读当前 IME，并精确还原那个值。
 
-Degradation order (probed once at startup, then cached):
-    yadb  ->  ADBKeyboard  ->  input text (ASCII)  ->  pinyin-ish ASCII
+降级顺序（启动时探测一次，然后缓存）：
+    yadb  ->  ADBKeyboard  ->  input text (ASCII)  ->  拼音味 ASCII
 """
 
 from __future__ import annotations
@@ -25,23 +24,23 @@ ADBKEYBOARD_ID = "com.android.adbkeyboard/.AdbIME"
 YADB_CLASSPATH = "/data/local/tmp/yadb"
 YADB_MAIN = "com.ysbing.yadb.Main"
 
-# Order to probe; first that works becomes the active strategy.
+# 探测顺序；第一个可用的成为激活策略。
 STRATEGIES = ("yadb", "adbkeyboard", "ascii")
 
 
 class InputResult:
     def __init__(self, strategy: str, typed: str, note: str = ""):
         self.strategy = strategy
-        self.typed = typed        # what was actually sent (may differ from requested)
+        self.typed = typed        # 实际发出去的内容（可能与请求不同）
         self.note = note
         self.fallback_needed = strategy == "ascii" and typed != "" and not typed.isascii()
 
-    def __repr__(self) -> str:  # pragma: no cover - debug aid
+    def __repr__(self) -> str:  # pragma: no cover - 调试辅助
         return f"InputResult(strategy={self.strategy!r}, typed={self.typed!r}, note={self.note!r})"
 
 
 class TextInput:
-    """Chinese/emoji-capable text entry for one head unit."""
+    """单台车机的中文/表情文本输入。"""
 
     def __init__(self, device: Device, order: tuple[str, ...] = STRATEGIES, verbose: bool = False):
         self.device = device
@@ -50,10 +49,10 @@ class TextInput:
         self.strategy: str | None = None
         self._probed = False
 
-    # ── probing ──────────────────────────────────────────────────────────────
+    # ── 探测 ─────────────────────────────────────────────────────────────────
 
     def probe(self) -> str:
-        """Detect the best available strategy once and remember it."""
+        """探测一次当前最优可用策略，并记住。"""
         if self._probed:
             return self.strategy or "ascii"
         for name in self.order:
@@ -74,16 +73,16 @@ class TextInput:
         return self.strategy
 
     def _has_yadb(self) -> bool:
-        """yadb is a single jar pushed to /data/local/tmp; no APK install needed."""
+        """yadb 是推送到 /data/local/tmp 的一个 jar；无需安装 APK。"""
         r = self.device.adb_soft("shell", "ls", YADB_CLASSPATH, timeout=5)
         return r.ok
 
     def _has_adbkeyboard(self) -> bool:
-        """ADBKeyboard *is* an APK — report honestly if it cannot be present."""
+        """ADBKeyboard *本身*是 APK——不能存在时如实上报。"""
         out = self.device.adb_soft("shell", "ime", "list", "-s", timeout=5).stdout
         return "com.android.adbkeyboard" in out
 
-    # ── the IME-safe part ────────────────────────────────────────────────────
+    # ── IME 安全部分 ─────────────────────────────────────────────────────────
 
     def _original_ime(self) -> str:
         return self.device.adb_soft(
@@ -91,7 +90,7 @@ class TextInput:
         ).stdout.strip()
 
     def type(self, text: str, clear_first: bool = False, delay: float = 0.3) -> InputResult:
-        """Type ``text`` into the focused field."""
+        """把 ``text`` 输入到当前聚焦的输入框。"""
         if text is None:
             return InputResult("none", "", "nothing to type")
         self.probe()
@@ -108,10 +107,10 @@ class TextInput:
             if self.strategy == "adbkeyboard":
                 return self._via_adbkeyboard(text, delay)
         except ADBError as e:
-            # Hard adb failure (device dropped) — surface it, do not mask it as
-            # "typing degraded".
+            # 硬性的 adb 失败（设备掉线）——直接暴露，不要伪装成
+            # “输入降级”。
             raise
-        except Exception as e:  # a strategy blowing up mid-flight degrades to ascii
+        except Exception as e:  # 某个策略中途炸掉则降级到 ascii
             if self.verbose:
                 print(f"  [input] {self.strategy} failed ({e}), degrading to ascii")
         return self._via_ascii(text, delay)
@@ -131,9 +130,9 @@ class TextInput:
         return InputResult("yadb", processed)
 
     def _via_adbkeyboard(self, text: str, delay: float) -> InputResult:
-        """Switch in, broadcast, switch back — restoring the *device's own* IME."""
+        """切进来、广播、切回去——还原的是*设备自己的* IME。"""
         before = self._original_ime()
-        # "null" is what settings get returns when no IME is set explicitly.
+        # 未显式设置 IME 时 settings get 返回 "null"。
         restore_to = before if before and before != "null" else None
         try:
             self.device.adb_soft("shell", "ime", "enable", ADBKEYBOARD_ID, timeout=5)
@@ -144,8 +143,8 @@ class TextInput:
             )
             time.sleep(delay)
         finally:
-            # Runs even if the broadcast raised — leaving ADBKeyboard selected would
-            # change the on-screen keyboard the VLM sees on the next step.
+            # 即使广播抛异常也要执行——把 ADBKeyboard 留在选中状态
+            # 会改变 VLM 下一步看到的屏幕键盘。
             if restore_to:
                 self.device.adb_soft("shell", "ime", "set", restore_to, timeout=5)
             self.device.adb_soft("shell", "ime", "disable", ADBKEYBOARD_ID, timeout=5)
@@ -160,10 +159,10 @@ class TextInput:
         return InputResult("ascii", folded, f"degraded from {text!r} to {folded!r}")
 
     def clear_field(self, max_chars: int = 60) -> None:
-        """Select-all then delete.
+        """全选后删除。
 
-        ``keycombination`` needs a newer Android than some head units run, so fall
-        back to move-end + repeated DEL (as ``android-agent`` does at adb.py:784-786).
+        ``keycombination`` 需要比部分车机更新版本的 Android，所以回退
+        到 move-end + 连续 DEL（同 ``android-agent`` adb.py:784-786 的做法）。
         """
         r = self.device.adb_soft("shell", "input", "keycombination", "113", "29", timeout=5)  # Ctrl+A
         if r.ok:
@@ -176,11 +175,11 @@ class TextInput:
 
 
 def to_pinyin_fallback(text: str) -> str:
-    """Best-effort ASCII stand-in for CJK so a search box is not left empty.
+    """CJK 的尽力 ASCII 替身，避免搜索框被留空。
 
-    Deliberately dumb — we do not ship a pinyin table. The point is a *hint* the
-    agent can follow: type the ASCII part, then tap the IME suggestion strip.
-    Returns "" when there is no ASCII at all in the string.
+    刻意做得简单——我们不带拼音表。重点是给 agent 一个可以跟随的
+    *提示*：先输入 ASCII 部分，再点 IME 候选条。字符串完全没有
+    ASCII 时返回 ""。
     """
     ascii_part = re.sub(r"[^A-Za-z0-9]", "", text)
     return ascii_part

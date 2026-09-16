@@ -1,4 +1,4 @@
-"""Makes the ``autogui`` package importable when running pytest from the project root."""
+"""让 pytest 从项目根目录运行时可以导入 ``autogui`` 包。"""
 
 import sys
 from pathlib import Path

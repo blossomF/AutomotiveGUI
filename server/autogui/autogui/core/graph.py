@@ -1,6 +1,6 @@
-"""The agent harness: a LangGraph state machine.
+"""Agent harness：一个 LangGraph 状态机。
 
-Graph shape::
+图结构::
 
     START → perceive → guard ─┬(limit hit)──────────────────────────→ finish → END
                               └→ route ─┬(skill)→ run_skill ─┐
@@ -8,21 +8,19 @@ Graph shape::
                                         └(vlm) ─→ decide    ─┘                ├(terminal) → finish
                                                                               └(stuck)───→ recovery → guard
 
-Three things this file is meant to demonstrate for the Harness score, and where the
-reference implementations fall short:
+本文件为 Harness 得分要展示的三件事，以及参照实现的不足：
 
-* **Bounded loop.** ``core/guard.py`` stops on steps, no-progress *and* wall clock.
-  LightGUIAgent only bounds steps (``agent.py:389``) and trusts the model.
-* **Real degrade, not a fallback that never runs.** route picks skill → tree → vlm,
-  and tree can hand a turn to vlm mid-decision (an out-of-range ``node_ref``). Both
-  transitions are logged, which is what makes a "path C" claim verifiable rather than
-  asserted — see 技术方案评估.md §5.2.
-* **Reflection priced correctly.** ``Mobile-Agent-v2/run.py:388-424`` spends a model
-  call on reflection every step, plus planning and memory calls, for ~4 per step.
-  Here a changed screen signature settles most steps for free, and the two-image
-  reflection only runs when the screen looks unchanged.
+* **有界循环。** ``core/guard.py`` 按步数、无进展*和*墙钟时间三重停止。
+  LightGUIAgent 只限制步数（``agent.py:389``），其余全靠信任模型。
+* **真实的降级，而不是永远跑不到的 fallback。** route 按 skill → tree → vlm
+  选择，且 tree 可以在决策中途把这一轮交给 vlm（越界的 ``node_ref``）。
+  两种转换都被记入日志，这让“路径 C”的声明可验证而不是口头断言——
+  见 技术方案评估.md §5.2。
+* **反思的成本被正确定价。** ``Mobile-Agent-v2/run.py:388-424`` 每步都花
+  一次模型调用做反思，加上规划和记忆调用，约 4 次/步。这里屏幕指纹
+  变化即可免费判定大多数步骤，双图反思只在屏幕看起来没变化时才运行。
 
-State stays narrow (``core/state.py``); observations and context live on the Runner.
+状态保持窄（``core/state.py``）；观测和上下文放在 Runner 上。
 """
 
 from __future__ import annotations
@@ -49,7 +47,7 @@ from autogui.skills.router import match_keywords
 
 @dataclass
 class Runner:
-    """Everything the nodes share that is not routing state."""
+    """节点共享的、不属于路由状态的一切。"""
 
     cfg: Config
     task: str
@@ -60,8 +58,8 @@ class Runner:
     obs: Observation | None = None
     prev_obs: Observation | None = None
     grid: grid_mod.Grid | None = None
-    # init=False + a default: a bare `field(init=False)` has no default, and a
-    # non-default field may not follow defaulted ones in a dataclass.
+    # init=False + 默认值：裸的 `field(init=False)` 没有默认值，而没有默认值
+    # 的字段不能排在有默认值的字段之后（dataclass 规则）。
     context: Context = field(init=False, default=None)  # type: ignore[assignment]
     book: SkillBook | None = None
 
@@ -81,7 +79,7 @@ class Runner:
             candidate_limit=self.cfg.agent.tree_candidate_limit,
         )
 
-    # ── setup ────────────────────────────────────────────────────────────────
+    # ── 初始化 ───────────────────────────────────────────────────────────────
 
     def prepare(self) -> None:
         self.started = time.time()
@@ -102,7 +100,7 @@ class Runner:
     def elapsed(self) -> float:
         return time.time() - self.started
 
-    # ── nodes ────────────────────────────────────────────────────────────────
+    # ── 节点 ─────────────────────────────────────────────────────────────────
 
     def perceive(self, state: AgentState) -> dict:
         step = state.get("step", 0) + 1
@@ -154,10 +152,10 @@ class Runner:
         return {"done": False}
 
     def route(self, state: AgentState) -> dict:
-        """skill → tree → vlm, in that preference order.
+        """按 skill → tree → vlm 的优先级选择。
 
-        Declared path A means we skip tree entirely rather than only preferring it,
-        so the declared capability and the exercised code path cannot disagree.
+        声明路径 A 意味着完全跳过 tree，而不只是“不优先”，
+        这样声明的能力与实际走的代码路径不会矛盾。
         """
         path = self.cfg.declared_path
         if self.book and path in ("B", "C"):
@@ -203,8 +201,8 @@ class Runner:
             return {"action": {"type": "COMPLETE", "explain": f"技能 {key} 执行完成", "result": key},
                     "last_action": {"type": "SKILL"}}
         except SkillMiss as e:
-            # The whole point: a brittle recipe costs one step, then the generic
-            # route takes over. Recorded in the log as an observed degrade.
+            # 关键设计：一个脆弱的配方只花掉一步，然后通用路由接管。
+            # 作为一次“被观测到的降级”记入日志。
             self.skill_failures.add(key)
             self.log.phase("skill", f"配方未命中，降级到通用路径：{e}")
             self.context.record(state.get("step", 0), "skill", f"SKILL {key}", "hint 解析失败", failed=True,
@@ -217,9 +215,9 @@ class Runner:
 
     def decide(self, state: AgentState) -> dict:
         route = state.get("route") or "tree"
-        # A tree→vlm re-decision is expected exactly once per step. Without this
-        # bound, a model that keeps failing validation on the vlm route would
-        # ping-pong decide→decide until the wall-clock guard ended the run.
+        # tree→vlm 的重新决策每步最多发生一次。如果没有这个上限，一个在 vlm
+        # 路由上反复校验失败的模型会在 decide→decide 之间乒乓，直到墙钟
+        # guard 结束运行。
         self.decide_attempts += 1
         if self.decide_attempts > 2:
             self.log.phase("decide", "本步已重试 2 次仍无可用决策，放弃本步")
@@ -267,7 +265,7 @@ class Runner:
         )
 
         if route == "tree" and "node_ref" in action and tree_mod.by_ref(self.obs.candidates, action["node_ref"]) is None:
-            # Out-of-range ref: not an error, an observed tree→vlm degrade (path C evidence).
+            # 越界 ref：不是错误，而是一次被观测到的 tree→vlm 降级（路径 C 证据）。
             self.log.phase("route", f"node_ref={action['node_ref']} 越界（1..{len(self.obs.candidates)}）→ 本轮降级 vlm")
             return {"route": "vlm", "action": {}, "retry_decision": True}
 
@@ -328,7 +326,7 @@ class Runner:
         raise ValueError(f"no dispatch for {a_type}")
 
     def _resolve_point(self, action: dict) -> tuple[int | None, int | None]:
-        """node_ref wins over grid; grid is also the tree→vlm escape hatch mid-action."""
+        """node_ref 优先于 grid；grid 也是动作中途 tree→vlm 的逃生通道。"""
         if "node_ref" in action and self.obs:
             c = tree_mod.by_ref(self.obs.candidates, action["node_ref"])
             if c is None:
@@ -351,11 +349,11 @@ class Runner:
         return self.executor.call("swipe", x1=vector[0], y1=vector[1], x2=vector[2], y2=vector[3], ms=400)
 
     def verify(self, state: AgentState) -> dict:
-        """Settle the step, spending a VLM call only when the screen looks unchanged.
+        """结算本步，只在屏幕看起来没变化时才花一次 VLM 调用。
 
-        Cheap path: the frame signature moved, so something happened — no model call.
-        Expensive path (the 技术方案评估.md §2 B-7 design): two images plus the action
-        go to GLM and it returns A/B/C.
+        廉价路径：帧指纹变了，说明确实发生了点什么——不调模型。
+        昂贵路径（技术方案评估.md §2 B-7 的设计）：两张图加动作
+        交给 GLM，返回 A/B/C。
         """
         action = state.get("last_action") or {}
         a_type = action.get("type", "")
@@ -378,8 +376,8 @@ class Runner:
             self.log.phase("verify", f"指纹变化=是 → 继续（0 次 VLM）", sig=self.obs.signature[:9])
             return {}
 
-        # Reached when the screen looks unchanged after a mutating action (cheap),
-        # or on every step (always).
+        # 到达这里：变更型动作后屏幕看起来没变化（cheap 模式），
+        # 或者每一步（always 模式）。
         verdict = self._reflect(action)
         self.reflections += 1
         if verdict == "A":
@@ -388,8 +386,8 @@ class Runner:
         if verdict in ("B", "C"):
             self.log.phase("verify", f"反思={verdict} 未生效/进错页 → 恢复", vlm=1)
             return {"recover_depth": 1}
-        # UNKNOWN: the model gave an unparsable answer. Assume progress — a false
-        # recovery costs more steps than one wasted iteration. See prompts.py.
+        # UNKNOWN：模型给了无法解析的回答。按有进展处理——错误的
+        # 恢复比浪费一次迭代代价更高。见 prompts.py。
         self.log.phase("verify", "反思无法判定 → 保守视为生效", vlm=1)
         return {}
 
@@ -408,12 +406,12 @@ class Runner:
             return "UNKNOWN"
 
     def recovery(self, state: AgentState) -> dict:
-        """Ladder, one rung per visit: BACK, then HOME, then relaunch the app.
+        """阶梯式恢复，每次访问走一级：BACK，然后 HOME，然后重启 App。
 
-        ``Mobile-Agent-v2/run.py:419-421`` reflexively presses Back on a B verdict.
-        On a head unit that can drop us to the launcher or dismiss the wrong dialog,
-        and there is no confirmation it helped. Each rung here is followed by a fresh
-        perceive, so the next guard sees whether it worked.
+        ``Mobile-Agent-v2/run.py:419-421`` 收到 B 判定就条件反射地按
+        Back。在车机上这可能把人丢回桌面，或者关掉错误的弹窗，而且
+        没有任何确认它真的有效。这里每一级之后都重新 perceive，
+        下一次 guard 就能看出是否恢复成功。
         """
         depth = int(state.get("recover_depth", 0)) or 1
         rungs = ["press_back", "press_home", "relaunch"]
@@ -443,7 +441,7 @@ class Runner:
     def finish(self, state: AgentState) -> dict:
         return {"done": True, "success": bool(state.get("success")), "status": state.get("status", "")}
 
-    # ── edges ────────────────────────────────────────────────────────────────
+    # ── 边 ───────────────────────────────────────────────────────────────────
 
     def after_guard(self, state: AgentState) -> str:
         return "finish" if state.get("done") else "route"
@@ -455,7 +453,7 @@ class Runner:
         return "decide" if state.get("retry_decision") else "act"
 
     def after_act(self, state: AgentState) -> str:
-        # A skill step mutates the device itself; verify reads the resulting frame.
+        # 技能步骤本身会改变设备；verify 读取动作后的帧。
         return "verify" if state.get("last_action") else "perceive"
 
     def after_verify(self, state: AgentState) -> str:
@@ -465,7 +463,7 @@ class Runner:
             return "recovery"
         return "perceive"
 
-    # ── assembly ─────────────────────────────────────────────────────────────
+    # ── 组装 ─────────────────────────────────────────────────────────────────
 
     def graph(self):
         from langgraph.graph import END, StateGraph
@@ -488,8 +486,8 @@ class Runner:
                                 {"run_skill": "run_skill", "decide": "decide"})
         g.add_conditional_edges("run_skill", lambda s: "act" if (s.get("action") or {}).get("type") else "guard",
                                 {"act": "act", "guard": "guard"})
-        # A tree decision that came back unusable re-enters decide once on the vlm
-        # route (the path-C degrade); a good decision proceeds to act.
+        # 一个无效的 tree 决策会在 vlm 路由上重新进入 decide 一次
+        # （路径 C 降级）；有效决策进入 act。
         g.add_conditional_edges("decide", self.after_decide, {"act": "act", "decide": "decide"})
         g.add_conditional_edges("act", self.after_act, {"verify": "verify", "perceive": "perceive"})
         g.add_conditional_edges("verify", self.after_verify,
@@ -498,14 +496,14 @@ class Runner:
         g.add_edge("finish", END)
         return g.compile()
 
-    # ── run ──────────────────────────────────────────────────────────────────
+    # ── 运行 ─────────────────────────────────────────────────────────────────
 
     def execute(self) -> dict:
         self.prepare()
         app = self.graph()
-        # LangGraph defaults to recursion_limit=25 supersteps; our loop is ~5 nodes
-        # per step, so 20 steps needs roughly 120. Left implicit, long tasks die with
-        # a GraphRecursionError that looks like a harness bug.
+        # LangGraph 默认 recursion_limit=25 个 superstep；我们的循环每步约 5
+        # 个节点，20 步大约需要 120。不显式设置的话，长任务会死在一个
+        # 看起来像 harness bug 的 GraphRecursionError 上。
         limit = self.cfg.agent.max_steps * 6 + 20
         try:
             final = app.invoke(

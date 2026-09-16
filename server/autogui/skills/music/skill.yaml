@@ -1,14 +1,13 @@
 # 音乐（CEA1.3 预装）
-# Hint text values are placeholders until measured on the borrowed head unit:
-# run `python main.py --dump-report`, then replace each hint with a string that
-# actually appears in that app's UI tree. An unresolvable hint raises SkillMiss and
-# the step falls through to the generic tree/vlm route, so a wrong hint costs one
-# turn rather than failing the task.
+# hint 的文本值在借到车机实测前都是占位符：
+# 先运行 `python main.py --dump-report`，再把每个 hint 换成
+# 该 App UI 树里真实出现的字符串。解析不了的 hint 会抛 SkillMiss，
+# 该步落回通用 tree/vlm 路由——所以错误的 hint 只花掉一轮，不会让任务失败。
 name: music
 app:
-  package: ""            # fill from `python main.py --packages`
+  package: ""            # 用 `python main.py --packages` 填
 
-# App-level popup overrides; omit to use autogui/skills/base.py DEFAULT_POPUPS.
+# App 级弹窗覆盖项；省略则用 autogui/skills/base.py 的 DEFAULT_POPUPS。
 popups:
   - { detect: "用户协议", button: "同意" }
   - { detect: "开启推送", button: "以后再说" }
@@ -24,7 +23,7 @@ skills:
       - { act: click, hint: { text: "搜索" } }
       - { act: type, arg: song, clear_first: true }
       - { act: wait_for, arg: song, timeout: 8 }
-      - { act: click, hint: { text: "{song}" } }   # {param} = substituted from params
+      - { act: click, hint: { text: "{song}" } }   # {param} = 从 params 替换
       - { act: sleep, seconds: 1.5 }
       - { act: click, hint: { text: "播放全部" } }
       - { act: complete }

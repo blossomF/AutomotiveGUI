@@ -1,50 +1,50 @@
-# Automotive GUI Agent — runtime configuration.
-# Every key here is optional; defaults live in autogui/config.py.
+# Automotive GUI Agent —— 运行时配置。
+# 这里所有键都是可选的，默认值在 autogui/config.py 中。
 
-# local = LangGraph calls bridge/tools.py functions in-process.
-# mcp   = the same calls go through a real MCP session against autogui/mcp_server.py.
-# If the MCP route misbehaves on Demo Day, flip this to local: 10 seconds, no refactor.
+# local = LangGraph 在进程内直接调用 bridge/tools.py 的函数。
+# mcp   = 同样的调用走一个真实的 MCP 会话（对端是 autogui/mcp_server.py）。
+# 如果 Demo Day 当天 MCP 链路出问题，把它改回 local 即可：10 秒钟，不用重构。
 exec_mode: local
 
-# Positioning path actually declared for judging. DO NOT EDIT until
-# `python main.py --dump-report` has been run on the borrowed head unit.
-# Rule 4.4: an overstated claim is scored down to what the code really does.
-# C = control tree primary + pure-VLM grid fallback (worth +10)
+# 提交给评委的定位路径声明。在借到车机上跑过
+# `python main.py --dump-report` 之前不要改这个值。
+# 规则 4.4：声明高于实际实现的按代码真实做到的给分。
+# C = 控件树为主 + 纯 VLM 网格兜底（值 +10 分）
 declared_path: C
 
-device_serial: auto        # auto = pick up the only attached device, else fail loudly
-display_id: null           # leave null; set only if `--check` reports multiple displays
-                           # and the captured screen is not the centre console
+device_serial: auto        # auto = 自动选唯一在线设备，否则直接报错
+display_id: null           # 保持 null；仅当 `--check` 报告多屏且
+                            # 捕获到的不是中控屏时才设置
 input_chain: [yadb, adbkeyboard, ascii]
 
-# Landscape head unit. 20x10 at 1920x1080 gives ~96x108px cells, about one touch
-# target each. Do NOT inherit LightGUIAgent's auto density — its row clamp of
-# max(15, ...) is a portrait assumption (技术方案评估.md §2 C-11).
+# 横屏车机。1920x1080 下 20x10 得到约 96x108px 的格子，
+# 每格大约一个触摸目标。不要照搬 LightGUIAgent 的自动密度——它的
+# max(15, ...) 行数钳制是竖屏假设（技术方案评估.md §2 C-11）。
 grid:
   cols: 20
   rows: 10
   jpeg_quality: 85
-  max_side: 1568           # provisional; LightGUIAgent hardcoded this as "Claude optimal"
-                           # — re-measure for GLM in the 9/19 A/B test
+  max_side: 1568           # 暂定值；LightGUIAgent 把它写死为“Claude 最优”
+                            # —— 9/19 A/B 测试中针对 GLM 重新实测
 
 agent:
   max_steps: 20
-  wall_clock_limit: 180    # seconds; a Demo Day slot is 8 minutes total
-  no_progress_limit: 3     # consecutive screens with an unchanged fingerprint
+  wall_clock_limit: 180    # 秒；Demo Day 一个任务的时间槽总共 8 分钟
+  no_progress_limit: 3     # 屏幕指纹连续不变的步数
   delay_after_action: 1.0
   history_window: 5
-  token_budget: 8000       # approximate input tokens before trimming kicks in
+  token_budget: 8000       # 近似输入 token 数，超过后触发裁剪
   tree_candidate_limit: 40
-  reflection: cheap        # cheap = only spend a VLM call when the screen looks unchanged
-                          # always = mirror Mobile-Agent-v2 (≈4 calls/step; do not ship this)
-                          # off    = fastest, loses the recovery behaviour entirely
+  reflection: cheap        # cheap = 仅当屏幕看起来没变化时才花一次 VLM 调用
+                           # always = 完全对齐 Mobile-Agent-v2（≈4 次/步；不要以此发布）
+                           # off    = 最快，但完全失去恢复行为
 
 skills:
   enabled: true
   directory: skills
 
 glm:
-  # TODO 9/15: replace with the exact model id on the key the committee issues.
+  # TODO 9/15: 换成组委会发放 key 对应的确切型号 id。
   model: glm-4v-plus
   base_url: https://open.bigmodel.cn/api/paas/v4/
   api_key_env: GLM_API_KEY
@@ -53,18 +53,18 @@ glm:
   timeout: 30
   max_retries: 2
 
-# Scope is fixed by rule 4.2: CEA1.3 preinstalled set plus Bilibili / Feishu / 外卖.
-# Fill package names from `python main.py --packages` once the head unit is borrowed —
-# the app list in LightGUIAgent's prompt (美团/淘宝/微信) is for phones and mostly wrong here.
+# 范围由规则 4.2 固定：CEA1.3 预装集 + 哔哩哔哩 / 飞书 / 外卖。
+# 借到车机后用 `python main.py --packages` 填包名——
+# LightGUIAgent 提示词里的 App 列表（美团/淘宝/微信）是手机端的，在车机上大多不适用。
 apps:
   - name: 音乐
-    package: ""            # e.g. com.tencent.qqmusiccar — verify on device
+    package: ""            # 例如 com.tencent.qqmusiccar —— 需真机确认
   - name: 导航
     package: ""
   - name: 哔哩哔哩
     package: tv.danmaku.bili
   - name: 飞书
-    package: com.lark.android.mcloud   # verify — Feishu's Android id varies by build
+    package: com.lark.android.mcloud   # 需确认——飞书 Android 包名因构建版本而异
   - name: 外卖
     package: ""
 

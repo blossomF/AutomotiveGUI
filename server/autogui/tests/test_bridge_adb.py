@@ -1,7 +1,7 @@
-"""Bridge primitives — the parts that must be right before any device is touched.
+"""桥接原语——在触碰任何设备之前必须正确的部分。
 
-Several of these are the security/robustness fixes called out in 技术方案评估.md §2
-(A-2, A-4, C-8, C-11), so they are pinned here rather than left to device testing.
+其中多项是 技术方案评估.md §2 点名的安全/健壮性修复
+（A-2、A-4、C-8、C-11），所以在这里固定为测试，而不是留给真机验证。
 """
 
 import shlex
@@ -28,11 +28,11 @@ from tests.conftest import SAMPLE_XML
 
 
 def _png(w: int, h: int) -> bytes:
-    """A structurally valid PNG header; enough for png_size()."""
+    """结构合法的 PNG 头；对 png_size() 足够。"""
     return b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + struct.pack(">II", w, h) + b"\x00" * 4
 
 
-# ── capture stream hygiene (C-8) ─────────────────────────────────────────────────
+# ── 抓取流卫生（C-8） ───────────────────────────────────────────────────────────
 
 
 def test_multi_display_warning_line_is_trimmed():
@@ -53,7 +53,7 @@ def test_png_size_rejects_non_png():
     assert png_size(b"\x89PNG\r\n\x1a\n" + b"xx") is None
 
 
-# ── shell-injection guards (A-4) ─────────────────────────────────────────────────
+# ── shell 注入防护（A-4） ───────────────────────────────────────────────────────
 
 
 @pytest.mark.parametrize(
@@ -76,27 +76,26 @@ def test_keycode_accepts_bare_name_and_adds_prefix():
     ["hello); reboot; #", "$(whoami)", "a; rm -rf /sdcard", "x `id`"],
 )
 def test_typed_text_cannot_escape_into_device_shell(payload):
-    """Text we type is model-generated, so it must survive ``adb shell`` re-parsing.
+    """我们输入的文字是模型生成的，必须能扛住 ``adb shell`` 的重新解析。
 
-    The property that matters: after the device shell splits the command line, the
-    payload still arrives as **one** argv token. If it split, the second token would
-    be an executed command on the head unit.
+    关键性质：设备 shell 拆完命令行后，payload 仍作为**一个**
+    argv token 到达。一旦拆开，第二个 token 就会变成车机上执行的命令。
     """
     folded = ascii_typeable(payload)
     quoted = input_text_arg(folded)
     argv = shlex.split(quoted)
     assert len(argv) == 1, f"payload split into {argv!r} — would execute on device"
-    # Spaces are input's own %s escape, and stay inside the single token.
+    # 空格是 input 自己的 %s 转义，必须留在单个 token 内部。
     assert " " not in argv[0] or folded == ""
 
 
 def test_ascii_folding_keeps_latin_accents_but_drops_cjk():
     assert ascii_typeable("café") == "cafe"
-    assert ascii_typeable("七里香") == ""      # caller must degrade to another strategy
+    assert ascii_typeable("七里香") == ""      # 调用方必须降级到其它策略
     assert ascii_typeable("Qilixiang 123") == "Qilixiang 123"
 
 
-# ── tree parsing ─────────────────────────────────────────────────────────────────
+# ── 树解析 ─────────────────────────────────────────────────────────────────────
 
 
 def test_node_accessors():

@@ -1,19 +1,18 @@
-"""Thin MCP server exposing the head-unit tool surface over stdio.
+"""薄 MCP server：把车机工具面以 stdio 暴露出去。
 
-The pattern is borrowed from ``android-agent/gitd/mcp_server.py:16,105`` — ``FastMCP``
-plus ``@mcp.tool()`` on plain functions, docstring becomes the tool description and
-type hints become the input schema. What we do *not* take from it: that file's iOS
-routing, platform-support matrix and ``device`` parameter threading
-(``mcp_server.py:21-33``), all of which exist because it drives many heterogeneous
-devices. We drive one.
+模式借鉴自 ``android-agent/gitd/mcp_server.py:16,105`` —— ``FastMCP``
+加上普通函数上的 ``@mcp.tool()``，docstring 成为工具描述、类型注解
+成为输入 schema。我们*不*照搬的：那个文件的 iOS 路由、平台支持矩阵
+和 ``device`` 参数透传（``mcp_server.py:21-33``）——那些存在是因为它
+要驱动许多异构设备。我们只驱动一台。
 
-Because ``bridge/tools.py`` functions are already ordinary Python, registration is a
-loop rather than 19 copy-pasted decorators, and the exact same functions serve the
-``exec_mode: local`` path. That identity is the point: the MCP surface and the
-in-process surface cannot drift apart.
+因为 ``bridge/tools.py`` 的函数本来就是普通 Python，注册是一个循环
+而不是 19 个复制粘贴的装饰器，而且同一批函数同时服务
+``exec_mode: local`` 路径。这种“同一性”正是关键：MCP 面和进程内面
+不可能漂移。
 
-Run standalone:  python -m autogui.mcp_server
-Ad-hoc check:    python -m autogui.mcp_server --list-tools
+独立运行:  python -m autogui.mcp_server
+临时检查:    python -m autogui.mcp_server --list-tools
 """
 
 from __future__ import annotations
@@ -38,7 +37,7 @@ def build_server():
         mcp.tool()(fn)
 
     @mcp.resource("autogui://info")
-    def _info() -> str:  # pragma: no cover - trivial
+    def _info() -> str:  # pragma: no cover - 平凡函数
         return (
             f"Automotive GUI Agent bridge. device={tools.dev().serial} "
             f"screen={tools.get_screen_size()} declared_path={cfg.declared_path} "

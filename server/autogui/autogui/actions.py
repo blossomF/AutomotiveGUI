@@ -1,15 +1,13 @@
-"""The action space — single source of truth for prompt, parser and executor.
+"""动作空间 —— prompt、解析器、执行器三方共享的唯一事实来源。
 
-Wider than ``LightGUIAgent/lightguiagent/config.py:150-156``'s five actions, which
-lack BACK and HOME entirely: there, "recover" means the prompt telling the model that
-a back button is *usually* in the top-left, around grid A1-B3
-(``claude_client.py:151-156``). On a landscape head unit with a persistent dock that
-hint is wrong, and the model burns steps hunting for a button. See 技术方案评估.md
-§2 C-10.
+比 ``LightGUIAgent/lightguiagent/config.py:150-156`` 的 5 个动作更宽——对方
+完全没有 BACK 和 HOME：在那套代码里，“恢复”意味着提示词告诉模型返回键
+*通常*在左上角、网格 A1-B3 附近（``claude_client.py:151-156``）。在带常驻
+dock 的横屏车机上这个提示是错的，模型会白白烧掉步数找按钮。见
+技术方案评估.md §2 C-10。
 
-``FAIL`` matters as well: without an explicit give-up action a stuck agent has no way
-to end a task early except ``COMPLETE`` (wrong) or exhausting ``max_steps`` (slow and
-expensive).
+``FAIL`` 同样重要：没有显式的“放弃”动作，卡住的 agent 除了
+``COMPLETE``（错的）或耗尽 ``max_steps``（慢且贵）之外，没有提前结束任务的途径。
 """
 
 from __future__ import annotations
@@ -41,17 +39,17 @@ ACTIONS: tuple[ActionSpec, ...] = (
 ACTION_NAMES: tuple[str, ...] = tuple(a.name for a in ACTIONS)
 TERMINAL: frozenset[str] = frozenset({"COMPLETE", "FAIL"})
 
-# Actions whose effect we can check with a screen-signature change and no VLM call.
+# 可以用“屏幕指纹变化”来校验效果、而不必花一次 VLM 调用的动作。
 MUTATING: frozenset[str] = frozenset({"CLICK", "LONG_PRESS", "TYPE", "SCROLL", "BACK", "HOME", "LAUNCH", "SKILL"})
 
 SCROLL_DIRECTIONS = ("down", "up", "left", "right")
 
 
 def parse_action(raw: dict) -> dict:
-    """Validate one model-emitted action dict into a normalised form.
+    """把模型输出的动作 dict 校验并归一化。
 
-    Raises ``ValueError`` for anything unusable; ``brain.glm_client`` retries once
-    with the complaint and the graph degrades rather than crashing if it fails again.
+    遇到任何不可用的输入抛 ``ValueError``；``brain.glm_client`` 会带着
+    失败原因重试一次，再失败则图降级处理而不是崩溃。
     """
     if not isinstance(raw, dict):
         raise ValueError(f"action must be an object, got {type(raw).__name__}")

@@ -1,23 +1,21 @@
-"""ADB primitives for one head unit.
+"""单台车机的 ADB 原语。
 
-Ported from ``android-agent/gitd/bots/common/adb.py`` — that file depends only on the
-standard library, which is why it was worth extracting. See 技术方案评估.md §2 for the
-four deliberate deviations from the original:
+移植自 ``android-agent/gitd/bots/common/adb.py`` —— 那个文件只依赖标准库，
+这正是值得整体抽出的原因。对原文的四处刻意偏离，见 技术方案评估.md §2：
 
-  A-1  Droidrun Portal fast path (original :357-420) dropped entirely — it needs a
-       portal APK on the device, and the contest rules forbid installing anything.
-  A-4  ``input_text_arg`` (original :71-82) kept: text we type is LLM-generated, and
-       ``adb shell`` re-parses argv through the *device* shell, so an injected
-       ``$(reboot)`` would otherwise execute on the head unit.
-  C-8  ``exec-out`` capture (original :48-50) + ``strip_to_png_signature`` (original
-       :36-45) kept. The signature trim is not an optimisation here — head units are
-       multi-display, and ``screencap`` prefixes a warning line that corrupts the
-       stream.
-  C-11 every call carries ``-s <serial>``; the original's device probing ran bare
-       ``adb shell wm size`` and would latch onto the wrong device.
+  A-1  Droidrun Portal 快速通道（原文 :357-420）整体删除——它需要在设备上
+        安装 portal APK，而竞赛规则禁止安装任何东西。
+  A-4  保留 ``input_text_arg``（原文 :71-82）：我们输入的文字由 LLM 生成，
+        而 ``adb shell`` 会用*设备端* shell 重新解析 argv，注入的
+        ``$(reboot)`` 否则会在车机上直接执行。
+  C-8  保留 ``exec-out`` 抓取（原文 :48-50）+ ``strip_to_png_signature``
+        （原文 :36-45）。签名裁剪在这里不是优化——车机是多屏设备，
+        ``screencap`` 会在流前加一行警告，把图像弄坏。
+  C-11 每次调用都带 ``-s <serial>``；原文的设备探测直接跑裸
+        ``adb shell wm size``，会锁到错误的设备上。
 
-XML parsing helpers are module-level functions rather than ``Device`` methods as in
-the original, so ``perception/tree.py`` and the tests can use them without a device.
+XML 解析辅助函数是模块级函数，而不是原文里的 ``Device`` 方法，
+这样 ``perception/tree.py`` 和测试可以在没有设备的情况下使用。
 """
 
 from __future__ import annotations
@@ -36,12 +34,11 @@ _KEYCODE_RE = re.compile(r"^KEYCODE_[A-Z0-9_]+$")
 
 
 class ADBError(RuntimeError):
-    """adb itself failed: missing binary, timeout, or nonzero exit.
+    """adb 命令本身失败：可执行文件缺失、超时或非零退出。
 
-    Subclasses ``RuntimeError`` so callers that already catch broadly keep working.
-    The point of the type is the distinction the original makes at :85-101: a
-    swallowed failure that returns ``""`` reads as an empty success downstream, which
-    is much worse than an exception.
+    继承 ``RuntimeError``，让已经做宽泛捕获的调用方继续可用。
+    这个类型的意义在于原文 :85-101 做出的区分：被吞掉、返回 ``""``
+    的失败在下游会被读成“空的成功”，比抛异常糟糕得多。
     """
 
     def __init__(self, args, returncode: int, stderr: str = "", stdout: str = ""):
@@ -55,7 +52,7 @@ class ADBError(RuntimeError):
 
 
 class ADBResult(NamedTuple):
-    """Result of :meth:`Device.adb_soft` — a nonzero exit is data, not an error."""
+    """:meth:`Device.adb_soft` 的返回——非零退出码是数据，不是错误。"""
 
     returncode: int
     stdout: str
@@ -66,26 +63,25 @@ class ADBResult(NamedTuple):
         return self.returncode == 0
 
 
-# ── pure helpers (no device needed) ──────────────────────────────────────────────
+# ── 纯辅助函数（不需要设备） ──────────────────────────────────────────────────
 
 
 def strip_to_png_signature(raw: bytes) -> bytes:
-    """Trim everything before the PNG magic bytes.
+    """裁剪掉 PNG 魔数之前的一切内容。
 
-    Multi-display devices prefix ``screencap -p`` stdout with a
-    "[Warning] Multiple displays were found..." line. Head units are exactly that
-    case, so a naive read yields a corrupt image. (original adb.py:39-45)
+    多屏设备上 ``screencap -p`` 的 stdout 前面会带一行
+    "[Warning] Multiple displays were found..."。车机正是这种情况，
+    朴素的读取会得到损坏的图像。（原文 adb.py:39-45）
     """
     idx = raw.find(PNG_SIGNATURE)
     return raw[idx:] if idx > 0 else raw
 
 
 def png_size(raw: bytes) -> tuple[int, int] | None:
-    """Read (width, height) from a PNG IHDR chunk.
+    """从 PNG IHDR 块读出 (宽, 高)。
 
-    Authoritative for what the VLM actually sees. Prefer this over ``wm size``,
-    which on multi-display head units can report a logical size that differs from
-    the captured framebuffer.
+    对“VLM 实际看到什么”是权威答案。优先于 ``wm size``——后者在
+    多屏车机上可能报告与捕获到的帧缓冲不同的逻辑尺寸。
     """
     if len(raw) < 24 or not raw.startswith(PNG_SIGNATURE):
         return None
@@ -96,12 +92,12 @@ def png_size(raw: bytes) -> tuple[int, int] | None:
 
 
 def normalize_keycode(key: str) -> str:
-    """Validate an Android keycode, adding the ``KEYCODE_`` prefix if absent.
+    """校验 Android 键码，缺前缀时补上 ``KEYCODE_``。
 
-    ``adb shell input keyevent <key>`` re-parses through the device shell, so an
-    agent-controlled value like ``KEYCODE_HOME; reboot`` would run ``reboot`` on
-    the head unit. Real keycodes are always bare ``KEYCODE_[A-Z0-9_]+``.
-    (original adb.py:56-68)
+    ``adb shell input keyevent <key>`` 会经过设备端 shell 重新解析，
+    所以 agent 可控的值如 ``KEYCODE_HOME; reboot`` 会在车机上执行
+    ``reboot``。真实的键码永远只是 ``KEYCODE_[A-Z0-9_]+``。
+    （原文 adb.py:56-68）
     """
     if not key.startswith("KEYCODE_"):
         key = "KEYCODE_" + key.upper()
@@ -111,21 +107,21 @@ def normalize_keycode(key: str) -> str:
 
 
 def input_text_arg(text: str) -> str:
-    """Shell-quote text for ``adb shell input text`` so it is typed literally.
+    """为 ``adb shell input text`` 做 shell 引用，保证逐字输入。
 
-    Spaces become ``%s`` (input's own space escape) inside the quotes. Callers
-    should pass already-ASCII text via :func:`ascii_typeable`. (original adb.py:71-82)
+    空格在引号内变成 ``%s``（input 自己的空格转义）。调用方应先用
+    :func:`ascii_typeable` 转成纯 ASCII。（原文 adb.py:71-82）
     """
     return shlex.quote(text.replace(" ", "%s"))
 
 
 def ascii_typeable(text: str) -> str:
-    """Fold text to the closest ASCII that ``input text`` can send.
+    """把文本折叠成 ``input text`` 能发送的最接近 ASCII。
 
-    ``adb shell input text`` is ASCII-only — one non-ASCII character fails the
-    whole command and leaves the field empty. NFKD-decompose and drop combining
-    marks ("café" -> "cafe"). For CJK this yields an empty string, which is the
-    caller's signal to try the pinyin fallback instead. (original adb.py:20-33)
+    ``adb shell input text`` 只收 ASCII——一个非 ASCII 字符会让整条
+    命令失败、输入框留空。先 NFKD 分解再丢掉组合符号
+    （"café" -> "cafe"）。对 CJK 这会得到空字符串，提示调用方
+    改走拼音兜底。（原文 adb.py:20-33）
     """
     if text.isascii():
         return text
@@ -133,7 +129,7 @@ def ascii_typeable(text: str) -> str:
     return folded
 
 
-# ── XML tree parsing (pure, operates on ``uiautomator dump`` output) ─────────────
+# ── XML 树解析（纯函数，操作 ``uiautomator dump`` 的输出） ────────────────────
 
 _NODE_RE = re.compile(r"<node\b[^>]*?/?>", re.S)
 _BOUNDS_RE = re.compile(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"')
@@ -145,7 +141,7 @@ def _attr(node: str, name: str) -> str:
 
 
 def nodes(xml: str) -> list[str]:
-    """Split a uiautomator dump into individual ``<node ...>`` strings."""
+    """把 uiautomator dump 拆成一个个 ``<node ...>`` 字符串。"""
     return _NODE_RE.findall(xml or "")
 
 
@@ -184,7 +180,7 @@ def node_center(node: str) -> tuple[int, int] | None:
 
 
 def bounds_center(bounds_str: str) -> tuple[int, int]:
-    """``'[x1,y1][x2,y2]'`` -> cell centre. (original adb.py:467-470)"""
+    """``'[x1,y1][x2,y2]'`` -> 格子中心。（原文 adb.py:467-470）"""
     n = list(map(int, re.findall(r"\d+", bounds_str)))
     return ((n[0] + n[2]) // 2, (n[1] + n[3]) // 2)
 
@@ -197,7 +193,7 @@ def find_nodes(
     rid: str | None = None,
     clickable_only: bool = False,
 ) -> list[str]:
-    """Filter nodes; text/desc match case-insensitively and as substrings."""
+    """过滤节点；text/desc 按子串、忽略大小写匹配。"""
     out = []
     for n in nodes(xml):
         if clickable_only and not node_clickable(n):
@@ -213,11 +209,10 @@ def find_nodes(
 
 
 def find_node(xml: str, *, text: str | None = None, desc: str | None = None, rid: str | None = None) -> str | None:
-    """First match trying ``text`` then ``desc`` then ``rid``, in that priority.
+    """按 ``text`` → ``desc`` → ``rid`` 的优先级找第一个匹配。
 
-    Skill hints resolve through here. Returns ``None`` when nothing matches so the
-    caller can raise ``SkillMiss`` and degrade to the generic channel rather than
-    failing the whole task.
+    Skill 的 hint 通过这里解析。什么都没匹配到时返回 ``None``，
+    让调用方抛 ``SkillMiss`` 并降级到通用通道，而不是让整个任务失败。
     """
     probes = []
     if text:
@@ -229,27 +224,27 @@ def find_node(xml: str, *, text: str | None = None, desc: str | None = None, rid
     for kwargs in probes:
         found = find_nodes(xml, clickable_only=True, **kwargs)
         if not found:
-            found = find_nodes(xml, **kwargs)  # retry ignoring clickable: some widgets are not marked
+            found = find_nodes(xml, **kwargs)  # 重试一次：忽略 clickable，有些控件没标记
         if found:
             return found[0]
     return None
 
 
-# ── device ───────────────────────────────────────────────────────────────────────
+# ── 设备 ───────────────────────────────────────────────────────────────────────
 
 
 class Device:
-    """ADB + XML primitives for exactly one connected head unit."""
+    """针对一台已连接车机的 ADB + XML 原语。"""
 
     def __init__(self, serial: str, *, default_delay: float = 0.4, display: int | None = None):
         self.serial = serial
         self.default_delay = default_delay
-        # Android 9+ supports `screencap --display <id>`. On a head unit the default
-        # capture can otherwise come from the instrument cluster rather than the
-        # centre console, which the rules explicitly put out of scope (rule 4.2).
+        # Android 9+ 支持 `screencap --display <id>`。否则车机上的默认
+        # 捕获可能来自仪表屏而不是中控屏，而规则明确把后者之外的屏
+        # 划出范围（规则 4.2）。
         self.display = display
 
-    # ── invocation ───────────────────────────────────────────────────────────
+    # ── 调用 ─────────────────────────────────────────────────────────────────
 
     def _run(self, args, timeout: float) -> subprocess.CompletedProcess:
         try:
@@ -264,59 +259,59 @@ class Device:
             raise ADBError(args, -1, f"timed out after {timeout}s") from e
 
     def adb(self, *args, timeout: float = 30) -> str:
-        """Run adb, returning decoded stripped stdout. Raises ``ADBError`` on nonzero exit."""
+        """运行 adb，返回解码并 strip 的 stdout。非零退出抛 ``ADBError``。"""
         r = self._run(args, timeout)
         if r.returncode != 0:
             raise ADBError(args, r.returncode, _dec(r.stderr), _dec(r.stdout))
         return _dec(r.stdout).strip()
 
     def adb_bytes(self, *args, timeout: float = 30) -> bytes:
-        """Run adb returning raw stdout — for ``exec-out`` binary streams."""
+        """运行 adb，返回原始 stdout——用于 ``exec-out`` 的二进制流。"""
         r = self._run(args, timeout)
         if r.returncode != 0:
             raise ADBError(args, r.returncode, _dec(r.stderr), "")
         return r.stdout
 
     def adb_soft(self, *args, timeout: float = 30) -> ADBResult:
-        """Run adb without raising on nonzero exit.
+        """运行 adb，非零退出不抛异常。
 
-        For probes where failure is a normal answer (is this IME installed?).
-        A missing adb binary or a timeout still raises — never a normal outcome.
+        用于“失败是正常答案”的探测（这个 IME 装了吗？）。
+        adb 可执行文件缺失或超时仍然抛异常——那绝不是正常结果。
         """
         r = self._run(args, timeout)
         return ADBResult(r.returncode, _dec(r.stdout).strip(), _dec(r.stderr).strip())
 
-    # ── capture ──────────────────────────────────────────────────────────────
+    # ── 抓帧 ─────────────────────────────────────────────────────────────────
 
     def screenshot(self, timeout: float = 15) -> bytes:
-        """Grab the framebuffer as PNG bytes in one round trip.
+        """一次往返把帧缓冲抓成 PNG 字节。
 
-        Two round trips (``screencap -p /sdcard/x.png`` then ``pull``, as in
-        ``LightGUIAgent/lightguiagent/agent.py:117-135``) cost an extra file transfer
-        on every step, which is on the critical path of the performance score.
+        两次往返（``screencap -p /sdcard/x.png`` 再 ``pull``，见
+        ``LightGUIAgent/lightguiagent/agent.py:117-135``）每步多一次
+        文件传输，而它正处在性能分的关键路径上。
 
-        Always via ``exec-out``, never ``shell``: the latter allocates a PTY that
-        rewrites ``\\n`` to ``\\r\\n`` and corrupts the PNG stream.
+        永远走 ``exec-out``，不走 ``shell``：后者会分配 PTY，把
+        ``\\n`` 改写成 ``\\r\\n``，弄坏 PNG 流。
         """
         args = ["exec-out", "screencap", "-p"]
         if self.display is not None:
-            # Android 9+ only; older builds ignore the flag or error out, and the
-            # caller sees a plain ADBError naming the command.
+            # 仅 Android 9+；更老的构建会忽略该参数或报错，
+            # 调用方看到的是带命令名的普通 ADBError。
             args += ["--display", str(int(self.display))]
         raw = self.adb_bytes(*args, timeout=timeout)
         return strip_to_png_signature(raw)
 
     def list_displays(self, timeout: float = 8) -> list[str]:
-        """Display ids as reported by SurfaceFlinger. For choosing ``adb.display``."""
+        """SurfaceFlinger 报告的显示器 id。用于选择 ``adb.display``。"""
         out = self.adb_soft("shell", "dumpsys", "SurfaceFlinger", "--display-id", timeout=timeout).stdout
         return [m for m in re.findall(r"Display ID:\s*(\d+)", out)]
 
     def dump_xml(self, remote: str = "/sdcard/autogui_ui.xml", timeout: float = 15) -> str:
-        """UI hierarchy as uiautomator XML.
+        """以 uiautomator XML 形式获取 UI 层级。
 
-        ``uiautomator dump`` refuses to overwrite by default, so remove first.
-        Reading the file back through one ``exec-out cat`` avoids a second adb
-        transfer. (original adb.py:456-463, minus the portal fast path — see A-1)
+        ``uiautomator dump`` 默认拒绝覆盖，所以先删。再用一次
+        ``exec-out cat`` 读回文件，避免第二次 adb 传输。
+        （原文 adb.py:456-463，去掉 portal 快速通道——见 A-1）
         """
         self.adb_soft("shell", "rm", "-f", remote, timeout=timeout)
         r = self.adb_soft("shell", "uiautomator", "dump", remote, timeout=timeout)
@@ -327,7 +322,7 @@ class Device:
         except ADBError:
             return ""
 
-    # ── input ────────────────────────────────────────────────────────────────
+    # ── 输入 ─────────────────────────────────────────────────────────────────
 
     def tap(self, x: int, y: int, delay: float | None = None) -> None:
         self.adb("shell", "input", "tap", str(int(x)), str(int(y)))
@@ -349,7 +344,7 @@ class Device:
         time.sleep(delay if delay is not None else self.default_delay)
 
     def long_press(self, x: int, y: int, ms: int = 800, delay: float | None = None) -> None:
-        """A zero-distance swipe held for ``ms`` — the only long-press ``input`` offers."""
+        """按住 ``ms`` 的零距离 swipe——``input`` 提供的唯一长按形式。"""
         self.swipe(x, y, x, y, ms=ms, delay=delay)
 
     def keyevent(self, key: str, delay: float | None = None) -> None:
@@ -363,17 +358,17 @@ class Device:
         self.keyevent("KEYCODE_HOME", delay)
 
     def type_ascii(self, text: str, delay: float | None = None) -> None:
-        """Type via ``input text``. ASCII only; see :func:`ascii_typeable`."""
+        """通过 ``input text`` 输入。仅 ASCII；见 :func:`ascii_typeable`。"""
         self.adb("shell", "input", "text", input_text_arg(ascii_typeable(text)))
         time.sleep(delay if delay is not None else self.default_delay)
 
-    # ── apps ─────────────────────────────────────────────────────────────────
+    # ── 应用 ─────────────────────────────────────────────────────────────────
 
     def launch_app(self, package: str, activity: str | None = None, delay: float = 2.0) -> str:
-        """Start an app — the programmatic equivalent of tapping its icon.
+        """启动一个 App——程序化的“点图标”等价物。
 
-        Prefers the LAUNCHER intent (what a real tap does) because an explicit
-        ``-n`` component sometimes starts in the background on some vendors.
+        优先用 LAUNCHER intent（真实点击做的事），因为显式
+        ``-n`` 组件在某些厂商机型上会启动到后台。
         """
         if not re.fullmatch(r"[A-Za-z0-9._]+(/[A-Za-z0-9._]+)?", package):
             raise ValueError(f"invalid package name: {package!r}")
@@ -393,11 +388,11 @@ class Device:
         time.sleep(delay)
 
     def current_app(self, timeout: float = 8) -> dict:
-        """Best-effort foreground activity. Returns ``{package, activity}`` (possibly empty).
+        """尽力获取前台 Activity。返回 ``{package, activity}``（可能为空）。
 
-        Parsing differs across Android versions, hence the two patterns and the
-        permissive ``default``/``mResumedActivity`` keys. Used for the decision log
-        ("当前 Activity 已切换至 …") more than for control flow.
+        不同 Android 版本的解析不同，所以有两个模式、以及宽松的
+        ``default``/``mResumedActivity`` 键。主要用于决策日志
+        （“当前 Activity 已切换至 …”），很少用于控制流。
         """
         out = self.adb_soft("shell", "dumpsys", "activity", "activities", timeout=timeout).stdout
         for pat in (
@@ -414,7 +409,7 @@ class Device:
         out = self.adb("shell", "pm", "list", "packages", timeout=timeout)
         return sorted(line.split(":", 1)[1] for line in out.splitlines() if line.startswith("package:"))
 
-    # ── device info ──────────────────────────────────────────────────────────
+    # ── 设备信息 ─────────────────────────────────────────────────────────────
 
     def get_prop(self, key: str, timeout: float = 5) -> str:
         if not re.fullmatch(r"[a-z0-9._]+", key):
@@ -422,12 +417,11 @@ class Device:
         return self.adb("shell", "getprop", key, timeout=timeout)
 
     def screen_size(self, timeout: float = 15) -> tuple[int, int]:
-        """(width, height) of the captured framebuffer.
+        """捕获帧缓冲的 (宽, 高)。
 
-        Decodes the screenshot rather than trusting ``wm size``: on a multi-display
-        head unit the two can disagree, and the screenshot is what the VLM sees.
-        Falls back to ``wm size`` (with ``-s``, unlike the original at settings.py:137)
-        only if the PNG header is unparseable.
+        解码截图，而不是相信 ``wm size``：多屏车机上两者可能不一致，
+        而截图才是 VLM 看到的。只有 PNG 头无法解析时才回退到
+        ``wm size``（带 ``-s``，与原文 settings.py:137 不同）。
         """
         try:
             size = png_size(self.screenshot(timeout=timeout))
@@ -448,10 +442,9 @@ class Device:
         interval: float = 1.0,
         xml: str | None = None,
     ) -> str:
-        """Poll the UI tree until ``text`` appears; return that XML. Raises ``TimeoutError``.
+        """轮询 UI 树直到出现 ``text``；返回那份 XML。超时抛 ``TimeoutError``。
 
-        Accepts a pre-fetched ``xml`` so a caller that just dumped the tree does not
-        pay for it twice.
+        接受预取的 ``xml``，让刚 dump 过树的调用方不用付两次成本。
         """
         deadline = time.time() + timeout
         while True:
@@ -471,7 +464,7 @@ def _dec(b) -> str:
 
 
 def list_connected() -> list[str]:
-    """Serials of devices in ``device`` state."""
+    """处于 ``device`` 状态的设备 serial 列表。"""
     try:
         out = subprocess.run(["adb", "devices"], capture_output=True, text=True, timeout=10).stdout
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -485,7 +478,7 @@ def list_connected() -> list[str]:
 
 
 def get_device(serial: str | None = None, display: int | None = None) -> Device:
-    """Resolve one device; auto-selects when exactly one is attached."""
+    """解析出唯一设备；恰好一台在线时自动选择。"""
     if not serial or serial == "auto":
         connected = list_connected()
         if len(connected) == 1:

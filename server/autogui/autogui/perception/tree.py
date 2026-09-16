@@ -1,22 +1,22 @@
-"""UI tree -> compact numbered candidate list (the path-B decision surface).
+"""UI 树 -> 紧凑编号候选列表（B 路径的决策面）。
 
-This module is where the Context score is mostly won or lost. A raw
-``uiautomator dump`` on these apps runs 40-120 KB; feeding that to the model would
-blow the token budget on step one. Instead we:
+本模块是 Context 得分大多取决于成败的地方。这些 App 的原始
+``uiautomator dump`` 有 40-120 KB；把它直接喂给模型会在第一步就
+击穿 token 预算。因此我们：
 
-  1. keep only nodes that carry a human-visible label (text / content-desc / a
-     meaningful resource-id tail);
-  2. drop giant container nodes (``android.widget.FrameLayout`` wrapping the whole
-     screen is not a thing you click);
-  3. prefer *clickable* nodes, and among duplicates keep the tightest box;
-  4. cap the list, in reading order;
-  5. render one short line per candidate.
+  1. 只保留带人类可见标签（text / content-desc / 有意义的
+     resource-id 尾部）的节点；
+  2. 丢弃巨大的容器节点（包裹整个屏幕的 ``android.widget.FrameLayout``
+     不是能点击的东西）；
+  3. 优先*可点击*节点，重复项中保留最紧凑的框；
+  4. 按阅读顺序截断列表；
+  5. 每个候选渲染成一行短文本。
 
-The model answers with an integer ``node_ref``. It never copies a coordinate, which
-eliminates the malformed-bounds class of errors entirely.
+模型用整数 ``node_ref`` 回答，从不复制坐标，从而彻底消除
+非法坐标这一类错误。
 
-``screen_signature`` is the cheap change-detector behind ``core/guard.py`` and the
-verify node's "0 VLM most of the time" behaviour.
+``screen_signature`` 是 ``core/guard.py`` 背后的廉价变化检测器，
+也是 verify 节点“大多数时候 0 次 VLM”行为的依据。
 """
 
 from __future__ import annotations
@@ -24,16 +24,16 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from autogui.bridge.adb import node_bounds, node_center, node_class, node_clickable, node_desc, node_rid, node_text, nodes
+from autogui.bridge.adb import node_bounds, node_class, node_clickable, node_desc, node_rid, node_text, nodes
 
 _MAX_LABEL = 28
-# A node this wide (fraction of screen) and this tall is a container, not a target.
+# 达到屏幕这个宽度比例（占屏比例）和这个高度的节点是容器，不是目标。
 _CONTAINER_W = 0.72
 _CONTAINER_H = 0.55
 
-# resource-id tails that are structural noise even though they carry a value.
-# Framework ids are inconsistently cased ("statusBarBackground" vs "statusbar_background"),
-# so this matches case-insensitively and against the *tail*, not the whole id.
+# 这些 resource-id 尾部是结构性噪声，即使它们带有值也一样。
+# 框架 id 大小写不一致（"statusBarBackground" vs "statusbar_background"），
+# 所以这里忽略大小写、针对*尾部*而不是整个 id 匹配。
 _RID_NOISE_TAIL = re.compile(
     r"(?:content|rootview|background|mask|placeholder|spacer|statusbar|navbar|"
     r"navigationbar|decor|overlay|window[_-]?content)$",
@@ -65,7 +65,7 @@ def _clip(s: str, n: int = _MAX_LABEL) -> str:
 
 
 def _rid_tail(rid: str) -> str:
-    """``com.foo:id/search_box`` -> ``search_box``. Bare or purely structural ids drop out."""
+    """``com.foo:id/search_box`` -> ``search_box``。裸 id 或纯结构性 id 会被丢弃。"""
     if not rid or ":" not in rid:
         return ""
     tail = rid.rsplit("/", 1)[-1]
@@ -83,7 +83,7 @@ def extract(
     limit: int = 40,
     include_non_clickable: bool = True,
 ) -> list[Candidate]:
-    """Parse a uiautomator dump into at most ``limit`` addressable candidates."""
+    """把 uiautomator dump 解析为最多 ``limit`` 个可寻址候选。"""
     if not xml:
         return []
     sw, sh = screen or (1920, 1080)
@@ -96,7 +96,7 @@ def extract(
         x1, y1, x2, y2 = b
         if x2 <= x1 or y2 <= y1:
             continue
-        # Ignore off-screen leftovers (multi-display dumps include the other panel).
+        # 忽略屏幕外的残留（多屏 dump 会包含另一块面板）。
         if x2 <= 0 or y2 <= 0 or x1 >= sw or y1 >= sh:
             continue
 
@@ -111,15 +111,15 @@ def extract(
 
         w, h = x2 - x1, y2 - y1
         if w >= sw * _CONTAINER_W and h >= sh * _CONTAINER_H:
-            continue  # full-screen container
+            continue  # 全屏容器
 
         raw.append((clickable, (x1 + x2) // 2, (y1 + y2) // 2, b, label, clickable, rid, node_class(n)))
 
     if not raw:
         return []
 
-    # Sort into reading order, then collapse duplicate centres, longest-label wins
-    # (a node saying "播放" beats its wrapper saying "btn").
+    # 按阅读顺序排序，然后合并重复中心点，长标签胜出
+    # （标签为"播放"的节点胜过标签为"btn"的外层包装）。
     raw.sort(key=lambda t: (t[2] // 40, t[1]))
     if not include_non_clickable:
         raw = [t for t in raw if t[0]]
@@ -144,7 +144,7 @@ def extract(
         if len(out) >= limit:
             break
 
-    # Refs must be contiguous after dedup reordering.
+    # 去重重排之后 ref 必须重新连续编号。
     for i, c in enumerate(out, start=1):
         c.ref = i
     return out
@@ -155,10 +155,9 @@ def candidates_from_xml(xml: str, limit: int = 40, screen: tuple[int, int] | Non
 
 
 def render_candidates(cands: list[Candidate]) -> str:
-    """One line per candidate: ``#7 搜索 [960,86]``. Clickable ones are flagged.
+    """每个候选一行：``#7 搜索 [960,86]``。可点击的会标记。
 
-    Coordinates are printed for the model's spatial reasoning but are *not* echoed
-    back by it — only the ``#ref`` is.
+    坐标为模型的空间推理而打印，但模型*不会*回传坐标——只回传 ``#ref``。
     """
     lines = []
     for c in cands:
@@ -168,8 +167,8 @@ def render_candidates(cands: list[Candidate]) -> str:
 
 
 def by_ref(cands: list[Candidate], ref: int) -> Candidate | None:
-    """Resolve a model-returned ``node_ref``. Out-of-range returns ``None`` so the
-    caller can degrade tree->vlm instead of raising (技术方案评估.md §5.2)."""
+    """解析模型返回的 ``node_ref``。越界返回 ``None``，让调用方
+    降级 tree->vlm 而不是抛异常（技术方案评估.md §5.2）。"""
     for c in cands:
         if c.ref == ref:
             return c
@@ -177,11 +176,11 @@ def by_ref(cands: list[Candidate], ref: int) -> Candidate | None:
 
 
 def screen_signature(xml: str) -> str:
-    """Order-sensitive digest of every visible label in the tree.
+    """树中所有可见标签的顺序敏感摘要。
 
-    Used by ``perception/capture.py`` to build the no-progress fingerprint. Text
-    alone misses purely-visual changes (a video starting to play), which is why
-    capture folds in a downsampled image hash as well.
+    供 ``perception/capture.py`` 构建无进展指纹使用。仅用文本会漏掉
+    纯视觉变化（视频开始播放），所以 capture 还会折叠进一个降采样
+    图像哈希。
     """
     parts = []
     for n in nodes(xml):

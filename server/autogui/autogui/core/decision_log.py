@@ -1,19 +1,17 @@
-"""The decision-chain log (contest rule 4.7 — a hard requirement, not a nicety).
+"""决策链日志（竞赛规则 4.7——硬性要求，不是加分装饰）。
 
-Rule 4.7 asks for the reasoning chain to be printed live on the PC screen. It is
-also the evidence base for three scored items at once: the judges read it to grade
-Harness design, its timing column is the proof for the performance points, and its
-token column is the proof for Context. So it is built as a first-class component
-rather than ``print`` calls scattered through the graph.
+规则 4.7 要求推理链实时打印在 PC 屏幕上。它同时也是三项得分的
+证据基础：评委读它给 Harness 设计打分，其时间列是性能分的证明，
+其 token 列是 Context 分的证明。所以它被建成一等组件，而不是
+散落在图各处的 ``print`` 调用。
 
-Structure follows ``LightGUIAgent/lightguiagent/logger.py``'s JSONL approach, with
-fields added that our architecture specifically needs: ``route`` (which of
-skill/tree/vlm served this step), ``sig`` (screen fingerprint), ``vlm_calls`` and
-``tokens``.
+结构沿用 ``LightGUIAgent/lightguiagent/logger.py`` 的 JSONL 方式，
+并增加我们架构特别需要的字段：``route``（本步由 skill/tree/vlm
+哪条路由服务）、``sig``（屏幕指纹）、``vlm_calls`` 和 ``tokens``。
 
-Two outputs, always in sync:
-  * human line on stdout, with the phase column padded so the chain scans vertically
-  * one JSONL record per event under ``artifacts/logs/<task>-<ts>.jsonl``
+两个输出，始终同步：
+  * stdout 上的人类可读行，阶段列做补宽，便于纵向扫读决策链
+  * 每个事件一条 JSONL 记录，写入 ``artifacts/logs/<task>-<ts>.jsonl``
 """
 
 from __future__ import annotations
@@ -31,13 +29,13 @@ def _c(text: str, code: str) -> str:
 _TTY = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
 
 _PHASE_COLOR = {
-    "perceive": "36",   # cyan
-    "route": "35",      # magenta
-    "decide": "33",     # yellow
-    "act": "32",        # green
-    "verify": "34",     # blue
-    "recovery": "31",   # red
-    "guard": "90",      # grey
+    "perceive": "36",   # 青
+    "route": "35",      # 紫红
+    "decide": "33",     # 黄
+    "act": "32",        # 绿
+    "verify": "34",     # 蓝
+    "recovery": "31",   # 红
+    "guard": "90",      # 灰
     "finish": "1",
     "skill": "32",
     "error": "41",
@@ -59,13 +57,13 @@ class DecisionLog:
         self._fh = None
         try:
             self._fh = self.path.open("a", encoding="utf-8")
-        except OSError:  # read-only artifacts dir; keep running, we still print
+        except OSError:  # artifacts 目录只读；继续运行，仍打印到控制台
             self._fh = None
 
-    # ── output ───────────────────────────────────────────────────────────────
+    # ── 输出 ─────────────────────────────────────────────────────────────────
 
     def phase(self, phase: str, message: str, *, step: int | None = None, **metrics) -> None:
-        """Emit one line: ``[Step 3] [decide] 点击搜索框 (glms=1 in=3120 out=96)``."""
+        """输出一行：``[Step 3] [decide] 点击搜索框 (glms=1 in=3120 out=96)``。"""
         self.events.append({"t": round(time.time() - self.started, 3), "step": step if step is not None else self.step,
                             "phase": phase, "msg": message, **metrics})
         self._write_jsonl()
@@ -90,14 +88,14 @@ class DecisionLog:
     def warn(self, message: str) -> None:
         self.phase("error", message)
 
-    # ── persistence ──────────────────────────────────────────────────────────
+    # ── 持久化 ───────────────────────────────────────────────────────────────
 
     def _write_jsonl(self) -> None:
         if not self._fh:
             return
         try:
             self._fh.write(json.dumps(self.events[-1], ensure_ascii=False) + "\n")
-            self._fh.flush()  # flush per event: a crash mid-demo must not lose the chain
+            self._fh.flush()  # 每事件一次 flush：演示中途崩溃不能丢决策链
         except OSError:
             pass
 
@@ -106,15 +104,14 @@ class DecisionLog:
             self._fh.close()
             self._fh = None
 
-    # ── closing summary ──────────────────────────────────────────────────────
+    # ── 收尾汇总 ─────────────────────────────────────────────────────────────
 
     def summary(self, *, success: bool, status: str, steps: int, usage: dict, route_counts: dict,
                 vlm_reflections: int, elapsed: float) -> str:
-        """The table the judges and our own acceptance doc both read.
+        """评委和验收文档共同阅读的汇总表。
 
-        ``avg_vlm_per_step`` is the single most quotable number in the run: the
-        design target is <=1 (Mobile-Agent-v2 spends ~4 per step), and this is where
-        we show it.
+        ``avg_vlm_per_step`` 是整场运行中最值得引用的数字：设计目标
+        <=1（Mobile-Agent-v2 每步约 4 次），就在这里展示它。
         """
         avg = f"{elapsed / steps:.1f}" if steps else "-"
         vlm_per_step = f"{(usage.get('calls', 0) / steps):.2f}" if steps else "-"

@@ -1,20 +1,19 @@
-"""Context assembly and token economy.
+"""上下文组装与 token 经济。
 
-Four layers, per 技术方案评估.md §5.1:
+四层，见 技术方案评估.md §5.1：
 
-  permanent   task + declared path + action schema + skill index      ~600 tok
-  sliding     last N steps as plain text, failures included           ~500 tok
-  entities    cross-step key facts (time / place / song / item)       ~150 tok
-  observation candidate list (text) OR grid image (never both)        1-2k / image
+  permanent   任务 + 声明路径 + 动作 schema + 技能索引            ~600 tok
+  sliding     最近 N 步纯文本，含失败步                          ~500 tok
+  entities    跨步骤关键事实（时间 / 地点 / 歌曲 / 商品）         ~150 tok
+  observation 候选列表（文本）或网格图（二选一，绝不都要）        1-2k / 图
 
-The single biggest lever is that **tree mode never sends a screenshot**. An
-annotated 1920x1080 frame costs on the order of 1.5k visual tokens every step; a
-40-line candidate list costs a few hundred. That is where the "every token earns
-its keep" score comes from, and it also makes tree mode the *faster* route, so the
-Context and performance points pull in the same direction.
+最大的杠杆是 **tree 模式从不发截图**。一张 1920x1080 带网格标注的帧
+每步约耗 1.5k 视觉 token；40 行候选列表只花几百。这就是“每个 token
+都挣到”的分数来源，而且 tree 模式也是*更快*的路径，所以 Context 分
+和性能分方向一致。
 
-``estimate_tokens`` is a heuristic, not a tokenizer. We only use it to decide what
-to drop before sending, and we report the provider's real count afterwards.
+``estimate_tokens`` 是启发式，不是真 tokenizer。只用来决定发送前裁掉
+什么；对外报告的是 provider 返回的真实用量。
 """
 
 from __future__ import annotations
@@ -29,7 +28,7 @@ _CJK = re.compile(r"[㐀-䶿一-鿿豈-﫿぀-ヿ]")
 
 
 def estimate_tokens(text: str) -> int:
-    """Rough GLM-family estimate: CJK ~1 token/char, ASCII ~1 token/4 chars."""
+    """GLM 家族的粗略估计：CJK ~1 token/字，ASCII ~1 token/4 字符。"""
     if not text:
         return 0
     cjk = len(_CJK.findall(text))
@@ -39,7 +38,7 @@ def estimate_tokens(text: str) -> int:
 
 @dataclass
 class Context:
-    """Everything the model sees for one decision, already trimmed."""
+    """模型为一次决策看到的全部内容（已裁剪）。"""
 
     task: str
     declared_path: str
@@ -52,7 +51,7 @@ class Context:
     token_budget: int = 8000
     candidate_limit: int = 40
 
-    # ── permanent block ──────────────────────────────────────────────────────
+    # ── 永久块 ───────────────────────────────────────────────────────────────
 
     def permanent_block(self) -> str:
         lines = [
@@ -64,15 +63,15 @@ class Context:
             lines.append("可用技能：\n" + self.skill_index)
         return "\n".join(lines)
 
-    # ── sliding block ────────────────────────────────────────────────────────
+    # ── 滑动块 ───────────────────────────────────────────────────────────────
 
     def history_block(self) -> str:
-        """Last ``history_window`` steps, one line each.
+        """最近 ``history_window`` 步，每步一行。
 
-        Failed steps stay visible. ``Mobile-Agent-v2/run.py:401-424`` only appends
-        history on reflection answer A, so a failed attempt vanishes from the record
-        and ``completed_requirements`` goes stale after a B/C — the model then reuses
-        a plan that no longer describes reality. We keep the step and mark it.
+        失败步保留可见。``Mobile-Agent-v2/run.py:401-424`` 只在反思回答
+        A 时才追加历史，失败尝试会从记录中消失，B/C 之后
+        ``completed_requirements`` 就会过期——模型随后会复用一个不再
+        描述现实的计划。我们保留该步并打上标记。
         """
         recent = self.history[-self.history_window:] if self.history else []
         if not recent:
@@ -87,14 +86,14 @@ class Context:
     def entities_block(self) -> str:
         if not self.entities:
             return ""
-        # Sorted so the serialisation is stable and prompt-prefix-caching friendly.
+        # 排序使序列化稳定，对 prompt 前缀缓存友好。
         body = "\n".join(f"{k}={self.entities[k]}" for k in sorted(self.entities))
         return "已确认的关键信息（后续步骤直接使用，不要重新推断）：\n" + body
 
     def observation_text(self, cands: list[tree_mod.Candidate]) -> str:
         return tree_mod.render_candidates(cands) if cands else "TREE_EMPTY"
 
-    # ── budget enforcement ───────────────────────────────────────────────────
+    # ── 预算约束 ─────────────────────────────────────────────────────────────
 
     def measure(self, cands: list[tree_mod.Candidate] | None = None) -> dict:
         parts = {
@@ -108,11 +107,11 @@ class Context:
         return counts
 
     def trim(self, cands: list[tree_mod.Candidate]) -> tuple[str, list[tree_mod.Candidate], dict]:
-        """Return (context_text, possibly-shortened candidates, token counts).
+        """返回 (context_text, 可能被截短的候选, token 计数)。
 
-        Order of sacrifice under pressure: oldest history line, then tail candidates.
-        Entities and the permanent block are never dropped — losing the task or the
-        remembered meeting time is worse than losing one menu row.
+        超预算时的牺牲顺序：先最旧的历史行，再尾部候选。
+        实体和永久块永不丢弃——丢了任务或记住的会议时间，
+        比丢一行菜单严重。
         """
         kept = list(cands)
         window = self.history_window
@@ -147,7 +146,7 @@ class Context:
             text += "\n\n（上下文因预算已裁剪：保留最近 %d 步、%d 个候选）" % (window, len(kept))
         return text, kept, {"approx_input": tokens, "trimmed": dropped_any}
 
-    # ── updates ──────────────────────────────────────────────────────────────
+    # ── 更新 ─────────────────────────────────────────────────────────────────
 
     def record(self, step: int, route: str, action: str, explain: str, detail: str = "", failed: bool = False) -> None:
         self.history.append(
@@ -155,7 +154,7 @@ class Context:
         )
 
     def merge_entities(self, new: dict) -> None:
-        """Model-proposed entities are merged, never allowed to delete silently."""
+        """模型提出的实体只做合并，不允许悄悄删除已有项。"""
         for k, v in (new or {}).items():
             if v in (None, "", "None"):
                 continue

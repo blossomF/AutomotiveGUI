@@ -1,8 +1,8 @@
-# Runtime requirements — the flat, pip-installable mirror of pyproject.toml.
-# README offers `pip install -r requirements.txt` as the no-uv path, because the
-# Demo Day machine may have neither uv nor make.
-# Versions are pinned here and mirrored in uv.lock; LangGraph in particular shifts
-# its public API between minor versions.
+# 运行时依赖——pyproject.toml 的扁平化、可直接 pip 安装的镜像版本。
+# README 提供 `pip install -r requirements.txt` 作为无 uv 的安装路径，因为
+# Demo Day 的机器上可能既没有 uv 也没有 make。
+# 版本在此固定，并与 uv.lock 保持同步；尤其是 LangGraph，
+# 次版本之间公开 API 会变动。
 mcp>=1.2,<2
 langgraph>=0.2,<0.3
 openai>=1.40

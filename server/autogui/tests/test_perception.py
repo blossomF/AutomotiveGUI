@@ -1,4 +1,4 @@
-"""Perception: tree compaction, landscape grid, screen fingerprint."""
+"""感知层：树压缩、横屏网格、屏幕指纹。"""
 
 import io
 
@@ -10,7 +10,7 @@ from autogui.perception.grid import Grid, encode_jpeg
 from tests.conftest import EMPTY_TREE_XML, SAMPLE_XML
 
 
-# ── tree compaction ──────────────────────────────────────────────────────────────
+# ── 树压缩 ─────────────────────────────────────────────────────────────────────
 
 
 def test_containers_are_dropped_and_targets_kept(landscape):
@@ -19,9 +19,9 @@ def test_containers_are_dropped_and_targets_kept(landscape):
     assert "搜索音乐" in labels
     assert "同意" in labels
     assert "以后再说" in labels
-    # The two full-screen FrameLayouts must not be offered as click targets.
+    # 两个全屏 FrameLayout 绝不能被当成点击目标。
     assert all(c.bounds != (0, 0, 1920, 1080) for c in cands)
-    # A list row spanning full width but only 100px tall is still a real target.
+    # 通栏但只有 100px 高的列表行仍是真实目标。
     assert "告白气球" in labels
 
 
@@ -30,7 +30,7 @@ def test_refs_are_contiguous_and_resolvable(landscape):
     assert [c.ref for c in cands] == list(range(1, len(cands) + 1))
     target = next(c for c in cands if c.label == "同意")
     assert tree_mod.by_ref(cands, target.ref) is target
-    assert tree_mod.by_ref(cands, 999) is None      # -> caller degrades tree to vlm
+    assert tree_mod.by_ref(cands, 999) is None      # -> 调用方把 tree 降级到 vlm
 
 
 def test_render_is_one_short_line_per_candidate(landscape):
@@ -39,7 +39,7 @@ def test_render_is_one_short_line_per_candidate(landscape):
     assert len(text.splitlines()) == len(cands)
     assert text.splitlines()[0].startswith("#1 ")
     assert "[" in text and "]" in text
-    # Compaction is the whole point: far smaller than the raw dump it came from.
+    # 压缩本身就是目的：远小于原始 dump。
     assert len(text) < len(SAMPLE_XML) / 3
 
 
@@ -50,10 +50,10 @@ def test_self_drawn_app_yields_nothing_and_is_reported_unusable(landscape):
 
 
 def test_structural_resource_ids_are_not_offered_as_targets(landscape):
-    """``android:id/statusBarBackground`` carries a value but is never something to tap.
+    """``android:id/statusBarBackground`` 带有值但永远不是可点对象。
 
-    Case-insensitive tail matching matters here: framework ids vary their casing
-    between builds ("statusBarBackground" vs "statusbar_background").
+    这里大小写不敏感的尾部匹配很关键：框架 id 在不同构建间大小写
+    不一致（"statusBarBackground" vs "statusbar_background"）。
     """
     labels = [c.label for c in tree_mod.extract(SAMPLE_XML, screen=landscape, limit=40)]
     assert "statusBarBackground" not in labels
@@ -70,7 +70,7 @@ def test_empty_or_garbage_xml_does_not_raise():
     assert tree_mod.extract("<hierarchy></hierarchy>", limit=10) == []
 
 
-# ── landscape grid ───────────────────────────────────────────────────────────────
+# ── 横屏网格 ───────────────────────────────────────────────────────────────────
 
 
 def test_grid_label_and_pixel_roundtrip():
@@ -82,7 +82,7 @@ def test_grid_label_and_pixel_roundtrip():
 
 
 def test_landscape_cells_are_squareish():
-    """The LightGUIAgent auto-density produced ~128x72px cells here; we want parity."""
+    """LightGUIAgent 的自动密度在这里产生 ~128x72px 的格子；我们要接近正方形。"""
     g = Grid(width=1920, height=1080, cols=20, rows=10)
     ratio = g.cell_w / g.cell_h
     assert 0.6 < ratio < 1.7
@@ -95,10 +95,10 @@ def test_grid_rejects_out_of_range_labels():
 
 
 def test_annotate_resyncs_to_actual_image_size():
-    """A capture smaller than the cached size must not desync labels from pixels."""
+    """比缓存尺寸小的截图不能让标签与像素错位。"""
     buf = io.BytesIO()
     Image.new("RGB", (1280, 720), "navy").save(buf, format="PNG")
-    g = Grid(width=1920, height=1080, cols=20, rows=10)  # stale size on purpose
+    g = Grid(width=1920, height=1080, cols=20, rows=10)  # 故意用过期尺寸
     img = g.annotate(buf.getvalue())
     assert (g.width, g.height) == (1280, 720)
     assert img.size == (1280, 720)
@@ -112,7 +112,7 @@ def test_encode_jpeg_downscales_to_max_side():
     assert max(img.size) == 1568
 
 
-# ── screen fingerprint ───────────────────────────────────────────────────────────
+# ── 屏幕指纹 ───────────────────────────────────────────────────────────────────
 
 
 def _solid_png(color: str) -> bytes:
@@ -128,7 +128,7 @@ def test_signature_is_stable_and_changes_with_text():
 
 
 def test_signature_catches_purely_visual_change():
-    """No text change, only pixels — a video starting to play. Text alone would miss it."""
+    """文本不变、只有像素变——比如视频开始播放。只用文本会漏掉。"""
     same_xml = SAMPLE_XML
     assert compute_signature(same_xml, _solid_png("black")) != compute_signature(same_xml, _solid_png("white"))
 

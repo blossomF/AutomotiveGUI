@@ -1,19 +1,19 @@
-"""The tool surface — plain Python functions, no MCP and no LangGraph imports.
+"""工具面——纯 Python 函数，不 import MCP、不 import LangGraph。
 
-This module is the seam the whole architecture hangs on (技术方案评估.md §3 constraint
-1). Everything the agent can *do* is here as an ordinary function returning a compact
-string. ``mcp_server.py`` only decorates these; ``core/graph.py`` either calls them
-directly (``exec_mode: local``) or through the MCP client (``exec_mode: mcp``).
+这个模块是整个架构悬挂其上的接缝（技术方案评估.md §3 约束 1）。
+agent 能*做*的一切都在这里，是返回紧凑字符串的普通函数。
+``mcp_server.py`` 只是给它们套壳；``core/graph.py`` 要么直接调用
+（``exec_mode: local``），要么通过 MCP 客户端调用（``exec_mode: mcp``）。
 
-Two deliberate conventions:
+两条刻意遵守的约定：
 
-* **Return compressed ``str``, never dict.** Tool output goes straight into the model
-  context. The ``{"ok": true, "code": 0, ...}`` wrapping an external framework would
-  emit is pure burned tokens. (Follows ``android-agent/gitd/mcp_server.py:106``, which
-  returns ``str`` from every tool.)
-* **No ``device`` parameter.** android-agent threads a serial through all 62 tools
-  because it drives many phones. We target one head unit, bound at startup — that
-  parameter would be repeated tokens on every single call.
+* **返回压缩的 ``str``，绝不返回 dict。** 工具输出直接进入模型
+  上下文。外部框架会输出的 ``{"ok": true, "code": 0, ...}`` 包装
+  纯属烧 token。（跟随 ``android-agent/gitd/mcp_server.py:106``，
+  每个工具都返回 ``str``。）
+* **没有 ``device`` 参数。** android-agent 因为驱动多台手机，把 serial
+  穿过全部 62 个工具。我们面向单台车机，启动时绑定——那个参数
+  会在每次调用里重复烧 token。
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ _text_input: TextInput | None = None
 
 def bind_device(serial: str | None = "auto", *, input_chain: list[str] | None = None,
                 display: int | None = None, verbose: bool = False) -> Device:
-    """Resolve and remember the single target device. Called once at startup."""
+    """解析并记住唯一目标设备。启动时调用一次。"""
     global _device, _text_input
     _device = get_device(serial, display=display)
     order = tuple(input_chain) if input_chain else STRATEGIES
@@ -50,30 +50,30 @@ def text_input() -> TextInput:
     return _text_input
 
 
-# ── perception (text surfaces; image bytes go through perception/capture.py) ─────
+# ── 感知（文本面；图像字节走 perception/capture.py） ──────────────────────────
 
 
 def get_screen_size() -> str:
-    """Screen pixel size, e.g. ``1920x1080``."""
+    """屏幕像素尺寸，例如 ``1920x1080``。"""
     w, h = dev().screen_size()
     return f"{w}x{h}"
 
 
 def capture_screenshot_b64() -> str:
-    """Full-resolution PNG of the main display, base64-encoded.
+    """主屏的原始分辨率 PNG，base64 编码。
 
-    Only the VLM-degraded route needs this through the tool surface; the tree route
-    never ships an image at all, which is where the token economy comes from.
+    只有 VLM 降级路由需要经工具面拿它；tree 路由从不发图——
+    token 经济就来自这里。
     """
     return base64.b64encode(dev().screenshot()).decode("ascii")
 
 
 def dump_ui_tree(brief: bool = True) -> str:
-    """Raw ``uiautomator`` XML hierarchy.
+    """原始 ``uiautomator`` XML 层级。
 
-    ``brief=True`` returns node count plus a few samples rather than the whole tree —
-    a raw dump is 40-120 KB and would wreck the context budget. The compact candidate
-    list the model actually sees is produced by ``perception/tree.py``.
+    ``brief=True`` 返回节点数加少量样例，而不是整棵树——原始 dump
+    有 40-120 KB，会击穿上下文预算。模型真正看到的压缩候选列表
+    由 ``perception/tree.py`` 生成。
     """
     xml = dev().dump_xml()
     if not brief:
@@ -83,11 +83,11 @@ def dump_ui_tree(brief: bool = True) -> str:
 
 
 def ui_candidates(limit: int = 40) -> str:
-    """Compact numbered candidate list — the path-B decision surface.
+    """紧凑的编号候选列表——路径 B 的决策面。
 
-    Format per line: ``#12 搜索 [960,86]``. The model answers with the ``node_ref``
-    integer and never copies coordinates, which removes a whole class of parsing
-    errors (and is why tree mode beats grid mode on accuracy in our 9/19 tests).
+    每行格式：``#12 搜索 [960,86]``。模型用 ``node_ref`` 整数回答，
+    从不复制坐标，消除了一整类解析错误（这也是 tree 模式在 9/19
+    实测中准确率高于网格模式的原因）。
     """
     from autogui.perception.tree import candidates_from_xml, render_candidates
 
@@ -99,7 +99,7 @@ def ui_candidates(limit: int = 40) -> str:
 
 
 def find_and_center(match: str) -> str:
-    """Locate the first node whose text/content-desc contains ``match``; return ``x,y``."""
+    """找到 text/content-desc 包含 ``match`` 的第一个节点；返回 ``x,y``。"""
     xml = dev().dump_xml()
     node = find_node(xml, text=match) or find_node(xml, desc=match)
     if not node:
@@ -110,7 +110,7 @@ def find_and_center(match: str) -> str:
     return f"{c[0]},{c[1]}" if c else f"NO_BOUNDS:{match}"
 
 
-# ── actuation ────────────────────────────────────────────────────────────────────
+# ── 动作执行 ──────────────────────────────────────────────────────────────────
 
 
 def tap(x: int, y: int) -> str:
@@ -129,7 +129,7 @@ def swipe(x1: int, y1: int, x2: int, y2: int, ms: int = 400) -> str:
 
 
 def input_text(text: str, clear_first: bool = False) -> str:
-    """Type into the focused field, degrading yadb -> ADBKeyboard -> ASCII."""
+    """输入到聚焦的输入框，按 yadb -> ADBKeyboard -> ASCII 降级。"""
     result = text_input().type(text, clear_first=clear_first)
     note = f" [{result.note}]" if result.note else ""
     return f"OK input({result.strategy}) sent={result.typed!r}{note}"
@@ -150,7 +150,7 @@ def press_home() -> str:
     return "OK home"
 
 
-# ── apps ─────────────────────────────────────────────────────────────────────────
+# ── 应用 ─────────────────────────────────────────────────────────────────────
 
 
 def launch_app(package: str) -> str:
@@ -171,18 +171,18 @@ def current_app() -> str:
 
 
 def list_apps(filter_text: str = "") -> str:
-    """Installed packages, optionally substring-filtered. For discovering real CEA1.3 names."""
+    """已安装的包，可选子串过滤。用于发现真实的 CEA1.3 包名。"""
     pkgs = dev().list_packages()
     if filter_text:
         pkgs = [p for p in pkgs if filter_text.lower() in p.lower()]
     return "\n".join(pkgs) if pkgs else "NONE"
 
 
-# ── synchronisation ──────────────────────────────────────────────────────────────
+# ── 同步 ─────────────────────────────────────────────────────────────────────
 
 
 def wait_for_text(text: str, timeout: float = 12) -> str:
-    """Block until ``text`` shows up in the UI tree. The cheap substitute for a screenshot loop."""
+    """阻塞直到 ``text`` 出现在 UI 树中。截图轮询循环的廉价替代品。"""
     try:
         dev().wait_for(text, timeout=timeout)
         return f"OK found({text!r})"
@@ -195,13 +195,13 @@ def sleep(seconds: float = 1.0) -> str:
     return f"OK slept {seconds}s"
 
 
-# ── skills ───────────────────────────────────────────────────────────────────────
+# ── 技能 ─────────────────────────────────────────────────────────────────────
 
 
 def run_skill(name: str, params_json: str = "{}") -> str:
-    """Execute a declarative YAML skill. Zero VLM calls.
+    """执行声明式 YAML 技能。零 VLM 调用。
 
-    Late import keeps ``skills`` out of the bridge's dependency direction.
+    延迟 import 让 ``skills`` 保持在 bridge 依赖方向之外。
     """
     import json
 
@@ -214,14 +214,14 @@ def run_skill(name: str, params_json: str = "{}") -> str:
     try:
         trace = run_by_name(name, params)
     except SkillMiss as e:
-        # Not an error to report as failure — the caller degrades to tree/vlm.
+        # 不是要上报为失败的错误——调用方会降级到 tree/vlm。
         return f"SKILL_MISS {name}: {e}"
     except ADBError as e:
         return f"SKILL_ADB_FAIL {name}: {e}"
     return "OK skill " + name + "\n" + "\n".join(trace)
 
 
-# ── registry consumed by mcp_server.py ───────────────────────────────────────────
+# ── 工具注册表（供 mcp_server.py 消费） ───────────────────────────────────────
 
 TOOLS = [
     get_screen_size,

@@ -1,12 +1,12 @@
 @echo off
-REM One-command entry for the Demo Day machine (Windows).
-REM The committee sends someone to build the environment from the README alone, so
-REM this script must work without uv, without make, and without a shell that isn't cmd.
+REM Demo Day 机器（Windows）的一键入口。
+REM 组委会会派人只照着 README 搭环境，所以
+REM 本脚本必须不依赖 uv、不依赖 make、不依赖 cmd 以外的 shell 也能跑。
 REM
-REM   run.bat check                     device + capture + input self-test
-REM   run.bat dump-report               measure tree quality -> artifacts\dump-report.md
-REM   run.bat selftest                  offline tests, no device needed
-REM   run.bat "在音乐App播放《七里香》"    run a task
+REM   run.bat check                     设备 + 抓帧 + 输入自检
+REM   run.bat dump-report               实测控件树质量 -> artifacts\dump-report.md
+REM   run.bat selftest                  离线测试，不需要车机
+REM   run.bat "在音乐App播放《七里香》"    跑一个任务
 
 setlocal
 cd /d "%~dp0"

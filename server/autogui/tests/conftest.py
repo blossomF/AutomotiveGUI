@@ -1,8 +1,8 @@
-"""Shared fixtures: a landscape head-unit UI dump with no device and no network.
+"""共享 fixture：无需设备、无需网络的横屏车机 UI dump。
 
-The XML mirrors what ``uiautomator dump`` actually emits on these builds — a deep
-nesting of unlabelled FrameLayout containers around a minority of genuinely
-addressable nodes, which is exactly the case ``perception/tree.py`` has to filter.
+XML 模拟这些构建上 ``uiautomator dump`` 的真实输出——大量无标签的
+FrameLayout 容器深度嵌套，其中只有一小部分真正可寻址的节点，
+这正是 ``perception/tree.py`` 必须过滤的情况。
 """
 
 import pytest
@@ -27,7 +27,7 @@ SAMPLE_XML = """<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
   </node>
 </hierarchy>"""
 
-# What a self-drawn / SurfaceView app produces: a big tree with nothing addressable.
+# 自绘 / SurfaceView App 的产物：一大棵树却没有任何可寻址节点。
 EMPTY_TREE_XML = """<?xml version='1.0'?>
 <hierarchy rotation="0">
   <node index="0" text="" resource-id="" class="android.widget.FrameLayout" content-desc="" clickable="false" bounds="[0,0][1920,1080]" />

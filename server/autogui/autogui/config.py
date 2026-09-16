@@ -1,10 +1,9 @@
-"""Configuration loading.
+"""配置加载。
 
-Deliberately *not* modelled on ``LightGUIAgent/lightguiagent/settings.py``, which
-runs ADB auto-detection inside ``Settings.__init__`` and then needs a lazy
-``_ConfigProxy`` layer (``config.py:50-105``) to stop that happening at import time.
-Configuration here is pure data and never touches a device; device probing is an
-explicit call from ``main.py``.
+刻意*没有*照搬 ``LightGUIAgent/lightguiagent/settings.py``——那套代码在
+``Settings.__init__`` 里就跑 ADB 自动探测，随后还需要一层懒加载的
+``_ConfigProxy``（``config.py:50-105``）来阻止 import 时触发。这里的配置是
+纯数据，从不触碰设备；设备探测是 ``main.py`` 里的显式调用。
 """
 
 from __future__ import annotations
@@ -20,15 +19,15 @@ DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 
 
 class GridConfig(BaseModel):
-    """Overlay grid for the VLM fallback route.
+    """VLM 兜底路由的叠加网格。
 
-    Landscape is stated explicitly rather than derived: LightGUIAgent's auto-density
-    (settings.py:159-171) clamps rows to ``max(15, ...)``, which on a 1920x1080 head
-    unit silently produces 15 rows of ~128x72px cells instead of the ~10 a landscape
-    screen wants. See 技术方案评估.md §2 C-11.
+    横屏是显式声明的，而不是推导出来的：LightGUIAgent 的自动密度
+    （settings.py:159-171）把行数钳制到 ``max(15, ...)``，在 1920x1080
+    车机上会悄悄得到 15 行 ~128x72px 的格子，而不是横屏应有的 ~10 行。
+    见 技术方案评估.md §2 C-11。
     """
 
-    cols: int = Field(default=20, ge=5, le=26)  # 26 -> column letters A..Z
+    cols: int = Field(default=20, ge=5, le=26)  # 26 -> 列字母 A..Z
     rows: int = Field(default=10, ge=3, le=40)
     line_color: tuple = (255, 0, 0)
     line_width: int = 3
@@ -36,7 +35,7 @@ class GridConfig(BaseModel):
     label_color: tuple = (255, 255, 0)
     label_bg: tuple = (0, 0, 0, 180)
     jpeg_quality: int = Field(default=85, ge=40, le=100)
-    max_side: int = Field(default=1568, ge=512, le=2560)  # downscale before encode
+    max_side: int = Field(default=1568, ge=512, le=2560)  # 编码前先降采样
 
     @field_validator("cols")
     @classmethod
@@ -47,9 +46,9 @@ class GridConfig(BaseModel):
 
 
 class GLMConfig(BaseModel):
-    """GLM 5.3 via its OpenAI-compatible endpoint. Key comes from the environment."""
+    """GLM 5.3，走 OpenAI 兼容端点。Key 从环境变量读取。"""
 
-    model: str = "glm-4v-plus"  # TODO 9/15: replace with the exact id the committee issues
+    model: str = "glm-4v-plus"  # TODO 9/15: 换成组委会发放 key 对应的确切型号 id
     base_url: str = "https://open.bigmodel.cn/api/paas/v4/"
     api_key_env: str = "GLM_API_KEY"
     temperature: float = 0.1
@@ -66,8 +65,8 @@ class GLMConfig(BaseModel):
 
 class AgentConfig(BaseModel):
     max_steps: int = Field(default=20, ge=1, le=60)
-    wall_clock_limit: float = Field(default=180.0, ge=30, le=900)  # seconds; guard input
-    no_progress_limit: int = Field(default=3, ge=1, le=10)  # consecutive unchanged screens
+    wall_clock_limit: float = Field(default=180.0, ge=30, le=900)  # 秒；guard 的输入
+    no_progress_limit: int = Field(default=3, ge=1, le=10)  # 屏幕指纹连续不变的步数
     delay_after_action: float = Field(default=1.0, ge=0.0, le=10.0)
     history_window: int = Field(default=5, ge=1, le=20)
     token_budget: int = Field(default=8000, ge=1000, le=128000)
@@ -81,16 +80,16 @@ class SkillConfig(BaseModel):
 
 
 class AppConfig(BaseModel):
-    """A head-unit app we are allowed to touch.
+    """一个我们被允许操作的车机 App。
 
-    Contest rule 4.2 restricts scenarios to the CEA1.3 preinstalled set plus
-    Bilibili / Feishu / 外卖, so this is a closed list — ``main.py --check`` walks it
-    to produce the path A/B/C decision table.
+    竞赛规则 4.2 把场景限定在 CEA1.3 预装集 + 哔哩哔哩 / 飞书 / 外卖，
+    所以这是一个封闭列表——``main.py --check`` 遍历它来生成路径 A/B/C
+    决策表。
 
-    ``package`` is blank until the borrowed head unit is attached: run
-    ``python main.py --packages`` to see what is actually installed rather than
-    guessing from the phone-oriented list in
-    ``LightGUIAgent/lightguiagent/claude_client.py:160-163``.
+    ``package`` 在借到车机之前留空：运行
+    ``python main.py --packages`` 看实际装了什么，而不是照着
+    ``LightGUIAgent/lightguiagent/claude_client.py:160-163`` 里那份
+    手机向的列表猜。
     """
 
     name: str
@@ -100,9 +99,9 @@ class AppConfig(BaseModel):
 
 class Config(BaseModel):
     exec_mode: Literal["local", "mcp"] = "local"
-    declared_path: Literal["A", "B", "C"] = "C"  # frozen at 9/19 from real dump results
+    declared_path: Literal["A", "B", "C"] = "C"  # 9/19 依据实测 dump 结果冻结
     device_serial: str = "auto"
-    display_id: Optional[int] = None  # set when the default capture is not the centre console
+    display_id: Optional[int] = None  # 默认捕获不是中控屏时才设置
     input_chain: list[str] = Field(default_factory=lambda: ["yadb", "adbkeyboard", "ascii"])
     grid: GridConfig = Field(default_factory=GridConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)

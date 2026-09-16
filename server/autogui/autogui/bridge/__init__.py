@@ -1,1 +1,1 @@
-"""Execution layer: ADB primitives and the MCP tool bodies."""
+"""执行层：ADB 原语 + MCP 工具本体。"""

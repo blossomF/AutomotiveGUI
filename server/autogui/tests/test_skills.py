@@ -1,7 +1,7 @@
-"""Skills: YAML loading, keyword routing, and the SkillMiss degrade contract.
+"""技能层：YAML 加载、关键词路由、SkillMiss 降级契约。
 
-None of these touch a device — the executor's device calls are covered by
-``main.py --skill-only`` on real hardware.
+这些测试都不触碰设备——执行器的设备调用由真机上的
+``main.py --skill-only`` 覆盖。
 """
 
 import textwrap
@@ -62,7 +62,7 @@ def test_index_is_one_compact_line_per_skill_for_the_permanent_block(book):
     index = book.index()
     assert "play_song(song=...)" in index
     assert len(index.splitlines()) == 2
-    # It goes into *every* prompt, so it has to stay small.
+    # 它会进*每一轮*提示词，所以必须保持很小。
     assert len(index) < 200
 
 
@@ -78,10 +78,10 @@ def test_malformed_yaml_is_skipped_not_fatal(tmp_path):
     (tmp_path / "good").mkdir()
     (tmp_path / "good" / "skill.yaml").write_text(MUSIC_YAML, encoding="utf-8")
     book = SkillBook(tmp_path, device=None, text_input=None)  # type: ignore[arg-type]
-    assert book.by_id  # the valid one still loaded
+    assert book.by_id  # 合法的那个仍然加载成功
 
 
-# ── routing ──────────────────────────────────────────────────────────────────────
+# ── 路由 ───────────────────────────────────────────────────────────────────────
 
 
 def test_keyword_trigger_and_param_extraction(book):
@@ -105,11 +105,11 @@ def test_empty_task_matches_nothing(book):
     assert match_keywords("", book) is None
 
 
-# ── the degrade contract ─────────────────────────────────────────────────────────
+# ── 降级契约 ───────────────────────────────────────────────────────────────────
 
 
 def test_missing_required_param_raises_skill_miss(book):
-    """Better to hand the turn to the model than to run a recipe with a made-up slot."""
+    """宁可把这一轮交给模型，也不要用编造的槽位值跑配方。"""
     with pytest.raises(SkillMiss):
         book.run("music.play_song", {})
 
@@ -120,8 +120,8 @@ def test_unknown_skill_raises_skill_miss(book):
 
 
 def test_step_referencing_an_unknown_param_fails_loudly(book):
-    """A step naming a param its skill does not declare is an authoring bug. It must
-    surface as SkillMiss, never as a silently-empty type step."""
+    """步骤引用了技能未声明的参数属于编写 bug。必须以 SkillMiss
+    暴露出来，绝不能变成静默为空的 type 步骤。"""
     from autogui.skills.base import Skill
 
     stray = Skill(app="music", name="stray", summary="", params=[], steps=[], package="com.car.music")
@@ -137,11 +137,11 @@ def test_param_substitution_in_hints(book):
     assert book._sub(song, "{package}", {}) == "com.car.music"
 
 
-# ── popup word lists must be localized (技术方案评估.md §2 A-3) ──────────────────
+# ── 弹窗词表必须本地化（技术方案评估.md §2 A-3） ────────────────────────────────
 
 
 def test_default_popup_words_are_chinese():
-    """The android-agent original is English/TikTok-only and matches nothing here."""
+    """android-agent 原版是英文/TikTok 专属的，在这里什么都匹配不到。"""
     assert all(any("一" <= ch <= "鿿" for ch in w) for w in GENERIC_DISMISS[:8])
     assert "以后再说" in GENERIC_DISMISS
     assert "not now" not in [w.lower() for w in GENERIC_DISMISS]

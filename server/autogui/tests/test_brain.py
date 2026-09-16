@@ -1,4 +1,4 @@
-"""Brain layer: action parsing, JSON strictness, reflection, context budget."""
+"""大脑层：动作解析、JSON 严格性、反思、上下文预算。"""
 
 import pytest
 
@@ -9,14 +9,14 @@ from autogui.perception import tree as tree_mod
 from tests.conftest import SAMPLE_XML
 
 
-# ── action space ─────────────────────────────────────────────────────────────────
+# ── 动作空间 ─────────────────────────────────────────────────────────────────────
 
 
 def test_back_and_home_exist():
-    """LightGUIAgent's action list has neither, so recovery meant guessing at a
-    top-left back button in the grid. Both must be first-class here."""
+    """LightGUIAgent 的动作列表两者都没有，恢复只能靠猜网格左上角的返回键。
+    这里必须是两个一等动作。"""
     assert "BACK" in ACTION_NAMES and "HOME" in ACTION_NAMES
-    assert "FAIL" in ACTION_NAMES      # an agent needs a way to give up honestly
+    assert "FAIL" in ACTION_NAMES      # agent 需要诚实放弃的途径
     assert parse_action({"action": "back"})["type"] == "BACK"
 
 
@@ -37,7 +37,7 @@ def test_rejects_unknown_action_and_bad_scroll_direction():
 
 
 def test_wait_seconds_is_capped():
-    """A model asking for a 600s wait must not eat the whole Demo Day slot."""
+    """模型要求等 600 秒时绝不能吃掉整个 Demo Day 时间槽。"""
     assert parse_action({"action": "WAIT", "seconds": 600})["seconds"] == 5.0
     assert parse_action({"action": "WAIT"})["seconds"] == 1.5
 
@@ -47,7 +47,7 @@ def test_explain_is_length_bounded():
     assert len(action["explain"]) <= 200
 
 
-# ── JSON extraction ──────────────────────────────────────────────────────────────
+# ── JSON 提取 ────────────────────────────────────────────────────────────────────
 
 
 def test_json_from_plain_object():
@@ -74,19 +74,19 @@ def test_unparsable_response_raises(bad):
         first_json_object(bad)
 
 
-# ── reflection parsing (技术方案评估.md §2 B-5) ──────────────────────────────────
+# ── 反思解析（技术方案评估.md §2 B-5） ──────────────────────────────────────────
 
 
 def test_reflection_is_strict_not_substring():
-    """Mobile-Agent-v2 does ``if 'A' in reflect`` (run.py:401). Any Latin letter A in
-    the model's free-form reasoning — 'ADB', 'Activity', 'App' — silently misreads as
-    success. Bare-token matching removes that class of bug."""
+    """Mobile-Agent-v2 用 ``if 'A' in reflect``（run.py:401）。模型自由推理中的
+    任何拉丁字母 A——'ADB'、'Activity'、'App'——都会被误读成成功。
+    严格裸词匹配消除这类 bug。"""
     assert parse_reflection("A") == "A"
     assert parse_reflection("B") == "B"
     assert parse_reflection("C") == "C"
     assert parse_reflection("A. 页面变化了") == "A"
     assert parse_reflection("回答： C") == "C"
-    # The v2 regression, pinned:
+    # v2 的回归用例，固定下来：
     assert parse_reflection("The ADB activity started the App on a new Activity") == "UNKNOWN"
 
 
@@ -95,7 +95,7 @@ def test_unparsable_reflection_is_unknown_not_silently_A():
     assert parse_reflection("我无法判断") == "UNKNOWN"
 
 
-# ── context economy ──────────────────────────────────────────────────────────────
+# ── 上下文经济 ───────────────────────────────────────────────────────────────────
 
 
 def _ctx(**kw) -> Context:
@@ -105,7 +105,7 @@ def _ctx(**kw) -> Context:
 
 
 def test_tree_observation_is_text_only():
-    """No image on the tree route is where most of the token saving comes from."""
+    """tree 路由不发图，是 token 节省的大头。"""
     c = _ctx()
     cands = tree_mod.extract(SAMPLE_XML, screen=(1920, 1080), limit=40)
     text, kept, counts = c.trim(cands)
@@ -126,7 +126,7 @@ def test_history_window_slides():
 
 
 def test_failed_steps_stay_in_history():
-    """v2 drops failed steps from history (run.py:401-424); we keep and mark them."""
+    """v2 把失败步从历史中丢掉（run.py:401-424）；我们保留并打标记。"""
     c = _ctx()
     c.record(1, "tree", "CLICK #4", "点击", failed=True)
     assert "✗" in c.history_block()
@@ -135,7 +135,7 @@ def test_failed_steps_stay_in_history():
 def test_entities_survive_and_never_delete_silently():
     c = _ctx()
     c.merge_entities({"时间": "19:00", "地址": "公司"})
-    c.merge_entities({"时间": "", "新增": "值"})   # empty must not erase
+    c.merge_entities({"时间": "", "新增": "值"})   # 空值不得擦除
     assert c.entities["时间"] == "19:00"
     assert c.entities["新增"] == "值"
 
@@ -151,7 +151,7 @@ def test_budget_pressure_trims_history_then_candidates():
     assert counts["approx_input"] <= 1200
     assert len(kept) < len(cands)
     assert "裁剪" in text
-    assert "任务" in text                  # the task itself is never dropped
+    assert "任务" in text                  # 任务本身永不丢弃
 
 
 def test_task_and_entities_survive_extreme_pressure():
@@ -163,6 +163,6 @@ def test_task_and_entities_survive_extreme_pressure():
 
 def test_token_estimator_orders_cjk_and_ascii_correctly():
     assert estimate_tokens("") == 0
-    assert estimate_tokens("播放七里香") == 5            # ~1 per CJK char
-    assert estimate_tokens("a" * 400) == 100             # ~1 per 4 ascii chars
+    assert estimate_tokens("播放七里香") == 5            # CJK 约 1/字
+    assert estimate_tokens("a" * 400) == 100             # ascii 约 1/4 字符
     assert estimate_tokens("播放" * 50) < estimate_tokens("a" * 400) + 200

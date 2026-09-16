@@ -1,1 +1,1 @@
-"""Perception: what the agent can observe about the screen."""
+"""感知层：agent 能观察到的屏幕信息。"""

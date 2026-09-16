@@ -1,24 +1,21 @@
-"""Declarative YAML recipes, executed with zero VLM calls.
+"""声明式 YAML 配方，零 VLM 调用执行。
 
-The file shape follows ``android-agent/gitd/skills/<app>/skill.yaml`` — a package
-name, a list of named skills with parameters, and a step list — together with that
-project's ``popup_detectors`` idea (``adb.py:134-150`` plus the three-tier
-``dismiss_popups`` at :690-739). What we deliberately do **not** take is its
-``Action``/``Workflow`` class system with precondition/postcondition/rollback: that
-abstraction is built for replaying recorded macros across many devices, and mapping
-a car head unit's UI onto it would cost days we do not have. A step is a dict and a
-dispatcher resolves it.
+文件格式沿用 ``android-agent/gitd/skills/<app>/skill.yaml``——包名、
+带参数和步骤列表的命名技能——以及该项目的 ``popup_detectors`` 思路
+（``adb.py:134-150`` 加 :690-739 的三层 ``dismiss_popups``）。我们
+刻意**不**照搬的是它的 ``Action``/``Workflow`` 类体系（前置条件/
+后置条件/回滚）：那套抽象是为跨设备回放录制宏而建的，把车机 UI
+映射到上面会花掉我们没有的几天。步骤就是一个 dict，由 dispatcher
+解析。
 
-Two rules that make this layer score well rather than just exist:
+让这一层不只是存在、还能得分的两条规则：
 
-  * **A hint that cannot be resolved raises ``SkillMiss``, which the router turns into
-    a graceful degrade to the generic tree/vlm route.** A brittle recipe is
-    therefore never worse than no recipe — that is what makes skills safe to author
-    in bulk in a week. It is also the same degrade path that earns the +10 technical
-    depth points, so the two justifications share one implementation.
-  * **Coordinates are never written into a recipe.** Hints are text/desc/rid
-    matchers resolved against a *fresh* dump each step, so a recipe survives a UI
-    refresh or a resolution change.
+  * **解析不了的 hint 抛 ``SkillMiss``，由 router 转成向通用
+    tree/vlm 路由的优雅降级。** 因此一个脆弱的配方永远不会比没有
+    配方更糟——这正是技能可以一周内批量编写且安全的原因。它也和
+    挣 +10 技术深度的降级路径共用同一套实现。
+  * **坐标永远不写进配方。** hint 是 text/desc/rid 匹配器，每步
+    对*新鲜的* dump 解析，所以配方能扛住 UI 改版和分辨率变化。
 """
 
 from __future__ import annotations
@@ -32,8 +29,9 @@ import yaml
 from autogui.bridge.adb import Device, find_node, node_center
 from autogui.bridge.input import TextInput
 
-# Chinese head-unit popups. The android-agent original is English/TikTok-specific
-# ({"not now","skip","cancel",...}) and matches nothing here — see 技术方案评估.md §2 A-3.
+# 中文车机弹窗。android-agent 原版是英文/TikTok 专属的
+# （{"not now","skip","cancel",...}），在这里什么都匹配不到——
+# 见 技术方案评估.md §2 A-3。
 DEFAULT_POPUPS: list[dict] = [
     {"detect": "用户协议", "button": "同意"},
     {"detect": "隐私政策", "button": "同意"},
@@ -48,7 +46,7 @@ GENERIC_DISMISS = ("以后再说", "暂不", "暂不开启", "稍后再说", "�
 
 
 class SkillMiss(RuntimeError):
-    """A step could not be located on the current screen — caller should degrade."""
+    """某一步在当前屏幕上找不到目标——调用方应降级。"""
 
 
 @dataclass
@@ -67,12 +65,12 @@ class Skill:
         return f"{self.name}({args}) — {self.summary}"
 
     def trigger_words(self) -> list[str]:
-        """Declared triggers, falling back to the skill and app names."""
+        """声明的触发词，缺省回退到技能名和 App 名。"""
         return [t for t in self.triggers if t] or [self.name.replace("_", ""), self.app]
 
 
 class SkillBook:
-    """All loaded skills, plus the executor."""
+    """全部已加载技能 + 执行器。"""
 
     def __init__(self, root: Path | str, device: Device, text_input: TextInput):
         self.device = device
@@ -81,7 +79,7 @@ class SkillBook:
         self.by_id: dict[str, Skill] = {}
         self.load()
 
-    # ── loading ──────────────────────────────────────────────────────────────
+    # ── 加载 ─────────────────────────────────────────────────────────────────
 
     def load(self) -> None:
         self.by_id.clear()
@@ -112,7 +110,7 @@ class SkillBook:
                 self.by_id[f"{skill.app}.{skill.name}"] = skill
 
     def index(self) -> str:
-        """One line per skill, injected into the permanent prompt block."""
+        """每个技能一行，注入永久提示词块。"""
         return "\n".join(s.signature() for s in sorted(self.by_id.values(), key=lambda x: x.app)) or "（无）"
 
     def get(self, key: str) -> Skill | None:
@@ -121,13 +119,13 @@ class SkillBook:
         hits = [s for k, s in self.by_id.items() if k.endswith("." + key) or s.name == key]
         return hits[0] if len(hits) == 1 else None
 
-    # ── execution ────────────────────────────────────────────────────────────
+    # ── 执行 ─────────────────────────────────────────────────────────────────
 
     def run(self, key: str, params: dict | None = None) -> list[str]:
-        """Execute a recipe, returning a trace of human-readable step lines.
+        """执行配方，返回人类可读的步骤轨迹。
 
-        Raises ``SkillMiss`` on the first unresolvable hint; the graph catches it and
-        reroutes through the generic channel.
+        第一个解析不了的 hint 即抛 ``SkillMiss``；图捕获它并
+        改走通用通道。
         """
         skill = self.get(key)
         if skill is None:
@@ -144,7 +142,7 @@ class SkillBook:
         return trace
 
     def _sub(self, skill: Skill, value, args: dict):
-        """Substitute ``{param}`` and the implicit ``{package}``."""
+        """替换 ``{param}`` 和隐式的 ``{package}``。"""
         if not isinstance(value, str):
             return value
         out = value
@@ -155,7 +153,7 @@ class SkillBook:
         return out
 
     def _arg_or_text(self, skill: Skill, step: dict, args: dict) -> str:
-        """A step takes either ``arg: <param name>`` or a literal ``text:``."""
+        """一步可以取 ``arg: <参数名>`` 或字面 ``text:``。"""
         if step.get("arg"):
             key = step["arg"]
             if key not in args:
@@ -227,7 +225,7 @@ class SkillBook:
 
         raise SkillMiss(f"unsupported step act={act!r}")
 
-    # ── helpers ──────────────────────────────────────────────────────────────
+    # ── 辅助 ─────────────────────────────────────────────────────────────────
 
     def _describe(self, step: dict) -> str:
         hint = step.get("hint") or {}
@@ -239,7 +237,7 @@ class SkillBook:
         return "?"
 
     def _locate(self, skill: Skill, step: dict, args: dict) -> str:
-        """Resolve a hint into one node against a fresh dump."""
+        """对一份新鲜 dump，把 hint 解析成一个节点。"""
         hint = step.get("hint") or {}
         match = {k: self._sub(skill, v, args) for k, v in hint.items() if k in ("text", "desc", "rid")}
         if not match:
@@ -253,7 +251,7 @@ class SkillBook:
             found = find_nodes(xml, clickable_only=True, **{key: val})
             if len(found) > nth:
                 break
-        if not found:  # retry without the clickable requirement
+        if not found:  # 重试：去掉 clickable 要求
             for key, val in match.items():
                 found = find_nodes(xml, **{key: val})
                 if len(found) > nth:
@@ -277,14 +275,14 @@ class SkillBook:
         self.device.swipe(*vector[direction])
 
     def dismiss(self, skill: Skill, extra: list | None = None) -> int:
-        """Three-tier popup dismissal: declared -> generic words -> nothing.
+        """三层弹窗处理：声明的 -> 通用词表 -> 放弃。
 
-        Mirrors the structure of ``android-agent`` ``dismiss_popups`` (adb.py:690-739)
-        with a Chinese word list, and keeps its oversized-node guard so a full-width
-        caption is not mistaken for a dismiss button.
+        结构对齐 ``android-agent`` 的 ``dismiss_popups``
+        （adb.py:690-739），换成中文词表，并保留其超大节点
+        保护，避免把整宽字幕误当成关闭按钮。
         """
         closed = 0
-        for _ in range(4):  # popups sometimes stack
+        for _ in range(4):  # 弹窗有时会叠着出
             xml = self.device.dump_xml()
             if not xml:
                 break
@@ -303,7 +301,7 @@ class SkillBook:
                 cands = find_nodes(xml, text=btn) or find_nodes(xml, desc=btn)
                 cands = [c for c in cands if node_bounds(c)]
                 if cands:
-                    cands.sort(key=lambda n: node_bounds(n)[1])  # topmost instance
+                    cands.sort(key=lambda n: node_bounds(n)[1])  # 最靠上的实例
                     self.device.tap(*node_center(cands[0]))
                     closed += 1
                     target = btn
@@ -318,7 +316,7 @@ class SkillBook:
                 if not b:
                     continue
                 w, h = self.device.screen_size()
-                if (b[2] - b[0]) > w * 0.6:  # content area, not a button
+                if (b[2] - b[0]) > w * 0.6:  # 内容区，不是按钮
                     continue
                 if b[3] < 40:
                     continue
@@ -333,7 +331,7 @@ class SkillBook:
 
 
 def run_by_name(key: str, params: dict, *, device: Device | None = None) -> list[str]:
-    """Convenience entry used by the ``run_skill`` MCP tool."""
+    """``run_skill`` MCP 工具用的便捷入口。"""
     from autogui.config import PROJECT_ROOT, load
 
     if device is None:

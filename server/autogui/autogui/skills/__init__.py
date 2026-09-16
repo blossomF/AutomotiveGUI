@@ -1,1 +1,1 @@
-"""Reusable per-app skills (declarative recipes)."""
+"""可复用的分 App 技能（声明式配方）。"""

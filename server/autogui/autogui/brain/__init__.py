@@ -1,1 +1,1 @@
-"""Model-facing brain: GLM client, prompts, context layering."""
+"""面向模型的大脑层：GLM 客户端、提示词、上下文分层。"""
