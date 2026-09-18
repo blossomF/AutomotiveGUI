@@ -18,6 +18,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6"]
+# 语音输入（章程 §4.6 加分 +3）：独立可选组，核心 6 依赖保持不变
+voice = ["sounddevice>=0.4", "websocket-client>=1.6"]
 
 [project.scripts]
 autogui = "main:main"

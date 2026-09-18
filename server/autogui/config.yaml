@@ -43,10 +43,21 @@ skills:
   enabled: true
   directory: skills
 
+# 讯飞流式听写（章程 §4.6 加分项）：语音输入通道，可插拔，主循环不依赖
+# 凭证直接写在下方；留空则回退环境变量 IFLYTEK_APPID / IFLYTEK_API_KEY / IFLYTEK_API_SECRET
+voice:
+  appid: ad8987fe
+  api_key: dc1a6fb17594d12d553a42ce745d23e2
+  api_secret: OGFjYWZjYzZhZTUzZTdiMWU4OGZmM2U2
+  iat_url: ""            # 留空 = 讯飞公网 wss://iat-api.xfyun.cn/v2/iat
+  max_seconds: 15        # 最长录音秒数
+  silence_seconds: 0.8   # 尾部连续静音后自动停止
+  silence_threshold: 120 # 静音判定 RMS 阈值（实测底噪<90，说话200~540）
+
 glm:
-  # TODO 9/15: 换成组委会发放 key 对应的确切型号 id。
-  model: glm-4v-plus
-  base_url: https://open.bigmodel.cn/api/paas/v4/
+  model: Qwen-vlm
+  base_url: https://llm-gateway.dev.cn-vwa.volkswagen-cea.com
+  api_key: sk-JaETqNgjIpH2tiIj7gQBgw   # 直接写 key；留空则回退环境变量 GLM_API_KEY
   api_key_env: GLM_API_KEY
   temperature: 0.1
   max_tokens: 1024

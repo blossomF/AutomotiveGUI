@@ -14,7 +14,7 @@ popups:
 
 skills:
   - name: play_song
-    summary: 在音乐 App 搜索指定歌曲并播放（对应 Easy 参考任务）
+    summary: 在音乐 App 搜索指定歌曲并播放
     triggers: [播放, 来一首, 听一下, play]
     params: [song]
     steps:

@@ -244,6 +244,36 @@ def cmd_selftest(cfg) -> int:
     return subprocess.call([sys.executable, "-m", "pytest", "-q", str(root / "tests")], cwd=str(root))
 
 
+def cmd_voice_test(args, cfg) -> int:
+    """--voice-test：麦克风 + 讯飞 ASR，只验证语音通道（不需要车机、不需要 GLM）。"""
+    from autogui.voice.asr import VoiceError, transcribe_from_mic
+
+    try:
+        text = transcribe_from_mic(cfg, max_seconds=args.voice_seconds, device=args.voice_device).strip()
+    except VoiceError as e:
+        print(f"\n✗ {e}")
+        return 2
+    print(f"\n识别结果：{text or '（空）'}")
+    return 0 if text else 2
+
+
+def cmd_voice(args, cfg) -> int:
+    """--voice：麦克风 + 讯飞 ASR，把识别文本作为任务执行（需要车机 + GLM）。"""
+    from autogui.voice.asr import VoiceError, transcribe_from_mic
+
+    try:
+        task = transcribe_from_mic(cfg, max_seconds=args.voice_seconds, device=args.voice_device).strip()
+    except VoiceError as e:
+        print(f"\n✗ {e}")
+        return 2
+    if not task:
+        print("✗ 识别结果为空，未执行")
+        return 2
+    print(f"\n任务（语音识别）：{task}\n")
+    args.task = task
+    return cmd_run(args, cfg)
+
+
 # ── argparse 参数解析 ─────────────────────────────────────────────────────────
 
 
@@ -264,6 +294,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dump-report", action="store_true", help="measure tree quality per app; write artifacts/dump-report.md")
     p.add_argument("--mcp-check", action="store_true", help="open a real MCP session and list tools")
     p.add_argument("--selftest", action="store_true", help="run offline tests")
+    p.add_argument("--voice-test", action="store_true", help="麦克风+讯飞ASR，只打印识别文本（不需要车机/网络GLM）")
+    p.add_argument("--voice", action="store_true", help="麦克风+讯飞ASR，识别文本作为任务执行")
+    p.add_argument("--voice-seconds", type=float, default=None, help="--voice 最长录音秒数（默认取 config.yaml voice.max_seconds，15）")
+    p.add_argument("--voice-device", type=int, default=None, help="麦克风设备序号（python -m sounddevice 查看列表）")
     return p
 
 
@@ -288,6 +322,10 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_check(cfg)
         if args.dump_report:
             return cmd_dump_report(cfg)
+        if args.voice_test:
+            return cmd_voice_test(args, cfg)
+        if args.voice:
+            return cmd_voice(args, cfg)
         if not args.task:
             build_parser().print_help()
             return 2

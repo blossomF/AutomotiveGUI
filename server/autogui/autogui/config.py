@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -46,21 +47,25 @@ class GridConfig(BaseModel):
 
 
 class GLMConfig(BaseModel):
-    """GLM 5.3，走 OpenAI 兼容端点。Key 从环境变量读取。"""
+    """GLM 5.3，走 OpenAI 兼容端点。Key 直接写在 config.yaml 的 api_key 字段，未填时回退环境变量。"""
 
     model: str = "glm-4v-plus"  # TODO 9/15: 换成组委会发放 key 对应的确切型号 id
     base_url: str = "https://open.bigmodel.cn/api/paas/v4/"
     api_key_env: str = "GLM_API_KEY"
+    api_key: str = ""
     temperature: float = 0.1
     max_tokens: int = 1024
     timeout: float = 30.0
     max_retries: int = 2
 
-    @property
-    def api_key(self) -> str:
+    @field_validator("api_key")
+    @classmethod
+    def _api_key_from_env(cls, v: str, info) -> str:
+        if v:
+            return v
         import os
 
-        return os.getenv(self.api_key_env, "")
+        return os.getenv(info.data.get("api_key_env", "GLM_API_KEY"), "")
 
 
 class AgentConfig(BaseModel):
@@ -77,6 +82,31 @@ class AgentConfig(BaseModel):
 class SkillConfig(BaseModel):
     enabled: bool = True
     directory: str = "skills"
+
+
+class VoiceConfig(BaseModel):
+    """讯飞流式听写（章程 §4.6 加分项）：可插拔的语音输入通道，主循环不依赖它。
+
+    三个凭证直接写在 config.yaml；留空时回退环境变量
+    IFLYTEK_APPID / IFLYTEK_API_KEY / IFLYTEK_API_SECRET。
+    """
+
+    appid: str = ""
+    api_key: str = ""
+    api_secret: str = ""
+    iat_url: str = ""  # 留空 = 讯飞公网 wss://iat-api.xfyun.cn/v2/iat；组委会给其他网关时填这里
+    max_seconds: float = Field(default=15.0, ge=3, le=120)  # 最长录音秒数
+    silence_seconds: float = Field(default=0.8, ge=0.2, le=5.0)  # 尾部连续静音后自动停止
+    silence_threshold: int = Field(default=300, ge=50, le=3000)  # 静音判定 RMS 阈值
+
+    @field_validator("appid", "api_key", "api_secret")
+    @classmethod
+    def _voice_cred_from_env(cls, v: str, info) -> str:
+        if v:
+            return v
+        env = {"appid": "IFLYTEK_APPID", "api_key": "IFLYTEK_API_KEY",
+               "api_secret": "IFLYTEK_API_SECRET"}[info.field_name]
+        return os.getenv(env, "")
 
 
 class AppConfig(BaseModel):
@@ -107,6 +137,7 @@ class Config(BaseModel):
     agent: AgentConfig = Field(default_factory=AgentConfig)
     glm: GLMConfig = Field(default_factory=GLMConfig)
     skills: SkillConfig = Field(default_factory=SkillConfig)
+    voice: VoiceConfig = Field(default_factory=VoiceConfig)
     apps: list[AppConfig] = Field(default_factory=list)
     log_dir: str = "artifacts/logs"
     verbose: bool = True

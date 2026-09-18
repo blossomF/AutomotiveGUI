@@ -111,17 +111,17 @@ Windows 用户可以全部用 `run.bat` 代劳：`run.bat setup` / `run.bat chec
 
 ## 4. 命令
 
-| 命令 | 作用 |
-|---|---|
-| `python main.py "任务"` | 跑一个任务，实时打印决策链 |
-| `python main.py --selftest` | 离线单测（无车机、无 Key），CI 门禁 |
-| `python main.py --check` | 车机自检：抓帧耗时/树节点/输入策略/**IME 未被改坏** |
-| `python main.py --packages` | 列出安装的应用，用于填 `config.yaml` |
-| `python main.py --dump-report` | 逐 App 实测控件树质量 → `artifacts/dump-report.md` |
-| `python main.py --mcp-check` | 真开一个 MCP 会话，列工具 + 校验与 local 同源 |
+| 命令                                                  | 作用 |
+|-----------------------------------------------------|---|
+| `python main.py "打开美团，搜索卡旺卡"`                       | 跑一个任务，实时打印决策链 |
+| `python main.py --selftest`                         | 离线单测（无车机、无 Key），CI 门禁 |
+| `python main.py --check`                            | 车机自检：抓帧耗时/树节点/输入策略/**IME 未被改坏** |
+| `python main.py --packages`                         | 列出安装的应用，用于填 `config.yaml` |
+| `python main.py --dump-report`                      | 逐 App 实测控件树质量 → `artifacts/dump-report.md` |
+| `python main.py --mcp-check`                        | 真开一个 MCP 会话，列工具 + 校验与 local 同源 |
 | `python main.py --skill-only "music.play_song=七里香"` | 跳过模型直接跑配方（0 次 VLM） |
-| `python -m autogui.mcp_server` | 作为 stdio MCP server 给外部客户端用 |
-| `python -m autogui.mcp_server --list-tools` | 打印工具清单与 schema |
+| `python -m autogui.mcp_server`                      | 作为 stdio MCP server 给外部客户端用 |
+| `python -m autogui.mcp_server --list-tools`         | 打印工具清单与 schema |
 
 覆盖默认配置：`--exec-mode mcp`、`--path B`、`--config 路径`。
 

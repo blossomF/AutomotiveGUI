@@ -53,7 +53,7 @@ def parse_action(raw: dict) -> dict:
     """
     if not isinstance(raw, dict):
         raise ValueError(f"action must be an object, got {type(raw).__name__}")
-    name = str(raw.get("action", "")).strip().upper()
+    name = str(raw.get("type") or raw.get("action") or "").strip().upper()
     if name not in ACTION_NAMES:
         raise ValueError(f"unknown action {name!r}; valid: {', '.join(ACTION_NAMES)}")
 
