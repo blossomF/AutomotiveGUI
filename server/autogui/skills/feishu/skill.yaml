@@ -1,0 +1,46 @@
+# 飞书
+# 注意：以下 hint 均为占位符，需在真机运行 `python main.py --dump-report` 后，
+# 替换为该 App UI 树里真实出现的字符串。
+# 章程参考任务涉及"读消息→设日程"跨应用场景，这里先只覆盖单应用基础技能。
+name: feishu
+app:
+  package: ""            # 飞书车机版包名，需真机 `python main.py --packages` 确认
+
+popups:
+  - { detect: "用户协议", button: "同意" }
+  - { detect: "通知", button: "以后再说" }
+
+skills:
+  - name: send_message
+    summary: 给指定联系人发送一条文字消息
+    triggers: [飞书, 发消息, 联系, 通知一下, feishu, lark]
+    params: [contact, text]
+    steps:
+      - { act: launch }
+      - { act: dismiss_popups }
+      - { act: click, hint: { text: "消息" } }
+      - { act: click, hint: { text: "搜索" } }
+      - { act: type, arg: contact, clear_first: true }
+      - { act: wait_for, arg: contact, timeout: 8 }
+      - { act: click, hint: { text: "{contact}" }, nth: 0 }
+      - { act: sleep, seconds: 1.5 }
+      - { act: click, hint: { desc: "输入消息" } }
+      - { act: type, arg: text, clear_first: true }
+      - { act: click, hint: { desc: "发送" } }
+      - { act: sleep, seconds: 1.0 }
+      - { act: complete }
+
+  - name: open_chat
+    summary: 打开与指定联系人的聊天窗口
+    triggers: [找, 看看, 打开对话]
+    params: [contact]
+    steps:
+      - { act: launch }
+      - { act: dismiss_popups }
+      - { act: click, hint: { text: "消息" } }
+      - { act: click, hint: { text: "搜索" } }
+      - { act: type, arg: contact, clear_first: true }
+      - { act: wait_for, arg: contact, timeout: 8 }
+      - { act: click, hint: { text: "{contact}" }, nth: 0 }
+      - { act: sleep, seconds: 1.5 }
+      - { act: complete }

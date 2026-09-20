@@ -1,0 +1,30 @@
+# 美团外卖
+# 注意：以下 hint 均为占位符，需在真机运行 `python main.py --dump-report` 后，
+# 替换为该 App UI 树里真实出现的字符串。
+name: meituan
+app:
+  package: com.sankuai.meituan.takeoutnew  # 根据 config.yaml 及真机 --packages 确认
+
+# App 级弹窗覆盖项；省略则用 base.py 的 DEFAULT_POPUPS。
+popups:
+  - { detect: "用户协议", button: "同意" }
+  - { detect: "通知", button: "以后再说" }
+  - { detect: "定位", button: "允许" }
+
+skills:
+  - name: search_and_add
+    summary: 搜索指定商品并加入购物车
+    triggers: [美团, 外卖, 点外卖, 点餐, meituan, takeout]
+    params: [item]
+    steps:
+      - { act: launch }
+      - { act: dismiss_popups }
+      - { act: click, hint: { text: "搜索" } }
+      - { act: type, arg: item, clear_first: true }
+      - { act: keyevent, key: "KEYCODE_ENTER" }
+      - { act: wait_for, arg: item, timeout: 8 }
+      - { act: click, hint: { text: "{item}" }, nth: 0 }
+      - { act: sleep, seconds: 1.5 }
+      - { act: click, hint: { text: "加入购物车" } }
+      - { act: sleep, seconds: 1.0 }
+      - { act: complete }
