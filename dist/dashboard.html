@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-node-id="zpKmESahtf9LCKGGnaiiHu">
+<head data-page-node-id="xN4lpQ3ImKUYBaDOHnR0UZ">
+<meta charset="utf-8" data-page-node-id="QmD2QOyt8eZcDLBc9EiTWg">
+<meta name="viewport" content="width=device-width, initial-scale=1" data-page-node-id="jGScc1UPGevD3C0SPdxq0U">
+<title>AutomotiveGUI · 任务日志（离线版）</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { height:100%; }
+  body { margin:0; font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+         background:#f4f6f8; color:#1f2933; display:flex; flex-direction:column; height:100vh; }
+  header { background:#1f2933; color:#fff; padding:10px 16px; display:flex; align-items:center;
+           gap:10px; flex:0 0 auto; }
+  header h1 { font-size:15px; margin:0; font-weight:600; }
+  header .sub { font-size:12px; color:#9aa5b1; }
+  header .spacer { flex:1; }
+  header select { font-size:13px; padding:5px 8px; border-radius:7px; border:1px solid #4b5563;
+                  background:#374151; color:#fff; max-width:320px; }
+  header .mini { font-size:13px; padding:5px 10px; border-radius:7px; border:none;
+                 background:#374151; color:#fff; cursor:pointer; text-decoration:none;
+                 display:inline-flex; align-items:center; }
+  header .mini:hover { background:#4b5563; }
+  button { font-family:inherit; }
+
+  /* ---- 离线版新增：选文件条 ---- */
+  .pickbar { flex:0 0 auto; display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+             padding:10px 16px; background:#fff; border-bottom:1px solid #e4e7eb; }
+  .pickbar button { font-size:13px; padding:7px 12px; border-radius:9px; border:1px solid #cbd2d9;
+                    background:#fff; color:#1f2933; cursor:pointer; }
+  .pickbar button:hover { border-color:#2563eb; color:#2563eb; background:#eff6ff; }
+  .pickbar .hint { font-size:12px; color:#7b8794; }
+  .pickbar .pickinfo { margin-left:auto; font-size:12px; color:#52606d; font-weight:600; }
+  .pickbar.drag { background:#eff6ff; border-bottom-color:#2563eb; }
+
+  /* ---- 日志页（与在线版一致）---- */
+  .main { flex:1 1 auto; overflow-y:auto; width:100%; max-width:1080px; margin:0 auto;
+          padding:16px 16px 40px; }
+  .stats { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:18px; }
+  .stat { background:#fff; border:1px solid #e4e7eb; border-radius:10px; padding:12px 16px;
+          min-width:120px; flex:1; }
+  .stat .k { font-size:12px; color:#7b8794; }
+  .stat .v { font-size:18px; font-weight:700; margin-top:4px; }
+  .badge { font-size:12px; font-weight:600; padding:3px 9px; border-radius:999px;
+           background:#e5e7eb; color:#374151; }
+  .badge.done { background:#d1fae5; color:#065f46; }
+  .badge.running { background:#fef3c7; color:#92400e; }
+  .badge.aborted { background:#fee2e2; color:#991b1b; }
+  .timeline { display:flex; flex-direction:column; gap:14px; }
+  .card { background:#fff; border:1px solid #e4e7eb; border-radius:12px;
+          padding:14px; border-left:4px solid #cbd2d9; }
+  .card .body { min-width:0; }
+  .row1 { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .atype { font-weight:700; font-size:15px; padding:3px 9px; border-radius:7px; color:#fff; background:#475569; }
+  .a-CLICK { background:#2563eb; } .a-TYPE { background:#7c3aed; }
+  .a-SCROLL { background:#0891b2; } .a-AWAKE { background:#ca8a04; }
+  .a-COMPLETE { background:#059669; }
+  /* AutomotiveGUI 决策链 phase 配色（无截图，靠颜色区分阶段） */
+  .a-perceive { background:#0891b2; } .a-route { background:#7c3aed; }
+  .a-decide { background:#2563eb; } .a-act { background:#059669; }
+  .a-verify { background:#0891b2; } .a-recovery { background:#ca8a04; }
+  .a-guard { background:#64748b; } .a-finish { background:#059669; }
+  .a-skill { background:#7c3aed; } .a-error { background:#dc2626; } .a-log { background:#475569; }
+  /* 卡片左侧色条跟 phase 联动 */
+  .card.p-perceive { border-left-color:#0891b2; } .card.p-route { border-left-color:#7c3aed; }
+  .card.p-decide { border-left-color:#2563eb; } .card.p-act { border-left-color:#059669; }
+  .card.p-verify { border-left-color:#0891b2; } .card.p-recovery { border-left-color:#ca8a04; }
+  .card.p-guard { border-left-color:#64748b; } .card.p-finish { border-left-color:#059669; }
+  .card.p-skill { border-left-color:#7c3aed; } .card.p-error { border-left-color:#dc2626; }
+  .card.p-log { border-left-color:#475569; }
+  .step-no { color:#7b8794; font-weight:600; }
+  .meta { margin:8px 0; font-size:13px; color:#3e4c59; line-height:1.6; word-break:break-all; }
+  .meta b { color:#1f2933; }
+  .timing { font-size:12px; color:#7b8794; }
+  .evidence { background:#ecfdf5; border-left:3px solid #059669; padding:6px 10px;
+              font-size:12px; color:#065f46; margin-top:6px; border-radius:4px; }
+  .empty { color:#9aa5b1; text-align:center; padding:40px; }
+  .empty code { background:#eef1f4; padding:1px 5px; border-radius:4px; color:#3e4c59; }
+  #bean { width:68px; height:59.5px; margin:0 auto 12px; display:block; }
+  @keyframes beanBreathe {0%,100%{transform:scale(1) translateY(0)}50%{transform:scale(1.05) translateY(-2px)}}
+  #bean.state-idle { animation: beanBreathe 3s ease-in-out infinite; }
+  #think { opacity:0; }
+</style>
+</head>
+<body data-page-node-id="Q7GLLUcFlBl1N8RZGcDYAO">
+<header data-page-node-id="ENf4tqNbNhEc5KKCEBvG43">
+  <h1 data-page-node-id="fopGIuEHu96oNleJacldQR">🐱 AutomotiveGUI</h1><span class="sub" data-page-node-id="T4gFFsOfYPZ5lAvcMbFCFr">任务日志 · 离线版</span>
+  <div class="spacer" data-page-node-id="0WuiGSZbAX8RH43vgJkDld"></div>
+  <select id="taskSel" data-page-node-id="xEPnMuhyZhksGRpwNrFwKK"></select>
+  <button id="loadBtn" class="mini" data-page-node-id="5oLIhOrkhUCCsukhwSSl1Q">加载</button>
+  <button id="reloadBtn" class="mini" title="重新读取已选文件（日志更新后点这个）" data-page-node-id="t8LvADt71fAo1Jud1tlLoT">重新读取</button>
+  <a class="mini" href="http://localhost:8777/" target="lg_run" data-page-node-id="DOTNmHjrxPjbCdmwIjMYha">下指令 →</a>
+</header>
+
+<div class="pickbar" id="pickbar" data-page-node-id="OFWTbHmV8pgscKSNDJHkNS">
+  <button id="pickDirBtn" type="button" data-page-node-id="PeM4RgX27kDnD4cQNFqXIM">📁 选择日志文件夹</button>
+  <button id="pickFileBtn" type="button" data-page-node-id="G41ov8A5U67KDCnrNXdLjj">📄 选择 .jsonl 文件</button>
+  <span class="hint" data-page-node-id="iN5UfLWPXS5xHZQ41feLLI">或把 artifacts/logs 里的 .jsonl 直接拖进来</span>
+  <input type="file" id="dirInput" webkitdirectory multiple hidden data-page-node-id="UARrPmrGkOvfvU01QaQfxb">
+  <input type="file" id="fileInput" accept=".jsonl,.txt,.log" multiple hidden data-page-node-id="tMILgVFUGaN60CvVbCR5Y9">
+  <span class="pickinfo" id="pickInfo" data-page-node-id="BRWfbT7fH6KFlmQR3LWFFL">尚未加载日志</span>
+</div>
+
+<div class="main" data-page-node-id="SOFe2tXEd7IvrYn8fHgrmH">
+  <div id="stats" class="stats" data-page-node-id="bVG27jyKerozHkVLUWTOYL"></div>
+  <div id="timeline" class="timeline" data-page-node-id="NTII3cEAFHkcdmPOhONqTA"></div>
+</div>
+
+<script>
+/*__CORE_START__*/
+// ============================================================
+// 纯数据层（与 dashboard_server.py 的 list_tasks / get_task_detail 等价）
+// 输入：一个 .jsonl 的全文；输出：任务概要 + 决策链明细
+// ============================================================
+function esc(s){
+  return String(s==null?'':s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+}
+function num(v){ const n = Number(v); return isFinite(n) ? n : 0; }
+
+// 解析 JSONL 全文 -> 事件数组（跳过空行/坏行）
+function parseEvents(text){
+  const out = [];
+  String(text).split(/\r?\n/).forEach(ln => {
+    if(!ln.trim()) return;
+    try { out.push(JSON.parse(ln)); } catch(e) {}
+  });
+  return out;
+}
+
+// 空行数（用于「没有 finish 事件」时近似步数，对齐后端口径）
+function nonEmptyLines(text){
+  return String(text).split(/\r?\n/).filter(ln => ln.trim()).length;
+}
+
+// 任务概要：从 finish 事件取 status / 步数 / token / 耗时
+function buildSummary(stem, evs, lineCount){
+  let status = 'running', total_steps = 0, total_tokens = 0, total_time = 0;
+  evs.forEach(ev => {
+    if(ev.phase === 'finish'){
+      status = (ev.success === false) ? 'aborted' : 'done';
+      total_time  = num(ev.elapsed);
+      const u = ev.usage || {};
+      total_tokens = Math.trunc(num(u.total_tokens));
+      total_steps  = Math.trunc(num(ev.steps));
+    }
+  });
+  if(status === 'running') total_steps = lineCount;
+  return {
+    task_dir: stem, session_id: stem, task: stem,
+    status: status,
+    total_steps: total_steps,
+    total_time: Math.round(total_time * 10) / 10,
+    total_tokens: total_tokens
+  };
+}
+
+// 决策链明细：每条事件一张卡片（finish 只用于汇总，不单独成卡）
+function buildDetail(stem, evs){
+  let status = 'running', finishUsage = {}, finishSteps = 0, steps = [], prevT = 0;
+
+  evs.forEach((ev, idx) => {
+    const phase = ev.phase || 'log';
+    const msg   = ev.msg || '';
+    let stepNo  = (typeof ev.step === 'number') ? ev.step : idx;
+
+    if(phase === 'finish'){
+      status = (ev.success === false) ? 'aborted' : 'done';
+      finishUsage = ev.usage || {};
+      // 真实步数取自 finish 顶层 steps（与概况口径一致）；usage 里没有 steps。
+      finishSteps = Math.trunc(num(ev.steps));
+      return;
+    }
+
+    // 事件自带指标（路由 / 屏幕指纹 / 调用次数 …）-> 卡片 detail
+    const metrics = {};
+    Object.keys(ev).forEach(k => {
+      if(k !== 't' && k !== 'step' && k !== 'phase' && k !== 'msg') metrics[k] = ev[k];
+    });
+
+    // token 兼容 int 或 {input,output}
+    const tok = metrics.tokens;
+    let tokenD = {input:0, output:0};
+    if(tok && typeof tok === 'object'){
+      tokenD = {input: Math.trunc(num(tok.input)), output: Math.trunc(num(tok.output))};
+    } else if(typeof tok === 'number'){
+      tokenD = {input: Math.trunc(tok), output: 0};
+    }
+
+    const t  = num(ev.t);
+    const dt = prevT ? Math.round((t - prevT) * 100) / 100 : 0;
+    prevT = t;
+
+    steps.push({
+      step: stepNo,
+      action: Object.assign({action: phase, summary: msg, explain: msg}, metrics),
+      inference_time: 0, execution_time: 0, total_time: dt,
+      tokens: tokenD, evidence: null, image: null, noop: false
+    });
+  });
+
+  let totalTokens = Math.trunc(num(finishUsage.total_tokens));
+  if(!totalTokens) totalTokens = steps.reduce((a, s) => a + s.tokens.input + s.tokens.output, 0);
+  const avg = steps.length
+    ? steps.reduce((a, s) => a + s.total_time, 0) / steps.length : 0;
+
+  return {
+    task_dir: stem, session_id: stem, task: stem,
+    status: status,
+    stats: {
+      total_steps: finishSteps || steps.length,
+      total_tokens: totalTokens,
+      avg_step: Math.round(avg * 100) / 100
+    },
+    steps: steps
+  };
+}
+
+// 一次解析出概要 + 明细（离线版一次性都拿到，不用再请求接口）
+function parseLog(stem, text){
+  const evs = parseEvents(text);
+  return {
+    summary: buildSummary(stem, evs, nonEmptyLines(text)),
+    detail:  buildDetail(stem, evs)
+  };
+}
+/*__CORE_END__*/
+
+// ============================================================
+// UI 层
+// ============================================================
+const $ = (s) => document.querySelector(s);
+
+const FILES  = [];   // [{stem, file}]  保留 File 句柄，便于「重新读取」
+const TASKS  = [];   // 概要列表（按名字倒序）
+const DETAIL = {};   // stem -> detail
+
+function setInfo(t){ $('#pickInfo').textContent = t; }
+
+function emptyState(msg){
+  $('#stats').innerHTML = '';
+  $('#timeline').innerHTML = `
+    <div class="empty">
+      <svg id="bean" class="state-idle" viewBox="0 0 64 56">
+        <path d="M16 23 L18.5 9 L30.5 17 Z" fill="#ffc26b" stroke="#e8a44e" stroke-width="1.2" stroke-linejoin="round"/>
+        <path d="M48 23 L45.5 9 L33.5 17 Z" fill="#ffc26b" stroke="#e8a44e" stroke-width="1.2" stroke-linejoin="round"/>
+        <circle cx="32" cy="31" r="17.5" fill="#ffc26b" stroke="#e8a44e" stroke-width="1.2"/>
+        <path d="M32 16.5 C41.5 16.5 46 23 46 30.5 C46 39.5 40 46 32 46 C24 46 18 39.5 18 30.5 C18 23 22.5 16.5 32 16.5 Z" fill="#fff6e3"/>
+        <path d="M16 26 Q32 16 48 26" stroke="#f0b429" stroke-width="3.2" fill="none" stroke-linecap="round"/>
+        <circle cx="32" cy="20.4" r="2.1" fill="#ffd23f" stroke="#e0a800" stroke-width="0.9"/>
+        <circle cx="25.5" cy="32" r="3" fill="#2b2b2b"/>
+        <circle cx="38.5" cy="32" r="3" fill="#2b2b2b"/>
+        <path d="M29.5 36.2 L34.5 36.2 L32 38.7 Z" fill="#ff8a80"/>
+        <path d="M27.5 40.5 Q32 43.6 36.5 40.5" stroke="#2b2b2b" stroke-width="2.2" fill="none" stroke-linecap="round"/>
+      </svg>
+      ${msg}
+    </div>`;
+}
+
+function renderTaskList(){
+  const sel = $('#taskSel');
+  sel.innerHTML = '';
+  TASKS.forEach(t => {
+    const o = document.createElement('option');
+    o.value = t.task_dir;
+    o.textContent = `${t.task_dir} | ${t.status==='done'?'✅':(t.status==='aborted'?'⚠️':'⏳')} ${t.total_steps}步 · ${t.total_tokens} token`;
+    sel.appendChild(o);
+  });
+  if(TASKS.length){ sel.value = TASKS[0].task_dir; renderTask(TASKS[0].task_dir); }
+}
+
+function renderTask(stem){
+  const d = DETAIL[stem];
+  if(!d) return;
+  $('#stats').innerHTML = `
+    <div class="stat"><div class="k">任务</div><div class="v" style="font-size:14px">${esc(d.task)}</div></div>
+    <div class="stat"><div class="k">状态</div><div class="v"><span class="badge ${d.status}">${d.status==='done'?'已完成':(d.status==='aborted'?'已中止':'运行中')}</span></div></div>
+    <div class="stat"><div class="k">步数</div><div class="v">${d.stats.total_steps}</div></div>
+    <div class="stat"><div class="k">平均步耗时</div><div class="v">${d.stats.avg_step}s</div></div>
+    <div class="stat"><div class="k">总 Token</div><div class="v">${d.stats.total_tokens}</div></div>
+  `;
+
+  const tl = $('#timeline');
+  tl.innerHTML = '';
+  if(!d.steps.length){ tl.innerHTML = '<div class="empty">该日志没有可回放的事件</div>'; return; }
+
+  d.steps.forEach(s => {
+    const a = s.action || {};
+    const explain = a.explain ? `<div class="meta"><b>说明：</b>${esc(a.explain)}</div>` : '';
+    const detail = Object.entries(a)
+      .filter(([k]) => !['action','summary','explain','decision_source','_tool_call_id','_from_tool','chinese_resolved','typed_value'].includes(k))
+      .map(([k,v]) => `<b>${esc(k)}:</b> ${esc(typeof v === 'object' ? JSON.stringify(v) : v)}`)
+      .join(' · ');
+    const noop = s.noop ? `<div class="noop">⚠️ 上一步点击后界面无变化</div>` : '';
+    const card = document.createElement('div');
+    card.className = 'card p-' + esc(a.action || 'log');
+    card.innerHTML = `
+      <div class="body">
+        <div class="row1">
+          <span class="step-no">#${s.step}</span>
+          <span class="atype a-${esc(a.action||'')}">${esc(a.action||'?')}</span>
+          <span class="timing">t+${s.total_time}s</span>
+          ${a.decision_source?`<span class="badge" style="background:#e0e7ff;color:#3730a3">${esc(a.decision_source)}</span>`:''}
+        </div>
+        ${detail?`<div class="meta">${detail}</div>`:''}
+        ${explain}
+        <div class="timing">token ${ (s.tokens.input||0)+(s.tokens.output||0) }（入 ${s.tokens.input} / 出 ${s.tokens.output}）</div>
+        ${noop}
+      </div>`;
+    tl.appendChild(card);
+  });
+}
+
+// 从 File 对象列表解析
+async function loadFromFiles(fileList){
+  const jls = Array.from(fileList).filter(f => /\.jsonl$/i.test(f.name));
+  if(!jls.length){
+    setInfo('未找到 .jsonl');
+    emptyState('没找到 <code>.jsonl</code> 文件。日志在 <code>server/autogui/artifacts/logs</code>，请选那个文件夹。');
+    return;
+  }
+  FILES.length = 0;
+  TASKS.length = 0;
+  Object.keys(DETAIL).forEach(k => delete DETAIL[k]);
+
+  for(const f of jls){
+    const stem = f.name.replace(/\.jsonl$/i, '');
+    FILES.push({stem: stem, file: f});
+  }
+  await parseAll();
+}
+
+// 重新读取已选文件（日志更新后不用重选）
+async function parseAll(){
+  TASKS.length = 0;
+  Object.keys(DETAIL).forEach(k => delete DETAIL[k]);
+  for(const it of FILES){
+    let text = '';
+    try { text = await it.file.text(); } catch(e) { continue; }
+    const r = parseLog(it.stem, text);
+    TASKS.push(r.summary);
+    DETAIL[it.stem] = r.detail;
+  }
+  TASKS.sort((a, b) => a.task_dir < b.task_dir ? 1 : -1);   // 名字倒序，对齐后端口径
+  renderTaskList();
+  if(!TASKS.length) emptyState('日志解析失败或为空');
+  else setInfo(`已加载 ${TASKS.length} 个任务日志`);
+}
+
+// ---- 选择 / 拖拽 ----
+$('#pickDirBtn').onclick  = () => $('#dirInput').click();
+$('#pickFileBtn').onclick = () => $('#fileInput').click();
+$('#dirInput').onchange   = e => loadFromFiles(e.target.files);
+$('#fileInput').onchange  = e => loadFromFiles(e.target.files);
+$('#loadBtn').onclick     = () => renderTask($('#taskSel').value);
+$('#reloadBtn').onclick   = () => { if(FILES.length) parseAll(); else setInfo('还没选文件'); };
+$('#taskSel').onchange    = e => renderTask(e.target.value);
+
+// 拖拽（支持拖文件夹）
+function readAllEntries(reader){
+  return new Promise(resolve => {
+    const all = [];
+    const step = () => reader.readEntries(batch => {
+      if(!batch.length) return resolve(all);
+      all.push(...batch); step();
+    });
+    step();
+  });
+}
+async function walkEntry(entry, out){
+  if(entry.isFile){ out.push(entry); return; }
+  if(entry.isDirectory){
+    const ents = await readAllEntries(entry.createReader());
+    for(const e of ents) await walkEntry(e, out);
+  }
+}
+const pickbar = $('#pickbar');
+['dragenter','dragover'].forEach(ev => pickbar.addEventListener(ev, e => {
+  e.preventDefault(); pickbar.classList.add('drag');
+}));
+['dragleave','drop'].forEach(ev => pickbar.addEventListener(ev, e => {
+  e.preventDefault(); pickbar.classList.remove('drag');
+}));
+pickbar.addEventListener('drop', async e => {
+  const items = e.dataTransfer.items;
+  if(items && items.length && items[0].webkitGetAsEntry){
+    const entries = [];
+    for(const it of items){ const en = it.webkitGetAsEntry(); if(en) entries.push(en); }
+    const files = [];
+    for(const en of entries) await walkEntry(en, files);
+    const real = await Promise.all(files.map(f => new Promise(res => f.file(res))));
+    loadFromFiles(real);
+  } else {
+    loadFromFiles(e.dataTransfer.files);
+  }
+});
+
+emptyState('还没有加载日志。点上方 <b>📁 选择日志文件夹</b>，选到 <code>server/autogui/artifacts/logs</code>；<br>或直接把里面的 <code>.jsonl</code> 拖进来。');
+</script>
+</body>
+</html>

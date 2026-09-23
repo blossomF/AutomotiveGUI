@@ -46,6 +46,7 @@ class Context:
     entities: dict = field(default_factory=dict)
     progress: str = ""
     skill_index: str = ""
+    app_index: str = ""
 
     history_window: int = 5
     token_budget: int = 8000
@@ -59,6 +60,8 @@ class Context:
             f"定位路径：{self.declared_path}（tree=控件树优先，vlm=网格兜底）",
             f"动作类型：{', '.join(ACTION_NAMES)}",
         ]
+        if self.app_index:
+            lines.append("可用应用（LAUNCH 的 app 字段填这里的包名）：\n" + self.app_index)
         if self.skill_index:
             lines.append("可用技能：\n" + self.skill_index)
         return "\n".join(lines)
@@ -119,7 +122,7 @@ class Context:
         def build(w: int, k: int) -> tuple[str, dict]:
             c = Context(
                 task=self.task, declared_path=self.declared_path, history=self.history,
-                entities=self.entities, skill_index=self.skill_index,
+                entities=self.entities, skill_index=self.skill_index, app_index=self.app_index,
                 history_window=w, candidate_limit=k,
             )
             body = kept[:k]

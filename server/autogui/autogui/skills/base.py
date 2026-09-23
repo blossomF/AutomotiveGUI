@@ -60,9 +60,18 @@ class Skill:
     triggers: list[str] = field(default_factory=list)
     package: str = ""
 
-    def signature(self) -> str:
+    def signature(self, unavailable: bool = False) -> str:
+        """一行技能签名，注入永久提示词块。
+
+        ⚠️ 必须写**全名**（``app.name``）。只写短名会让模型和内部键对不上：
+        日志/上下文里失败的是 ``bilibili.search_video``，而它看到的清单是
+        ``search_video`` → 模型会断定"上次名字写错了，改用 search_video"，
+        可短名解析回来还是同一个技能，于是反复重试同一个跑不通的配方
+        （实测白烧 6 步）。清单与内部键用同一个写法，模型才不会误诊。
+        """
         args = ", ".join(f"{p}=..." for p in self.params)
-        return f"{self.name}({args}) — {self.summary}"
+        mark = "  ⛔已失效(勿再选)" if unavailable else ""
+        return f"{self.app}.{self.name}({args}) — {self.summary}{mark}"
 
     def trigger_words(self) -> list[str]:
         """声明的触发词，缺省回退到技能名和 App 名。"""
@@ -109,9 +118,17 @@ class SkillBook:
                 )
                 self.by_id[f"{skill.app}.{skill.name}"] = skill
 
-    def index(self) -> str:
-        """每个技能一行，注入永久提示词块。"""
-        return "\n".join(s.signature() for s in sorted(self.by_id.values(), key=lambda x: x.app)) or "（无）"
+    def index(self, unavailable: set[str] | None = None) -> str:
+        """每个技能一行，注入永久提示词块。
+
+        ``unavailable`` 是已被判定不可用（重试次数用尽）的技能 key 集合——
+        在清单里就地标出来。之前清单是静态的，模型看不到"这个已经废了"，
+        于是反复选中同一个失败配方；标出来才能真正止损。
+        """
+        dead = unavailable or set()
+        return "\n".join(
+            s.signature(k in dead) for k, s in sorted(self.by_id.items(), key=lambda kv: kv[1].app)
+        ) or "（无）"
 
     def get(self, key: str) -> Skill | None:
         if key in self.by_id:
@@ -121,11 +138,11 @@ class SkillBook:
 
     # ── 执行 ─────────────────────────────────────────────────────────────────
 
-    def run(self, key: str, params: dict | None = None) -> list[str]:
+    def run(self, key: str, params: dict | None = None, log_cb=None) -> list[str]:
         """执行配方，返回人类可读的步骤轨迹。
 
-        第一个解析不了的 hint 即抛 ``SkillMiss``；图捕获它并
-        改走通用通道。
+        ``log_cb`` 可选：每跑完一步就回调（line: str），让调用方实时落盘日志——
+        否则 trace 只能在配方全跑完后一次性交付，面板在配方执行期间看不到任何进展。
         """
         skill = self.get(key)
         if skill is None:
@@ -138,7 +155,10 @@ class SkillBook:
         trace: list[str] = []
         for i, step in enumerate(skill.steps, 1):
             line = self._run_step(skill, step, args)
-            trace.append(f"  step{i} {line}")
+            entry = f"  step{i} {line}"
+            trace.append(entry)
+            if log_cb:
+                log_cb(entry)  # 实时回调：执行方在配方跑完的同时逐行写日志
         return trace
 
     def _sub(self, skill: Skill, value, args: dict):
@@ -187,7 +207,7 @@ class SkillBook:
             if not c:
                 raise SkillMiss("matched node has no bounds")
             d.tap(*c)
-            return f"tap {self._describe(step)} -> ({c[0]},{c[1]})"
+            return f"tap {self._describe(step, skill, args)} -> ({c[0]},{c[1]})"
 
         if act == "type":
             value = self._arg_or_text(skill, step, args)
@@ -227,11 +247,19 @@ class SkillBook:
 
     # ── 辅助 ─────────────────────────────────────────────────────────────────
 
-    def _describe(self, step: dict) -> str:
+    def _describe(self, step: dict, skill=None, args: dict | None = None) -> str:
+        """生成步骤描述字符串，用于 trace 和错误信息。
+
+        给 skill/args 时会对 hint 里的值做 ``{param}`` 替换——否则 trace
+        里会看到字面量 ``{keyword}`` 而不是真实值。
+        """
         hint = step.get("hint") or {}
         for k in ("text", "desc", "rid"):
-            if hint.get(k):
-                return f"{k}={hint[k]!r}"
+            val = hint.get(k)
+            if val:
+                if skill is not None and args is not None:
+                    val = self._sub(skill, val, args)
+                return f"{k}={val!r}"
         if step.get("nth") is not None:
             return f"nth={step['nth']}"
         return "?"
@@ -257,7 +285,7 @@ class SkillBook:
                 if len(found) > nth:
                     break
         if len(found) <= nth:
-            raise SkillMiss(f"no match for {self._describe(step)} (found {len(found)}, need index {nth})")
+            raise SkillMiss(f"no match for {self._describe(step, skill, args)} (found {len(found)}, need index {nth})")
         return found[nth]
 
     def _scroll(self, direction: str, amount: float) -> None:

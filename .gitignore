@@ -19,3 +19,6 @@ artifacts/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# 备份文件（本地改动快照，不进仓库）
+*.bak*

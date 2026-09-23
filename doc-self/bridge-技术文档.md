@@ -22,7 +22,7 @@
 3. **二进制流走 `exec-out`，并裁掉多屏警告行。**
    - 抓帧：`exec-out screencap -p` 一次往返直取字节流。LightGUIAgent 是 `screencap -p /sdcard/x.png` 再 `adb pull`（`agent.py:117-135`）——每步多一次完整文件传输、还落盘建名删文件，性能 10 分的关键路径（C-8）；
    - `strip_to_png_signature`：多屏设备的 `screencap` 会在 PNG 魔数前打一行 `[Warning] Multiple displays were found...`，朴素读取得到损坏图像。**车机正是多屏设备，这个裁剪不是优化是必需项**；
-   - 屏幕尺寸以**解码 PNG 头（IHDR）的宽高**为准，不信 `wm size`（多屏车机上 `wm size` 可能不是中控屏）。
+   - 屏幕尺寸以**解码 PNG 头（IHDR）的宽高**为准，不信 `wm size`（多屏车机上 `wm size` 可能不是中控屏）。**注意覆盖范围**：`screen_size()` 与 `perception.observe()` 走这条路；但 `tools.ui_candidates()` 这个 MCP 工具调用 `candidates_from_xml(xml, limit)` 时**未传 screen 参数**，`extract()` 回退默认 `1920×1080`——这是已知缺口（容器过滤阈值按默认尺寸算），与上面"PNG 头为准"的声明目前只对主观测路径成立。
 
 4. **错误分级：失败要么是异常，要么是数据。**
    - `adb()`：非零退出抛 `ADBError`（带完整命令、exit code、stderr）——吞掉失败返回 `""` 会在下游被读成"空的成功"，比异常糟得多；
@@ -64,7 +64,7 @@ Device（所有命令 = ["adb", "-s", serial, *args]，subprocess + timeout）
    ├─ 树：dump_xml() → shell rm -f → uiautomator dump /sdcard/x.xml → exec-out cat
    ├─ 输入：tap / swipe / long_press(零距离 swipe) / keyevent(白名单) / type_ascii
    ├─ 应用：launch_app（LAUNCHER intent 优先，-n 组件兜底）/ stop_app / current_app / list_packages
-   └─ 信息：get_prop（正则校验）/ screen_size（PNG 头优先，wm size 兜底）/ wait_for（树轮询）
+   └─ 信息：get_prop（正则校验）/ screen_size（PNG 头优先，wm size 兜底）/ wait_for（空白不敏感的树轮询：两侧去全部空白 + 还原 XML 实体后包含判断）
 
 TextInput.type(text)
    ├─ probe()：yadb? → ADBKeyboard? → ascii
@@ -105,7 +105,7 @@ tools.py（19 个纯函数 = MCP 工具面）
 | 设备探测 | 裸 `adb shell wm size`，可能探错设备 | 全程 `-s serial`；auto 模式 0/1/多 台都给出明确指引 |
 | 中文输入 | 还原写死 Gboard → 车机 IME 被改坏（P0） | 存/复原 IME，finally 保证执行 |
 | 安全 | 无注入防护（键码/文本/包名直通设备 shell） | keycode 白名单 + shlex 引用 + 包名/prop 正则 |
-| 屏幕尺寸 | 信 `wm size` | PNG IHDR 优先（VLM 看到的才是权威） |
+| 屏幕尺寸 | 信 `wm size` | PNG IHDR 优先（VLM 看到的才是权威）——但 `ui_candidates()` MCP 工具未传尺寸、用默认 `1920×1080`，已知缺口 |
 | 执行通道 | 进程内直调（无 MCP 面） | 纯函数工具面，local / mcp 双通道同源 |
 
 一句话：**LightGUIAgent 的桥"能跑手机"；本层的桥"在车机上跑得对、跑得安全、跑得快"**——其中 IME 修复与防注入是照抄即翻车（P0）的必改项，抓帧提速是性能分的直接来源。

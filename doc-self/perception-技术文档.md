@@ -57,6 +57,9 @@ core.perceive 节点
         │    shot() = device.screenshot() + 计时      → png, shot_ms
         │    dump() = device.dump_xml() + 计时        → xml, dump_ms
         ├─ _resolve_size：png_size(png)（PNG 头解码）优先，fallback 上次尺寸
+        │   ⚠️ 仅 observe() 主观测路径走这里；bridge/tools.ui_candidates() 这个 MCP 工具
+        │      调 candidates_from_xml(xml, limit) 时未传 screen → extract() 回退默认 1920×1080，
+        │      容器过滤阈值按默认尺寸算（已知缺口）
         ├─ candidates = tree.extract(xml, limit, screen)
         ├─ grid = Grid(width, height, cols, rows)
         └─ Observation(png, xml, w, h,
@@ -101,6 +104,6 @@ vlm 兜底通道（route=vlm 时）
 | 网格 | 自动密度，`rows=max(15,...)` 竖屏假设 → 128×72px 扁格 | 显式 20×10 横屏，~96×108px，每格一个触摸目标 |
 | 图像编码 | `target_size:1568 # Claude optimal` 写死 | max_side 可调，留 9/19 A/B 测试位 |
 | 定位精度保障 | 模型复制像素坐标（抄错即点错） | node_ref 整数引用，坐标抄错整类消除 |
-| 屏幕尺寸 | 信 `wm size` | 以截图 PNG 头解码为准 |
+| 屏幕尺寸 | 信 `wm size` | 以截图 PNG 头解码为准（仅 `observe()` 主路径；`ui_candidates()` MCP 工具未传尺寸、用默认 1920×1080，已知缺口） |
 
 一句话：**LightGUIAgent 的感知是"每步拍张图让模型看"；本层的感知是"能用文本就不用图、能并行的绝不串行、变化与否程序说了算"**——tree 模式不发图一条，就省掉约 90% 的视觉 token。
