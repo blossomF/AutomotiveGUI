@@ -43,14 +43,23 @@ _PHASE_COLOR = {
 
 
 class DecisionLog:
-    def __init__(self, task: str, artifacts_dir: Path | str, *, verbose: bool = True):
+    def __init__(self, task: str, artifacts_dir: Path | str, *, verbose: bool = True, debug: bool = False):
         self.task = task
         self.started = time.time()
         self.verbose = verbose
+        self.debug = debug
         stamp = time.strftime("%Y%m%d-%H%M%S")
         safe = "".join(ch for ch in task[:24] if ch.isalnum() or ch in "-_ ") or "task"
         self.dir = Path(artifacts_dir)
         self.dir.mkdir(parents=True, exist_ok=True)
+
+        # debug模式下创建任务子目录
+        if self.debug:
+            self.debug_dir = self.dir / f"{safe}-{stamp}"
+            self.debug_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            self.debug_dir = None
+
         self.path = self.dir / f"{safe}-{stamp}.jsonl"
         self.events: list[dict] = []
         self.step = 0
@@ -103,6 +112,36 @@ class DecisionLog:
         if self._fh:
             self._fh.close()
             self._fh = None
+
+    # ── Debug落盘 ─────────────────────────────────────────────────────────────
+
+    def save_image(self, name: str, data: bytes) -> Path | None:
+        """落盘图像（PNG/JPEG），仅debug模式。返回文件路径。"""
+        if not self.debug or not hasattr(self, 'debug_dir') or not self.debug_dir or not data:
+            return None
+        try:
+            path = self.debug_dir / f"{name}.png"
+            path.write_bytes(data)
+            return path
+        except OSError:
+            return None
+
+    def save_text(self, name: str, content: str) -> Path | None:
+        """落盘文本文件，仅debug模式。返回文件路径。"""
+        if not self.debug or not hasattr(self, 'debug_dir') or not self.debug_dir or not content:
+            return None
+        try:
+            path = self.debug_dir / f"{name}.txt"
+            path.write_text(content, encoding='utf-8')
+            return path
+        except OSError:
+            return None
+
+    def detail(self, phase: str, message: str) -> None:
+        """细粒度日志（仅debug模式输出到控制台，不写JSONL）。"""
+        if not self.debug or not self.verbose:
+            return
+        print(f"  [DEBUG {phase}] {message}")
 
     # ── 收尾汇总 ─────────────────────────────────────────────────────────────
 

@@ -139,8 +139,9 @@ class Config(BaseModel):
     skills: SkillConfig = Field(default_factory=SkillConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
     apps: list[AppConfig] = Field(default_factory=list)
-    log_dir: str = "artifacts/logs"
+    log_dir: str = "test/log"
     verbose: bool = True
+    debug: bool = False  # 细粒度日志开关（截图/XML/GLM交互落盘），生产环境保持False
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> "Config":

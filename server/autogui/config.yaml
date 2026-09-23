@@ -86,3 +86,6 @@ apps:
 
 log_dir: artifacts/logs
 verbose: true
+
+# 细粒度日志开关（截图/XML/GLM交互落盘）；诊断时改为true
+debug: true

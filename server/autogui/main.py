@@ -48,6 +48,8 @@ def cmd_run(args, cfg) -> int:
 
     glm = GLMClient(cfg.glm)
     runner = Runner(cfg=cfg, task=task, glm=glm)
+    # 把日志器传给GLMClient以便记录交互
+    glm._log = runner.log if hasattr(runner, 'log') else None
     result = runner.execute()
     return 0 if result["success"] else 1
 

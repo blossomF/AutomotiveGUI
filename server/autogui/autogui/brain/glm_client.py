@@ -95,11 +95,12 @@ class Usage:
 class GLMClient:
     """薄的、JSON 严格的 chat 封装，带用量统计。"""
 
-    def __init__(self, cfg: GLMConfig, client=None):
+    def __init__(self, cfg: GLMConfig, client=None, log=None):
         self.cfg = cfg
         self.usage = Usage()
         self.last_call = Usage()
         self._client = client
+        self._log = log  # 日志器引用
         if self._client is None:
             if not cfg.api_key:
                 raise GLMError(f"{cfg.api_key_env} is not set — cannot call GLM")
@@ -118,6 +119,17 @@ class GLMClient:
         """
         call = Usage()
         last: Exception | None = None
+
+        # 细粒度日志：请求
+        if self._log and hasattr(self._log, 'debug') and self._log.debug:
+            import json
+            self._log.detail("glm", f"请求GLM: {len(messages)}条消息")
+            req_summary = [{"role": m["role"],
+                           "content_type": "array" if isinstance(m.get("content"), list) else "text"}
+                          for m in messages]
+            self._log.save_text(f"glm_req_{int(time.time()*1000)}",
+                               json.dumps(req_summary, ensure_ascii=False, indent=2))
+
         for attempt in range(self.cfg.max_retries + 1):
             started = time.perf_counter()
             try:
@@ -136,6 +148,12 @@ class GLMClient:
                 self.usage.merge(call)
                 self.last_call = call
                 content = (resp.choices[0].message.content or "").strip()
+
+                # 细粒度日志：响应
+                if self._log and hasattr(self._log, 'debug') and self._log.debug:
+                    self._log.detail("glm", f"GLM响应: {len(content)}字符")
+                    self._log.save_text(f"glm_resp_{int(time.time()*1000)}", content)
+
                 if not content:
                     raise GLMError("empty completion")
                 return content, call

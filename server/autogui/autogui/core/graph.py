@@ -107,7 +107,7 @@ class Runner:
     def prepare(self) -> None:
         """运行前初始化：日志器、执行器（local/mcp 双通道）、技能库，并打印运行横幅。"""
         self.started = time.time()
-        self.log = DecisionLog(self.task, self.cfg.artifacts_dir, verbose=self.cfg.verbose)
+        self.log = DecisionLog(self.task, self.cfg.artifacts_dir, verbose=self.cfg.verbose, debug=self.cfg.debug)
         if self.executor is None:
             self.executor, note = make_executor(self.cfg.exec_mode)
             if note:
@@ -149,6 +149,12 @@ class Runner:
         except ADBError as e:
             self.log.phase("error", f"抓帧失败: {e}")
             return {"step": step, "error": str(e), "done": True, "status": "error", "success": False}
+
+        # 细粒度日志
+        if self.log.debug:
+            self.log.save_image(f"step{step:02d}_screenshot", self.obs.png)
+            self.log.save_text(f"step{step:02d}_tree", self.obs.xml)
+            self.log.detail("perceive", f"控件树: {self.obs.node_count}节点 → {len(self.obs.candidates)}候选")
 
         self.log.phase(
             "perceive",
@@ -194,15 +200,21 @@ class Runner:
             key = self._first_available_skill(state.get("task") or self.task)
             if key:
                 self.pending_skill = key
+                if self.log.debug:
+                    self.log.detail("route", f"skill关键词命中: {key[0]}")
                 self.log.phase("route", f"skill={key[0]}（关键词命中，0 次 VLM）")
                 return {"route": "skill"}
             self.pending_skill = None
 
         if path in ("B", "C") and self.obs and self.obs.tree_usable:
+            if self.log.debug:
+                self.log.detail("route", f"tree可用: 候选{len(self.obs.candidates)}")
             self.log.phase("route", f"tree（控件树可用：候选{len(self.obs.candidates)}）")
             return {"route": "tree"}
 
         reason = "声明路径 A" if path == "A" else f"控件树不可用（候选{len(self.obs.candidates) if self.obs else 0}）"
+        if self.log.debug:
+            self.log.detail("route", f"降级VLM: {reason}")
         self.log.phase("route", f"vlm 网格兜底 — {reason}")
         return {"route": "vlm"}
 
@@ -282,6 +294,11 @@ class Runner:
         self.context.progress = self.context.progress or ""
         text, kept, counts = self.context.trim(self.obs.candidates if route == "tree" else [])
 
+        # 细粒度日志：候选裁剪
+        if self.log.debug and route == "tree":
+            self.log.detail("decide", f"候选裁剪: {len(self.obs.candidates)}→{len(kept)}")
+            self.log.save_text(f"step{state.get('step', 0):02d}_candidates", text)
+
         if route == "tree":
             self.log.phase("decide", f"tree 模式（纯文本，无图）候选={len(kept)} ≈in={counts['approx_input']}tok")
         else:
@@ -295,6 +312,12 @@ class Runner:
         if route == "vlm":
             annotated = self.grid.annotate(self.obs.png, self.cfg.grid)
             jpeg = grid_mod.encode_jpeg(annotated, self.cfg.grid.jpeg_quality, self.cfg.grid.max_side)
+
+            # 细粒度日志：VLM网格图
+            if self.log.debug:
+                self.log.save_image(f"step{state.get('step', 0):02d}_grid", jpeg)
+                self.log.detail("decide", f"VLM网格: {self.grid.cols}x{self.grid.rows}")
+
             import base64
 
             jpeg = base64.b64encode(jpeg).decode("ascii")
@@ -324,6 +347,8 @@ class Runner:
 
         if route == "tree" and "node_ref" in action and tree_mod.by_ref(self.obs.candidates, action["node_ref"]) is None:
             # 越界 ref：不是错误，而是一次被观测到的 tree→vlm 降级（路径 C 证据）。
+            if self.log.debug:
+                self.log.detail("route", f"node_ref={action['node_ref']} 越界(1..{len(self.obs.candidates)})，降级VLM")
             self.log.phase("route", f"node_ref={action['node_ref']} 越界（1..{len(self.obs.candidates)}）→ 本轮降级 vlm")
             return {"route": "vlm", "action": {}, "retry_decision": True}
 
@@ -546,6 +571,12 @@ class Runner:
         changed = bool(self.obs) and bool(self.prev_obs) and self.obs.signature != self.prev_obs.signature
         mode = self.cfg.agent.reflection
 
+        # 细粒度日志：指纹对比
+        if self.log.debug:
+            prev_sig = self.prev_obs.signature[:9] if self.prev_obs else "N/A"
+            curr_sig = self.obs.signature[:9] if self.obs else "N/A"
+            self.log.detail("verify", f"指纹对比: prev={prev_sig}, curr={curr_sig}, changed={changed}")
+
         # ⚠️ 每个"本步算通过"的出口都必须把恢复阶梯**归零**（ok_state）。
         # verify 的返回值会 merge 进 LangGraph 状态：如果成功路径只返回 {}
         # 而不管 recover_depth，那么这个键会**保留上一轮的值**。于是
@@ -592,6 +623,12 @@ class Runner:
                 )
                 # 让随后的 _reflect（若仍需）拿到的是正确配对：act 前 → act 后。
                 self.prev_obs, self.obs, self.grid = pre_obs, post_obs, post_grid
+
+                # 细粒度日志：实时帧
+                if self.log.debug:
+                    self.log.save_image(f"step{state.get('step', 0):02d}_post_act", post_obs.png)
+                    self.log.detail("verify", f"实时帧sig: {post_obs.signature[:9]}")
+
                 if post_obs.signature != pre_obs.signature:
                     self.log.phase("verify", "补抓实时帧检测到变化 → 继续（0 次 VLM）",
                                    sig=post_obs.signature[:9])
@@ -601,6 +638,11 @@ class Runner:
 
         verdict = self._reflect(action)
         self.reflections += 1
+
+        # 细粒度日志：反思结果
+        if self.log.debug:
+            self.log.detail("verify", f"反思结果: {verdict}")
+
         if verdict == "A":
             self.log.phase("verify", "反思=A 生效，继续", vlm=1)
             return dict(ok_state)
@@ -624,6 +666,16 @@ class Runner:
         try:
             before = self.grid.annotate(self.prev_obs.png, self.cfg.grid)
             after = self.grid.annotate(self.obs.png, self.cfg.grid)
+
+            # 细粒度日志：反思前后图
+            if self.log.debug:
+                step = self.log.step if hasattr(self.log, 'step') and self.log.step else 0
+                self.log.save_image(f"step{step:02d}_reflect_before",
+                                  grid_mod.encode_jpeg(before, self.cfg.grid.jpeg_quality, self.cfg.grid.max_side))
+                self.log.save_image(f"step{step:02d}_reflect_after",
+                                  grid_mod.encode_jpeg(after, self.cfg.grid.jpeg_quality, self.cfg.grid.max_side))
+                self.log.detail("verify", "反思图像已落盘")
+
             b = base64.b64encode(grid_mod.encode_jpeg(before, self.cfg.grid.jpeg_quality, self.cfg.grid.max_side)).decode("ascii")
             a = base64.b64encode(grid_mod.encode_jpeg(after, self.cfg.grid.jpeg_quality, self.cfg.grid.max_side)).decode("ascii")
             return self.glm.reflect(self._action_detail(action) + " " + action.get("explain", ""),
