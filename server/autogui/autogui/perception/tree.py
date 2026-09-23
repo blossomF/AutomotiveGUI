@@ -175,6 +175,49 @@ def by_ref(cands: list[Candidate], ref: int) -> Candidate | None:
     return None
 
 
+def scroll_targets(
+    xml: str, *, screen: tuple[int, int] | None = None
+) -> dict[str, list[tuple[tuple[int, int, int, int], str]]]:
+    """收集屏内 ``scrollable=true`` 容器，按滚动轴向分组返回。
+
+    SCROLL 手势必须落在可滚动容器内部：起/终点一旦滑到相邻固定栏或外层
+    竖向列表，手势会被别的视图吞掉（实测 QQ音乐推荐页用屏幕中心全屏横滑
+    翻不动顶部 ``HorizontalScrollView`` 横条，而容器内部短滑正常）。
+
+    轴向判定：类名明确为 ``HorizontalScrollView`` / 含 ``ViewPager`` 判横向；
+    ``ScrollView`` / ``RecyclerView`` / ``ListView`` 判竖向（车机主列表 RV
+    虽宽大于高但仍是竖向，故不能只看宽高比）；其余才按宽高比兜底。
+    返回 ``{"horizontal": [(bounds, class_tail)...], "vertical": [...]}``。
+    """
+    groups: dict[str, list[tuple[tuple[int, int, int, int], str]]] = {
+        "horizontal": [], "vertical": []}
+    if not xml:
+        return groups
+    sw, sh = screen or (1920, 1080)
+    for n in nodes(xml):
+        if 'scrollable="true"' not in n:
+            continue
+        b = node_bounds(n)
+        if not b:
+            continue
+        x1, y1, x2, y2 = b
+        cw, ch = x2 - x1, y2 - y1
+        if cw <= 0 or ch <= 0:
+            continue
+        # 越界容器（多屏 dump 的另一块面板）会把向量带出屏，直接丢弃。
+        if x1 < 0 or y1 < 0 or x2 > sw or y2 > sh:
+            continue
+        tail = (node_class(n) or "").rsplit(".", 1)[-1]
+        if tail == "HorizontalScrollView" or "ViewPager" in tail:
+            axis = "horizontal"
+        elif tail in ("ScrollView", "RecyclerView", "ListView"):
+            axis = "vertical"
+        else:
+            axis = "horizontal" if cw >= ch else "vertical"
+        groups[axis].append((b, tail))
+    return groups
+
+
 def screen_signature(xml: str) -> str:
     """树中所有可见标签的顺序敏感摘要。
 

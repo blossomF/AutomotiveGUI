@@ -32,6 +32,36 @@ class GLMError(RuntimeError):
     """模型无法连通，或始终没有产出可用回答。"""
 
 
+def _is_retryable(exc: BaseException) -> bool:
+    """区分"会自愈的上游抖动"与"应立即失败的硬错误"。
+
+    thundersoft 网关后端实例异常时，经 litellm 把故障包装成
+    ``400 messages containing only assistant or system roles``——该文案
+    与请求体无关：实测同一合法请求几秒/几分钟后可成功，属可自愈抖动，
+    必须重试。超时 / 5xx / 429 / 连接错误同样重试；401/403 鉴权类与
+    其它确定性 400 立即失败，不空等。
+    """
+    if isinstance(exc, GLMError):  # 内部信号（循环内仅 empty completion），同样值得重试
+        return True
+    if exc.__class__.__name__ in (
+        "APITimeoutError",
+        "RateLimitError",
+        "InternalServerError",
+        "APIConnectionError",
+    ):
+        return True
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        if status >= 500 or status == 429:
+            return True
+        if status in (401, 403):
+            return False
+    msg = str(exc)
+    if "only assistant or system roles" in msg or "only system roles" in msg:
+        return True
+    return False
+
+
 @dataclass
 class Usage:
     calls: int = 0
@@ -111,8 +141,11 @@ class GLMClient:
                 return content, call
             except Exception as e:  # 传输 / 鉴权 / schema 漂移
                 last = e
-                if attempt < self.cfg.max_retries:
-                    time.sleep(1.0 + attempt)
+                if attempt < self.cfg.max_retries and _is_retryable(e):
+                    # 指数退避 1/2/4/8s：网关坏窗常持续十几秒，多次重试以撞上健康实例
+                    time.sleep(min(8.0, 1.0 * (2 ** attempt)))
+                    continue
+                break  # 硬错误（401/403/确定性 400）立即失败，不空等
         self.last_call = call
         raise GLMError(f"GLM call failed after {self.cfg.max_retries + 1} attempts: {last}")
 
@@ -150,6 +183,7 @@ class GLMClient:
         *,
         jpeg_b64: str | None = None,
         grid_spec: str = "20x10",
+        screen_size: tuple[int, int] | None = None,
     ) -> tuple[dict, Usage]:
         """请求下一个动作。返回归一化后的动作 dict。
 
@@ -157,9 +191,18 @@ class GLMClient:
         将其视为决策失败，降级路由 tree->vlm 或计一次无进展步，
         绝不崩溃。
         """
-        messages = prompts.build_decide_messages(context_text, jpeg_b64, grid_spec)
+        messages = prompts.build_decide_messages(
+            context_text, jpeg_b64, grid_spec, screen=screen_size
+        )
         raw = self.chat_json(messages)
-        action = parse_action(raw)
+        try:
+            action = parse_action(raw)
+        except ValueError as e:
+            # 把模型原始输出带进错误信息。否则调用方只看到 "SKILL needs name",
+            # 无从判断模型究竟写了什么字段（实测诊断需另写 hook 抓请求才查得出）。
+            raise ValueError(
+                f"{e} | 模型原始输出={json.dumps(raw, ensure_ascii=False)[:300]}"
+            ) from e
         progress = str(raw.get("progress", ""))[:300]
         entities = raw.get("entities") if isinstance(raw.get("entities"), dict) else {}
         action["_progress"] = progress

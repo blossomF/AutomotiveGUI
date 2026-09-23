@@ -38,6 +38,15 @@ def match_keywords(task: str, book: SkillBook) -> tuple[Skill, dict] | None:
     for skill in book.by_id.values():
         if not any(_norm(word) in t for word in skill.trigger_words() if word):
             continue
+        # 半成品配方不参与关键词命中：YAML 里 app.package 仍是占位空值，说明这套
+        # 技能还没用 --packages 绑定到具体 App。此时 launch 第一步必抛 SkillMiss，
+        # click/type 也无法保证落在预期 App——关键词命中只会白跑（执行器还会重试
+        # 再烧一轮）才降级回通用 tree/vlm。实测「播放他的第一首歌」命中空包名的
+        # music.play_song 连烧 2 轮、「暂停」命中无 launch 步骤的 music.pause 也
+        # 连烧 2 轮。统一在 app 包名为空时跳过整套配方，零代价落回模型；等包名
+        # 配上后配方自然恢复启用。
+        if not skill.package:
+            continue
         return skill, _extract_params(task, skill)
     return None
 
@@ -49,16 +58,33 @@ _PARAM_PATTERNS = (
 )
 
 
+def _strip_triggers(value: str, triggers: list[str]) -> str:
+    """从抽出的参数里剥掉触发词。
+
+    任务「播放哔哩哔哩钢铁侠第一季」按「动词+宾语」抽出来的是
+    「哔哩哔哩钢铁侠第一季」——触发词「哔哩哔哩」回答的是*去哪个 App*，
+    不是用户要搜的内容。带着它去搜索往往搜不到，配方里的 ``wait_for``
+    等这整串出现就超时，整条配方降级给模型手点（实测多烧 5~6 步）。
+    剥掉后只剩「钢铁侠第一季」，才是该拿去搜的词。
+    """
+    out = value
+    # 长触发词先剥："哔哩哔哩" 先于 "哔哩"，避免留下半个词。
+    for w in sorted((x for x in triggers if x), key=len, reverse=True):
+        out = re.sub(re.escape(w), "", out, flags=re.IGNORECASE)
+    return out
+
+
 def _extract_params(task: str, skill: Skill) -> dict:
     """尽力做槽位填充。参数缺失时让技能抛 SkillMiss——
     这是正确结果：宁可把这一轮交给模型，也不要用编造的参数跑配方。"""
     if not skill.params:
         return {}
     out: dict[str, str] = {}
+    triggers = list(skill.trigger_words())
     for pattern in _PARAM_PATTERNS:
         m = pattern.search(task)
         if m:
-            value = m.group(1).strip(" 。,.，、")
+            value = _strip_triggers(m.group(1), triggers).strip(" 。,.，、")
             if value:
                 out[skill.params[0]] = value[:40]
                 break

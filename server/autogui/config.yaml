@@ -29,7 +29,8 @@ grid:
 
 agent:
   max_steps: 20
-  wall_clock_limit: 180    # 秒；Demo Day 一个任务的时间槽总共 8 分钟
+  wall_clock_limit: 480    # 秒；Demo Day 一个任务的时间槽总共 8 分钟
+                           # （原 180 实测不够：B 站任务 8 步就要 212s，模型单次决策 4~10s）
   no_progress_limit: 3     # 屏幕指纹连续不变的步数
   delay_after_action: 1.0
   history_window: 5
@@ -47,7 +48,7 @@ skills:
 # 凭证直接写在下方；留空则回退环境变量 IFLYTEK_APPID / IFLYTEK_API_KEY / IFLYTEK_API_SECRET
 voice:
   appid: ad8987fe
-  api_key: dc1a6fb17594d12d553a42ce745d23e2
+  api_key: ""   # 留空 → 回退 GLM_API_KEY 环境变量（我们的 ThunderSoft key）
   api_secret: OGFjYWZjYzZhZTUzZTdiMWU4OGZmM2U2
   iat_url: ""            # 留空 = 讯飞公网 wss://iat-api.xfyun.cn/v2/iat
   max_seconds: 15        # 最长录音秒数
@@ -55,29 +56,33 @@ voice:
   silence_threshold: 120 # 静音判定 RMS 阈值（实测底噪<90，说话200~540）
 
 glm:
-  model: Qwen-vlm
-  base_url: https://llm-gateway.dev.cn-vwa.volkswagen-cea.com
-  api_key: sk-JaETqNgjIpH2tiIj7gQBgw   # 直接写 key；留空则回退环境变量 GLM_API_KEY
+  model: ts-glm-53-flash
+  base_url: https://llm.thundersoft.com/v1
+  api_key: ""                          # 留空 → 回退 GLM_API_KEY 环境变量（我们的 ThunderSoft 官方 key）
   api_key_env: GLM_API_KEY
   temperature: 0.1
-  max_tokens: 1024
-  timeout: 30
-  max_retries: 2
+  max_tokens: 2048    # ts-glm-53-flash 带思维链，思维链也计入 completion_tokens：
+                      # 1024 会被吃满（实测 10 次调用用掉 10132 tok ≈ 每次撞上限）→ 输出截断→重试
+  timeout: 60         # 正常决策实测 5~30s；60s 上限既覆盖慢响应，又让挂死请求
+                      # 尽快超时进入重试（120s 时单步挂死会直接吃掉整个任务预算）
+  max_retries: 4       # 网关间歇故障会伪装成 400 roles/超时且可自愈：指数退避 1/2/4/8s，共 5 次撞健康实例
 
 # 范围由规则 4.2 固定：CEA1.3 预装集 + 哔哩哔哩 / 飞书 / 外卖。
 # 借到车机后用 `python main.py --packages` 填包名——
 # LightGUIAgent 提示词里的 App 列表（美团/淘宝/微信）是手机端的，在车机上大多不适用。
 apps:
-  - name: 音乐
-    package: ""            # 例如 com.tencent.qqmusiccar —— 需真机确认
+  - name: QQ音乐
+    package: com.mosi.mosc.onlinemedia.qqmusic      # 车机实测已装；测试任务集 TK-QQ-* 全部针对它
+  - name: 酷我音乐
+    package: com.mosi.mosc.onlinemedia.kuwomusic   # 车机另有 kugoumusic/wyymusic，勿与 QQ音乐 混
   - name: 导航
-    package: ""
+    package: com.fawvw.vehicle.navi.ceaapp         # 原厂导航；车机另有 com.baidu.mapauto.pass
   - name: 哔哩哔哩
-    package: tv.danmaku.bili
+    package: com.bilibili.bilithings               # 车机版（原 tv.danmaku.bili 是手机版，车机无此包）
   - name: 飞书
-    package: com.lark.android.mcloud   # 需确认——飞书 Android 包名因构建版本而异
+    package: com.ss.android.lark                   # 车机版（原 com.lark.android.mcloud 车机无此包）
   - name: 外卖
-    package: ""
+    package: com.sankuai.meituan.car               # 美团车机版（原 takeoutnew 车机无此包）
 
 log_dir: artifacts/logs
 verbose: true

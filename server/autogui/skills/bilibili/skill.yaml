@@ -1,7 +1,7 @@
 # 哔哩哔哩车机版
 name: bilibili
 app:
-  package: tv.danmaku.bili     # 需真机确认
+  package: com.bilibili.bilithings   # 车机版真身（2026-09-21 adb 实测；原 tv.danmaku.bili 是手机版，车机无此包）
 
 popups:
   - { detect: "青少年模式", button: "以后再说" }

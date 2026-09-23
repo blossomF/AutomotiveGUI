@@ -445,16 +445,37 @@ class Device:
         """轮询 UI 树直到出现 ``text``；返回那份 XML。超时抛 ``TimeoutError``。
 
         接受预取的 ``xml``，让刚 dump 过树的调用方不用付两次成本。
+
+        匹配是**空白不敏感**的：车机上"输入的关键词"和"界面上显示的关键词"
+        空格经常对不上——控件树里是 ``钢铁侠 第一季``（或反过来），而技能参数
+        是 ``钢铁侠第一季``。用裸 ``in`` 比会直接误判成"没出现"然后超时，
+        实测就是这么挂的（skill 的 wait_for 10s 超时 → 配方降级 → 通用路径
+        从零开始，白白烧掉一步）。所以两边都去掉全部空白再比。
+        顺带把 XML 实体还原（``&amp;`` 等），否则含 ``&``/``<`` 的文本永远匹配不上。
         """
+        needle = _normalize_for_match(text)
         deadline = time.time() + timeout
         while True:
             current = xml if xml is not None else self.dump_xml()
-            if text and text in current:
+            if not needle or needle in _normalize_for_match(current):
                 return current
             if time.time() >= deadline:
                 raise TimeoutError(f"timed out after {timeout}s waiting for {text!r}")
             time.sleep(interval)
             xml = None
+
+
+_XML_ENTITIES = {
+    "&lt;": "<", "&gt;": ">", "&quot;": '"', "&apos;": "'", "&amp;": "&",
+}
+
+
+def _normalize_for_match(s: str) -> str:
+    """去空白 + 还原常见 XML 实体，用于 ``wait_for`` 的宽松包含判断。"""
+    for ent, ch in _XML_ENTITIES.items():
+        if ent in s:
+            s = s.replace(ent, ch)
+    return re.sub(r"\s+", "", s)
 
 
 def _dec(b) -> str:

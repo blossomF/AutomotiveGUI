@@ -45,8 +45,9 @@
    ```
    memory / planning 不独立调用：合并进 decide 的同一输出（`action + progress + entities`，见 brain 文档）。
 
-5. **恢复梯子：BACK → HOME → 重启前台 App，每次只降一级并复验。**
-   v2 收到 B 判定就条件反射 `back()`（`run.py:419-421`）——在车机上可能直接退到桌面、或关掉错误的对话框，且没有任何确认它有效。本层 `recovery` 节点每访问走一级（`recover_depth` 递进），每级之后回到 `perceive` 重新观测，下一次 guard 立刻能看出是否恢复成功；`no_progress` 同时清零。
+5. **恢复梯子：BACK → HOME → 重启前台 App，连续失败才降一级、任何一步通过即归零。**
+   v2 收到 B 判定就条件反射 `back()`（`run.py:419-421`）——在车机上可能直接退到桌面、或关掉错误的对话框，且没有任何确认它有效。本层 `recovery` 节点按 `recover_depth` 选本级动作（1=BACK / 2=HOME / 3=relaunch），每级之后回到 `perceive` 重新观测，下一次 guard 立刻能看出是否恢复成功；`no_progress` 同时清零。
+   ⚠️ 深度由 `verify()` 决定，**不是** `recovery()` 自增——两边都加会让每次失败跳两级，且"通过"无法回零。关键实现：`verify()` 每个"本步算通过"的出口（终止/非变更/off/首步/指纹变/反思=A/UNKNOWN）都返回 `{"recover_depth": 0, "no_progress": 0}`；只有反思判 B/C 时 `depth = 上一步 + 1`（**连续**失败才升级，任何一步通过即把阶梯清零）。`recovery()` 只读取当前深度、选 rung、不自增，保留深度等下一轮 verify 判定。早先版本成功路径只返回 `{}`，LangGraph 状态 merge 保留旧 `recover_depth` → 阶梯只升不降，`press_home`/`relaunch` 反复把刚输入的关键词冲掉，实测一条任务到 step 19 还卡在"第 4 级：relaunch"。
 
 6. **决策链日志是章程 4.7 的硬要求，按一等组件建设（不是散落的 print）。**
    它同时是三项得分的证据：评委读它给 Harness 打分、时间列是性能分证明、token 列是 Context 分证明。

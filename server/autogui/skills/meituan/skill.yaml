@@ -3,7 +3,7 @@
 # 替换为该 App UI 树里真实出现的字符串。
 name: meituan
 app:
-  package: com.sankuai.meituan.takeoutnew  # 根据 config.yaml 及真机 --packages 确认
+  package: com.sankuai.meituan.car   # 车机版真身（2026-09-21 adb 实测；原 takeoutnew 车机无此包）
 
 # App 级弹窗覆盖项；省略则用 base.py 的 DEFAULT_POPUPS。
 popups:

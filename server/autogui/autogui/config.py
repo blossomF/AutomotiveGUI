@@ -56,7 +56,7 @@ class GLMConfig(BaseModel):
     temperature: float = 0.1
     max_tokens: int = 1024
     timeout: float = 30.0
-    max_retries: int = 2
+    max_retries: int = 4
 
     @field_validator("api_key")
     @classmethod

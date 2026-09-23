@@ -4,7 +4,7 @@
 # 章程参考任务涉及"读消息→设日程"跨应用场景，这里先只覆盖单应用基础技能。
 name: feishu
 app:
-  package: ""            # 飞书车机版包名，需真机 `python main.py --packages` 确认
+  package: com.ss.android.lark   # 车机版真身（2026-09-21 adb 实测）
 
 popups:
   - { detect: "用户协议", button: "同意" }

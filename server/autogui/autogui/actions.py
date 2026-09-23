@@ -12,7 +12,38 @@ dock 的横屏车机上这个提示是错的，模型会白白烧掉步数找按
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+
+# tree（纯文本）模式没有网格图，模型无法回答 E5 这类格号；当它需要点中一个
+# 长条控件的特定比例位置（典型：把播放进度条跳到约 70%——node_ref 只能点中
+# 控件中心）时，会直接给屏幕像素坐标。实测 GLM 写出 grid='[880, 885]'，旧代码
+# 只认字母格号，动作直接 ValueError 报废。下面两个小工具把这种"显式像素坐标"
+# 识别出来；字母格号（"E5"/"J10"）仍走 grid 标签路径。
+_GRID_LABEL_RE = re.compile(r"^[A-Za-z]\d+$")
+_COORD_NUM_RE = re.compile(r"-?\d+")
+
+
+def parse_coord(value) -> tuple[int, int] | None:
+    """把显式像素坐标 CLICK 目标解析成 ``(x, y)``；不是坐标对时返回 ``None``。
+
+    接受 ``[880, 885]`` / ``"(880,885)"`` / ``"880 885"`` 字符串，以及两个
+    数字的 list/tuple。字母格号或取不出恰好两个整数的一律返回 ``None``。
+    """
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        try:
+            return int(value[0]), int(value[1])
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(value, str):
+        return None
+    s = value.strip()
+    if _GRID_LABEL_RE.match(s):
+        return None
+    nums = _COORD_NUM_RE.findall(s)
+    if len(nums) == 2:
+        return int(nums[0]), int(nums[1])
+    return None
 
 
 @dataclass(frozen=True)
@@ -25,8 +56,12 @@ class ActionSpec:
 ACTIONS: tuple[ActionSpec, ...] = (
     ActionSpec("CLICK", ("node_ref | grid",), "Tap one on-screen candidate"),
     ActionSpec("LONG_PRESS", ("node_ref | grid",), "Hold ~0.8s — context menus, drag handles"),
-    ActionSpec("TYPE", ("text", "clear_first?"), "Type into the focused field"),
+    ActionSpec("TYPE", ("text", "clear_first?", "submit?"),
+               "Type into the focused field; submit=true presses ENTER after typing (search boxes)"),
     ActionSpec("SCROLL", ("direction",), "Scroll down|up (or right|left on landscape lists)"),
+    ActionSpec("DRAG", ("from", "to", "duration?"),
+               "Press-and-drag between two pixel points [x,y] — sliders/seek bars IGNORE taps; "
+               "drag the thumb from its current position to the target ratio"),
     ActionSpec("BACK", (), "System back — leaves a wrong page or dismisses a dialog"),
     ActionSpec("HOME", (), "System home — escape hatch when a page is unrecoverable"),
     ActionSpec("LAUNCH", ("app",), "Start an app by package name"),
@@ -40,7 +75,7 @@ ACTION_NAMES: tuple[str, ...] = tuple(a.name for a in ACTIONS)
 TERMINAL: frozenset[str] = frozenset({"COMPLETE", "FAIL"})
 
 # 可以用“屏幕指纹变化”来校验效果、而不必花一次 VLM 调用的动作。
-MUTATING: frozenset[str] = frozenset({"CLICK", "LONG_PRESS", "TYPE", "SCROLL", "BACK", "HOME", "LAUNCH", "SKILL"})
+MUTATING: frozenset[str] = frozenset({"CLICK", "LONG_PRESS", "TYPE", "SCROLL", "DRAG", "BACK", "HOME", "LAUNCH", "SKILL"})
 
 SCROLL_DIRECTIONS = ("down", "up", "left", "right")
 
@@ -54,6 +89,10 @@ def parse_action(raw: dict) -> dict:
     if not isinstance(raw, dict):
         raise ValueError(f"action must be an object, got {type(raw).__name__}")
     name = str(raw.get("type") or raw.get("action") or "").strip().upper()
+    # 容错：旧版 prompt 曾示范 {"type":"grid",...}，模型偶发沿用。GRID 不是
+    # 独立动作，实质就是 CLICK 一个 grid 标签/像素坐标目标，归一到 CLICK。
+    if name == "GRID":
+        name = "CLICK"
     if name not in ACTION_NAMES:
         raise ValueError(f"unknown action {name!r}; valid: {', '.join(ACTION_NAMES)}")
 
@@ -65,8 +104,16 @@ def parse_action(raw: dict) -> dict:
                 out["node_ref"] = int(str(raw["node_ref"]).lstrip("#"))
             except (TypeError, ValueError):
                 raise ValueError(f"node_ref must be an integer, got {raw['node_ref']!r}")
-        elif raw.get("grid"):
-            out["grid"] = str(raw["grid"]).strip().upper()
+        elif raw.get("grid") is not None:
+            coord = parse_coord(raw["grid"])
+            if coord is not None:
+                # tree 模式给的显式像素坐标；越界夹紧在执行侧（那里才知道屏幕尺寸）。
+                out["coord"] = coord
+            else:
+                g = str(raw["grid"]).strip().upper()
+                if not g:
+                    raise ValueError(f"{name} needs node_ref or grid")
+                out["grid"] = g
         else:
             raise ValueError(f"{name} needs node_ref or grid")
     elif name == "TYPE":
@@ -74,20 +121,42 @@ def parse_action(raw: dict) -> dict:
             raise ValueError("TYPE needs text")
         out["text"] = str(raw["text"])
         out["clear_first"] = bool(raw.get("clear_first", False))
+        # submit=true：输入完成后补发一次 ENTER。仅用于搜索框等"回车即提交"
+        # 的单行输入框（实测车机 QQ音乐：键盘弹起遮挡结果，ENTER 同时触发搜索
+        # 并收起键盘）。普通表单/多行输入不要带，避免误提交。
+        out["submit"] = bool(raw.get("submit", False))
     elif name == "SCROLL":
         d = str(raw.get("direction", "down")).strip().lower()
         if d not in SCROLL_DIRECTIONS:
             raise ValueError(f"SCROLL direction must be one of {SCROLL_DIRECTIONS}, got {d!r}")
         out["direction"] = d
+    elif name == "DRAG":
+        # 进度条/滑块专用：from/to 都是显式像素 [x,y]。起拖点必须是 thumb 当前
+        # 位置（模型按 当前时间/总时长 × 轨道 bounds 算），不是轨道起点——实测
+        # 车机 QQ音乐 sb_seekBar 对轨道空白处的 tap/swipe 都不响应，只有按住
+        # thumb 拖动才 seek。
+        p_from = parse_coord(raw.get("from"))
+        p_to = parse_coord(raw.get("to"))
+        if p_from is None or p_to is None:
+            raise ValueError("DRAG needs from and to as pixel pairs, e.g. \"from\":[228,885],\"to\":[952,885]")
+        out["from"] = p_from
+        out["to"] = p_to
+        try:
+            out["duration"] = max(100, min(int(raw.get("duration", 400)), 2000))
+        except (TypeError, ValueError):
+            out["duration"] = 400
     elif name == "LAUNCH":
         out["app"] = str(raw.get("app", "")).strip()
         if not out["app"]:
             raise ValueError("LAUNCH needs app (package name)")
     elif name == "SKILL":
-        out["skill"] = str(raw.get("name", "")).strip()
-        out["params"] = raw.get("params") or {}
+        # 字段名容错：type 已经声明了 SKILL，模型再写 "name" 并不自然。
+        # 实测 GLM 会写 {"type":"SKILL","skill":"search_video","params":{...}}
+        # 或把参数放在 "args"。两种写法语义完全一致，都接受。
+        out["skill"] = str(raw.get("name") or raw.get("skill") or "").strip()
+        out["params"] = raw.get("params") or raw.get("args") or {}
         if not out["skill"]:
-            raise ValueError("SKILL needs name")
+            raise ValueError(f"SKILL needs name (or skill); got keys {sorted(raw)}")
     elif name == "WAIT":
         try:
             out["seconds"] = min(float(raw.get("seconds", 1.5)), 5.0)
