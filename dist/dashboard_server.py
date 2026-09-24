@@ -930,11 +930,9 @@ async function loadTask(dir, animate){
       .map(([k,v]) => `<b>${esc(k)}:</b> ${esc(v)}`).join(' · ');
     const ev = s.evidence ? `<div class="evidence">✅ 完成证据：${esc(s.evidence)}</div>` : '';
     const noop = s.noop ? `<div class="noop">⚠️ 上一步点击后界面无变化（控件树+画面均未变）</div>` : '';
-    const img = s.image ? `<img class="shot" src="${esc(s.image)}" loading="lazy">` : '<div class="shot" style="display:flex;align-items:center;justify-content:center;color:#666;font-size:12px">无截图</div>';
     const card = document.createElement('div');
     card.className = 'card';
     card.innerHTML = `
-      ${img}
       <div class="body">
         <div class="row1">
           <span class="step-no">#${s.step}</span>
