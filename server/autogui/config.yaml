@@ -45,11 +45,16 @@ skills:
   directory: skills
 
 # 讯飞流式听写（章程 §4.6 加分项）：语音输入通道，可插拔，主循环不依赖
-# 凭证直接写在下方；留空则回退环境变量 IFLYTEK_APPID / IFLYTEK_API_KEY / IFLYTEK_API_SECRET
+# 凭证不写明文/不提交密文（DPAPI 密文绑机器，队友解不开）：入库版本一律留空。
+# 每台机器本地录入（getpass 不回显，加密写入本机 config.yaml，见 autogui/security.py）：
+#   python -m autogui.security set voice.appid
+#   python -m autogui.security set voice.api_key
+#   python -m autogui.security set voice.api_secret
+# 或设置环境变量 IFLYTEK_APPID / IFLYTEK_API_KEY / IFLYTEK_API_SECRET。
 voice:
-  appid: ad8987fe
-  api_key: ""   # 留空 → 回退 GLM_API_KEY 环境变量（我们的 ThunderSoft key）
-  api_secret: OGFjYWZjYzZhZTUzZTdiMWU4OGZmM2U2
+  appid: ""             # python -m autogui.security set voice.appid
+  api_key: ""   # 留空 → 回退 IFLYTEK_API_KEY 环境变量；录入：python -m autogui.security set voice.api_key
+  api_secret: ""        # python -m autogui.security set voice.api_secret
   iat_url: ""            # 留空 = 讯飞公网 wss://iat-api.xfyun.cn/v2/iat
   max_seconds: 15        # 最长录音秒数
   silence_seconds: 0.8   # 尾部连续静音后自动停止
