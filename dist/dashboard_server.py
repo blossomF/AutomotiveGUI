@@ -935,7 +935,7 @@ async function loadTask(dir, animate){
     card.innerHTML = `
       <div class="body">
         <div class="row1">
-          <span class="step-no">#${s.step}</span>
+          <span class="step-no">#${s.idx}</span>
           <span class="atype a-${esc(a.action||'')}">${esc(a.action||'?')}</span>
           ${a.decision_source?`<span class="badge" style="background:#e0e7ff;color:#3730a3">${esc(a.decision_source)}</span>`:''}
         </div>
