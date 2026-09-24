@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -17,6 +18,26 @@ from pydantic import BaseModel, Field, field_validator
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
+
+
+def _decrypt_or_empty(value: str) -> str:
+    """ENC() 密文尝试 DPAPI 解密；失败则返回空串以回退环境变量。
+
+    DPAPI 密文绑定加密者的 Windows 用户：config.yaml 进 git 后，换机器/换
+    用户/非 Windows 平台都解不开。此时绝不能让 Config.load 崩溃——
+    打印一行提示并按"未配置"处理，由环境变量接管（队友各自 set 自己的凭证）。
+    """
+    from autogui.security import is_encrypted, resolve_secret
+
+    if not is_encrypted(value):
+        return value  # 明文或空值，原样返回
+    try:
+        return resolve_secret(value)
+    except Exception as e:  # noqa: BLE001 — 任何解密失败都降级，不阻断启动
+        print(f"[config] ENC 凭证解密失败（{e}），改用环境变量；"
+              f"本机录入请运行 python -m autogui.security set <section.field>",
+              file=sys.stderr)
+        return ""
 
 
 class GridConfig(BaseModel):
@@ -47,7 +68,13 @@ class GridConfig(BaseModel):
 
 
 class GLMConfig(BaseModel):
-    """GLM 5.3，走 OpenAI 兼容端点。Key 直接写在 config.yaml 的 api_key 字段，未填时回退环境变量。"""
+    """GLM 5.3，走 OpenAI 兼容端点。
+
+    api_key 支持三种写法（优先级从高到低）：
+    1. config.yaml 的 ENC(...) DPAPI 密文（见 autogui.security，防明文入库扣分）；
+    2. config.yaml 明文（兼容，不推荐）；
+    3. 留空 → 回退环境变量 GLM_API_KEY。
+    """
 
     model: str = "glm-4v-plus"  # TODO 9/15: 换成组委会发放 key 对应的确切型号 id
     base_url: str = "https://open.bigmodel.cn/api/paas/v4/"
@@ -61,10 +88,9 @@ class GLMConfig(BaseModel):
     @field_validator("api_key")
     @classmethod
     def _api_key_from_env(cls, v: str, info) -> str:
+        v = _decrypt_or_empty(v)  # ENC(...) 密文 → 明文；解密失败/明文/空 → 原值或空
         if v:
             return v
-        import os
-
         return os.getenv(info.data.get("api_key_env", "GLM_API_KEY"), "")
 
 
@@ -87,8 +113,10 @@ class SkillConfig(BaseModel):
 class VoiceConfig(BaseModel):
     """讯飞流式听写（章程 §4.6 加分项）：可插拔的语音输入通道，主循环不依赖它。
 
-    三个凭证直接写在 config.yaml；留空时回退环境变量
-    IFLYTEK_APPID / IFLYTEK_API_KEY / IFLYTEK_API_SECRET。
+    三个凭证的读取优先级（与 GLMConfig.api_key 一致）：
+    1. config.yaml 的 ENC(...) DPAPI 密文（见 autogui.security，防明文入库扣分）；
+    2. config.yaml 明文（兼容，不推荐）；
+    3. 留空 → 回退环境变量 IFLYTEK_APPID / IFLYTEK_API_KEY / IFLYTEK_API_SECRET。
     """
 
     appid: str = ""
@@ -102,6 +130,7 @@ class VoiceConfig(BaseModel):
     @field_validator("appid", "api_key", "api_secret")
     @classmethod
     def _voice_cred_from_env(cls, v: str, info) -> str:
+        v = _decrypt_or_empty(v)  # ENC(...) 密文 → 明文；解密失败/明文/空 → 原值或空
         if v:
             return v
         env = {"appid": "IFLYTEK_APPID", "api_key": "IFLYTEK_API_KEY",

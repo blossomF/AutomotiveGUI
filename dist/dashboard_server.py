@@ -59,6 +59,13 @@ LOGS_ROOT = AUTOGUI_DIR / "artifacts" / "logs"   # 决策链日志（扁平 *.js
 _RUN_LOCK = threading.Lock()
 _RUNNING_PROC = None
 
+# —— 语音录入（讯飞 ASR，复用 autogui.voice.asr.transcribe_from_mic）——
+# Config 懒加载：首次 /api/voice 时才加载（避免没配凭证时面板起不来）。
+# sounddevice 不能并发录音，_VOICE_LOCK 保证同一时刻只有一个录音在跑。
+_CFG = None
+_CFG_LOCK = threading.Lock()
+_VOICE_LOCK = threading.Lock()
+
 # —— 空闲自动退出（供启动器实现「关掉网页 = 关掉服务」）——
 # 页面每 3 秒发一次 /api/heartbeat；看门狗发现心跳停了就退出。
 # 默认 0 = 不启用，手动 `python dashboard_server.py` 行为完全不变。
@@ -252,6 +259,38 @@ def get_live(task_dir: str) -> dict:
 
 
 # ============================================================================
+# 语音录入（讯飞 ASR）：录音 + 识别，返回 (text, error)。阻塞约 3~20s。
+# 复用 autogui.voice.asr.transcribe_from_mic——它内部已含 sounddevice 录音
+# （尾部静音自动停）+ 讯飞 IAT 流式识别。Config 懒加载，凭证缺失会抛 VoiceError。
+# ============================================================================
+def _load_cfg():
+    """懒加载 autogui Config；首次 /api/voice 时加载。失败抛异常。"""
+    global _CFG
+    if _CFG is not None:
+        return _CFG
+    with _CFG_LOCK:
+        if _CFG is None:
+            if str(AUTOGUI_DIR) not in sys.path:
+                sys.path.insert(0, str(AUTOGUI_DIR))
+            from autogui.config import Config
+            _CFG = Config.load()
+    return _CFG
+
+
+def launch_voice():
+    """录音 + 讯飞 ASR，返回 (text, error)。阻塞约 3~20s（录音+识别）。"""
+    cfg = _load_cfg()
+    from autogui.voice.asr import VoiceError, transcribe_from_mic
+    try:
+        text = transcribe_from_mic(cfg).strip()
+    except VoiceError as e:
+        return None, str(e)
+    except Exception as e:  # noqa: BLE001
+        return None, f"语音识别失败：{e}"
+    return text, None
+
+
+# ============================================================================
 # 任务启动 / 停止（从面板拉起 main.py 子进程）
 # ============================================================================
 def launch_task(task: str):
@@ -407,6 +446,19 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json({"ok": True, "task_dir": task_dir})
             elif path == "/api/stop":
                 self._send_json({"ok": True, "stopped": stop_task()})
+            elif path == "/api/voice":
+                # 录音 + ASR 阻塞调用；sounddevice 不能并发，加锁防重入
+                if not _VOICE_LOCK.acquire(blocking=False):
+                    self._send_json({"ok": False, "error": "已有录音在进行中，请等结束"}, 409)
+                    return
+                try:
+                    text, err = launch_voice()
+                    if err:
+                        self._send_json({"ok": False, "error": err}, 400)
+                    else:
+                        self._send_json({"ok": True, "text": text or ""})
+                finally:
+                    _VOICE_LOCK.release()
             else:
                 self._send_json({"error": "not found"}, 404)
         except Exception as e:  # noqa: BLE001
@@ -452,6 +504,10 @@ BASE_CSS = r"""
   #voiceBtn svg { display:block; }
   #voiceBtn:hover { border-color:#2563eb; color:#2563eb; background:#eff6ff; }
   #voiceBtn:active { transform:scale(.94); }
+  #voiceBtn.recording { background:#fee2e2; border-color:#ef4444; color:#dc2626;
+                        animation: voicePulse 1.2s ease-in-out infinite; }
+  @keyframes voicePulse { 0%,100% { box-shadow:0 0 0 0 rgba(239,68,68,.4); }
+                          50%    { box-shadow:0 0 0 8px rgba(239,68,68,0); } }
   /* 轻提示气泡（贴在输入坞上方） */
   #toast { position:absolute; left:50%; bottom:calc(100% + 16px);
            transform:translateX(-50%) translateY(6px);
@@ -868,10 +924,23 @@ function fillTaskText(text, autoRun){
   inp.focus();
   if(autoRun && inp.value) $('#runBtn').click();
 }
-function startVoiceInput(){
-  // TODO(语音): 此处替换为「录音 -> ASR -> fillTaskText(文本)」；按钮可按需切 .recording 态
-  toast('语音录入开发中，先用键盘输入吧');
-  const inp = $('#taskInput'); if(inp) inp.focus();
+async function startVoiceInput(){
+  const btn = $('#voiceBtn'); if(!btn) return;
+  btn.classList.add('recording');
+  setMascot('thinking');
+  toast('🎤 录音中…说完停顿自动停止');
+  try {
+    const r = await fetch('/api/voice', {method:'POST'});
+    const j = await r.json();
+    if(!j.ok){ toast('✗ ' + (j.error || '未知错误')); setMascot('idle'); return; }
+    fillTaskText(j.text || '');
+    toast(j.text ? '✓ 已识别，确认后启动' : '✗ 未识别到内容');
+    setMascot('idle');
+  } catch(e){
+    toast('✗ 请求出错：' + e); setMascot('idle');
+  } finally {
+    btn.classList.remove('recording');
+  }
 }
 $('#voiceBtn').onclick = startVoiceInput;
 
