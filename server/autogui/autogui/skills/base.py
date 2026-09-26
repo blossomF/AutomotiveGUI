@@ -154,7 +154,14 @@ class SkillBook:
 
         trace: list[str] = []
         for i, step in enumerate(skill.steps, 1):
-            line = self._run_step(skill, step, args)
+            if log_cb:
+                log_cb(f"step{i} 开始 act={step.get('act', '')} hint={self._describe(step, skill, args)}")
+            try:
+                line = self._run_step(skill, step, args)
+            except Exception as e:
+                if log_cb:
+                    log_cb(f"step{i} 失败 {type(e).__name__}: {e}")
+                raise
             entry = f"  step{i} {line}"
             trace.append(entry)
             if log_cb:

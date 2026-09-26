@@ -108,6 +108,9 @@ class Runner:
         """运行前初始化：日志器、执行器（local/mcp 双通道）、技能库，并打印运行横幅。"""
         self.started = time.time()
         self.log = DecisionLog(self.task, self.cfg.artifacts_dir, verbose=self.cfg.verbose, debug=self.cfg.debug)
+        if self.glm is not None:
+            self.glm._log = self.log
+        tools.dev().trace_log = self.log
         if self.executor is None:
             self.executor, note = make_executor(self.cfg.exec_mode)
             if note:
@@ -124,6 +127,9 @@ class Runner:
         self.log.kv("任务", self.task)
         self.log.kv("设备", tools.dev().serial)
         self.log.kv("技能", f"{len(self.book.by_id) if self.book else 0} 个可用")
+        if self.log.debug:
+            self.log.phase("setup", f"debug 目录 {self.log.debug_dir}",
+                           declared_path=self.cfg.declared_path, reflection=self.cfg.agent.reflection)
 
     @property
     def elapsed(self) -> float:
@@ -150,10 +156,10 @@ class Runner:
             self.log.phase("error", f"抓帧失败: {e}")
             return {"step": step, "error": str(e), "done": True, "status": "error", "success": False}
 
-        # 细粒度日志
+        # 截图与 dump_xml 的原始 XML 都在 debug 目录；XML 由 Device 在每次抓取时记录，
+        # 包括技能执行和 verify 补抓，不只限于 perceive 这一处。
         if self.log.debug:
             self.log.save_image(f"step{step:02d}_screenshot", self.obs.png)
-            self.log.save_text(f"step{step:02d}_tree", self.obs.xml)
             self.log.detail("perceive", f"控件树: {self.obs.node_count}节点 → {len(self.obs.candidates)}候选")
 
         self.log.phase(
@@ -187,6 +193,9 @@ class Runner:
         if verdict.stop:
             self.log.phase("guard", f"停止：{verdict.stop_reason} — {verdict.detail}", elapsed=f"{self.elapsed:.0f}s")
             return {"done": True, "success": False, "status": verdict.stop_reason}
+        if self.log.debug:
+            self.log.phase("guard", "通过", no_progress=state.get("no_progress", 0),
+                           elapsed=round(self.elapsed, 1))
         return {"done": False}
 
     def route(self, state: AgentState) -> dict:
@@ -196,6 +205,10 @@ class Runner:
         这样声明的能力与实际走的代码路径不会矛盾。
         """
         path = self.cfg.declared_path
+        if self.log.debug:
+            self.log.phase("route", "评估", path=path, skills_enabled=bool(self.book),
+                           tree_usable=bool(self.obs and self.obs.tree_usable),
+                           candidates=len(self.obs.candidates) if self.obs else 0)
         if self.book and path in ("B", "C"):
             key = self._first_available_skill(state.get("task") or self.task)
             if key:
@@ -205,6 +218,8 @@ class Runner:
                 self.log.phase("route", f"skill={key[0]}（关键词命中，0 次 VLM）")
                 return {"route": "skill"}
             self.pending_skill = None
+            if self.log.debug:
+                self.log.detail("route", "关键词未命中可用技能，继续评估控件树")
 
         if path in ("B", "C") and self.obs and self.obs.tree_usable:
             if self.log.debug:
@@ -315,7 +330,7 @@ class Runner:
 
             # 细粒度日志：VLM网格图
             if self.log.debug:
-                self.log.save_image(f"step{state.get('step', 0):02d}_grid", jpeg)
+                self.log.save_image(f"step{state.get('step', 0):02d}_grid", jpeg, extension="jpg")
                 self.log.detail("decide", f"VLM网格: {self.grid.cols}x{self.grid.rows}")
 
             import base64
@@ -671,9 +686,11 @@ class Runner:
             if self.log.debug:
                 step = self.log.step if hasattr(self.log, 'step') and self.log.step else 0
                 self.log.save_image(f"step{step:02d}_reflect_before",
-                                  grid_mod.encode_jpeg(before, self.cfg.grid.jpeg_quality, self.cfg.grid.max_side))
+                                  grid_mod.encode_jpeg(before, self.cfg.grid.jpeg_quality, self.cfg.grid.max_side),
+                                  extension="jpg")
                 self.log.save_image(f"step{step:02d}_reflect_after",
-                                  grid_mod.encode_jpeg(after, self.cfg.grid.jpeg_quality, self.cfg.grid.max_side))
+                                  grid_mod.encode_jpeg(after, self.cfg.grid.jpeg_quality, self.cfg.grid.max_side),
+                                  extension="jpg")
                 self.log.detail("verify", "反思图像已落盘")
 
             b = base64.b64encode(grid_mod.encode_jpeg(before, self.cfg.grid.jpeg_quality, self.cfg.grid.max_side)).decode("ascii")

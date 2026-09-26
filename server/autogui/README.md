@@ -1,5 +1,7 @@
 # Automotive GUI Agent
 
+想按代码逐步理解 skill、XML、VLM 的切换和联调日志，请先读 [代码流程与联调日志导读](../../doc/代码流程与联调日志导读.md)。
+
 看懂车机屏幕、操作车机屏幕的 Agent。LangGraph 做决策大脑，MCP 做执行面，自研 ADB 桥接层直连
 Android Automotive 中控屏。CART Q3 AI 大赛作品。
 
@@ -99,7 +101,7 @@ Windows 用户可以全部用 `run.bat` 代劳：`run.bat setup` / `run.bat chec
 | | 通道 | 触发条件 | 每次决策开销 |
 |---|---|---|---|
 | 1 | **Skill**（声明式配方） | 任务命中关键词且配方可执行 | **0 次 VLM** |
-| 2 | **tree**（控件树 → 模型选 `node_ref`） | `uiautomator dump` 有 ≥5 个可寻址候选 | 1 次，**纯文本，不发图** |
+| 2 | **tree**（控件树 → 模型选 `node_ref`） | `uiautomator dump` 有 ≥3 个可寻址候选 | 1 次，**纯文本，不发图** |
 | 3 | **vlm**（网格截图） | 树为空 / 自绘界面 / tree 返回越界 `node_ref` | 1 次 + 1 张图 |
 
 `declared_path` 是提交给评委的声明。规则 4.4 明确"声明与实际实现不符按实际给分"，所以这个值**必须

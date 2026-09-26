@@ -101,6 +101,7 @@ class GLMClient:
         self.last_call = Usage()
         self._client = client
         self._log = log  # 日志器引用
+        self._call_seq = 0
         if self._client is None:
             if not cfg.api_key:
                 raise GLMError(f"{cfg.api_key_env} is not set — cannot call GLM")
@@ -110,7 +111,7 @@ class GLMClient:
 
     # ── 原始 chat ────────────────────────────────────────────────────────────
 
-    def chat(self, messages: list[dict]) -> tuple[str, Usage]:
+    def chat(self, messages: list[dict], *, kind: str = "chat") -> tuple[str, Usage]:
         """一次 chat 补全，传输错误时重试。返回 (text, usage)。
 
         ``usage`` 覆盖**这一次**逻辑调用（含其重试），并镜像到
@@ -120,15 +121,25 @@ class GLMClient:
         call = Usage()
         last: Exception | None = None
 
-        # 细粒度日志：请求
-        if self._log and hasattr(self._log, 'debug') and self._log.debug:
-            import json
-            self._log.detail("glm", f"请求GLM: {len(messages)}条消息")
-            req_summary = [{"role": m["role"],
-                           "content_type": "array" if isinstance(m.get("content"), list) else "text"}
-                          for m in messages]
-            self._log.save_text(f"glm_req_{int(time.time()*1000)}",
-                               json.dumps(req_summary, ensure_ascii=False, indent=2))
+        self._call_seq += 1
+        call_id = self._call_seq
+        if self._log and self._log.debug:
+            # 原始 base64 已单独保存为网格图；请求文件保留全部文本和图片位置，
+            # 避免把数 MB 的编码重复写入 JSONL/文本，仍可逐条核对模型看到了什么。
+            def readable(value):
+                if isinstance(value, list):
+                    return [readable(item) for item in value]
+                if isinstance(value, dict):
+                    return {k: readable(v) for k, v in value.items()}
+                if isinstance(value, str) and value.startswith("data:image/"):
+                    return f"<image data URL omitted; {len(value)} chars; see step image artifact>"
+                return value
+
+            payload = {"model": self.cfg.model, "temperature": self.cfg.temperature,
+                       "max_tokens": self.cfg.max_tokens, "kind": kind,
+                       "messages": readable(messages)}
+            self._log.trace_text("glm_request", json.dumps(payload, ensure_ascii=False, indent=2),
+                                 call_id=call_id, request_kind=kind)
 
         for attempt in range(self.cfg.max_retries + 1):
             started = time.perf_counter()
@@ -149,16 +160,24 @@ class GLMClient:
                 self.last_call = call
                 content = (resp.choices[0].message.content or "").strip()
 
-                # 细粒度日志：响应
-                if self._log and hasattr(self._log, 'debug') and self._log.debug:
-                    self._log.detail("glm", f"GLM响应: {len(content)}字符")
-                    self._log.save_text(f"glm_resp_{int(time.time()*1000)}", content)
+                if self._log and self._log.debug:
+                    self._log.trace_text("glm_response", content, call_id=call_id, request_kind=kind,
+                                         attempt=attempt + 1, latency_ms=round(call.latency_ms, 1),
+                                         in_tok=call.prompt_tokens, out_tok=call.completion_tokens)
 
                 if not content:
                     raise GLMError("empty completion")
                 return content, call
             except Exception as e:  # 传输 / 鉴权 / schema 漂移
                 last = e
+                if self._log and self._log.debug:
+                    detail = str(e)
+                    if self.cfg.api_key:
+                        detail = detail.replace(self.cfg.api_key, "<redacted-api-key>")
+                    self._log.trace_text("glm_error", detail, call_id=call_id,
+                                         request_kind=kind, attempt=attempt + 1,
+                                         error_type=type(e).__name__,
+                                         status_code=getattr(e, "status_code", None))
                 if attempt < self.cfg.max_retries and _is_retryable(e):
                     # 指数退避 1/2/4/8s：网关坏窗常持续十几秒，多次重试以撞上健康实例
                     time.sleep(min(8.0, 1.0 * (2 ** attempt)))
@@ -167,13 +186,13 @@ class GLMClient:
         self.last_call = call
         raise GLMError(f"GLM call failed after {self.cfg.max_retries + 1} attempts: {last}")
 
-    def chat_json(self, messages: list[dict]) -> dict:
+    def chat_json(self, messages: list[dict], *, kind: str = "chat") -> dict:
         """chat 后按 JSON 解析；解析失败时带着抱怨重问一次。
 
         多一次往返比下游浪费一步便宜，也让畸形输出处理留在图之外。
         ``last_call`` 累加两次尝试，所以决策日志的每步 token 数是真实成本。
         """
-        text, first = self.chat(messages)
+        text, first = self.chat(messages, kind=kind)
         try:
             return prompts.first_json_object(text)
         except ValueError as e:
@@ -182,7 +201,7 @@ class GLMClient:
                 {"role": "assistant", "content": text[:1500]},
                 {"role": "user", "content": f"上一回复无法解析为 JSON（{e}）。{prompts.OUTPUT_RULE} 重新输出："},
             ]
-            text2, second = self.chat(retry)
+            text2, second = self.chat(retry, kind=f"{kind}_json_retry")
             merged = Usage(
                 calls=first.calls + second.calls,
                 prompt_tokens=first.prompt_tokens + second.prompt_tokens,
@@ -212,7 +231,7 @@ class GLMClient:
         messages = prompts.build_decide_messages(
             context_text, jpeg_b64, grid_spec, screen=screen_size
         )
-        raw = self.chat_json(messages)
+        raw = self.chat_json(messages, kind="decide")
         try:
             action = parse_action(raw)
         except ValueError as e:
@@ -231,7 +250,8 @@ class GLMClient:
 
     def reflect(self, action_desc: str, goal: str, before_b64: str, after_b64: str) -> str:
         """A / B / C / UNKNOWN。UNKNOWN 的存在原因见 ``prompts.parse_reflection``。"""
-        text, _ = self.chat(prompts.build_reflect_messages(action_desc, goal, before_b64, after_b64))
+        text, _ = self.chat(prompts.build_reflect_messages(action_desc, goal, before_b64, after_b64),
+                            kind="reflect")
         return prompts.parse_reflection(text)
 
 

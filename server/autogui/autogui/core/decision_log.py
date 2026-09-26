@@ -63,6 +63,7 @@ class DecisionLog:
         self.path = self.dir / f"{safe}-{stamp}.jsonl"
         self.events: list[dict] = []
         self.step = 0
+        self._artifact_seq = 0
         self._fh = None
         try:
             self._fh = self.path.open("a", encoding="utf-8")
@@ -115,12 +116,12 @@ class DecisionLog:
 
     # ── Debug落盘 ─────────────────────────────────────────────────────────────
 
-    def save_image(self, name: str, data: bytes) -> Path | None:
+    def save_image(self, name: str, data: bytes, *, extension: str = "png") -> Path | None:
         """落盘图像（PNG/JPEG），仅debug模式。返回文件路径。"""
         if not self.debug or not hasattr(self, 'debug_dir') or not self.debug_dir or not data:
             return None
         try:
-            path = self.debug_dir / f"{name}.png"
+            path = self.debug_dir / f"{name}.{extension}"
             path.write_bytes(data)
             return path
         except OSError:
@@ -128,7 +129,7 @@ class DecisionLog:
 
     def save_text(self, name: str, content: str) -> Path | None:
         """落盘文本文件，仅debug模式。返回文件路径。"""
-        if not self.debug or not hasattr(self, 'debug_dir') or not self.debug_dir or not content:
+        if not self.debug or not hasattr(self, 'debug_dir') or not self.debug_dir:
             return None
         try:
             path = self.debug_dir / f"{name}.txt"
@@ -136,6 +137,17 @@ class DecisionLog:
             return path
         except OSError:
             return None
+
+    def trace_text(self, kind: str, content: str, **metrics) -> Path | None:
+        """保存一次完整文本交互，并在 JSONL 中记录可关联的文件名。"""
+        if not self.debug:
+            return None
+        self._artifact_seq += 1
+        name = f"step{self.step:02d}_{self._artifact_seq:04d}_{kind}"
+        path = self.save_text(name, content)
+        self.phase(kind, f"{kind} → {path.name if path else '保存失败'}",
+                   artifact=path.name if path else "", chars=len(content), **metrics)
+        return path
 
     def detail(self, phase: str, message: str) -> None:
         """细粒度日志（仅debug模式输出到控制台，不写JSONL）。"""

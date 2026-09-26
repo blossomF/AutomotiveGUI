@@ -239,6 +239,7 @@ class Device:
     def __init__(self, serial: str, *, default_delay: float = 0.4, display: int | None = None):
         self.serial = serial
         self.default_delay = default_delay
+        self.trace_log = None  # Runner.prepare 注入；只记录当前任务的 XML dump
         # Android 9+ 支持 `screencap --display <id>`。否则车机上的默认
         # 捕获可能来自仪表屏而不是中控屏，而规则明确把后者之外的屏
         # 划出范围（规则 4.2）。
@@ -313,14 +314,28 @@ class Device:
         ``exec-out cat`` 读回文件，避免第二次 adb 传输。
         （原文 adb.py:456-463，去掉 portal 快速通道——见 A-1）
         """
+        started = time.perf_counter()
         self.adb_soft("shell", "rm", "-f", remote, timeout=timeout)
         r = self.adb_soft("shell", "uiautomator", "dump", remote, timeout=timeout)
         if not r.ok and "dump failed" in (r.stdout + r.stderr).lower():
-            return ""
+            xml = ""
+            self._trace_xml(xml, started, "dump_failed", (r.stdout + " " + r.stderr).strip(), remote)
+            return xml
         try:
-            return self.adb("exec-out", "cat", remote, timeout=timeout)
-        except ADBError:
-            return ""
+            xml = self.adb("exec-out", "cat", remote, timeout=timeout)
+            detail = ""
+        except ADBError as e:
+            xml = ""
+            detail = str(e)
+        self._trace_xml(xml, started, "ok" if xml else "empty", detail, remote)
+        return xml
+
+    def _trace_xml(self, xml: str, started: float, status: str, detail: str, remote: str) -> None:
+        log = self.trace_log
+        if log is not None and log.debug:
+            log.trace_text("xml", xml, status=status, adb_detail=detail[:300],
+                           command=f"uiautomator dump {remote}; exec-out cat {remote}",
+                           dump_ms=round((time.perf_counter() - started) * 1000, 1))
 
     # ── 输入 ─────────────────────────────────────────────────────────────────
 
