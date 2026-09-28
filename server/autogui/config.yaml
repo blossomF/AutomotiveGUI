@@ -6,12 +6,6 @@
 # 如果 Demo Day 当天 MCP 链路出问题，把它改回 local 即可：10 秒钟，不用重构。
 exec_mode: local
 
-# 提交给评委的定位路径声明。在借到车机上跑过
-# `python main.py --dump-report` 之前不要改这个值。
-# 规则 4.4：声明高于实际实现的按代码真实做到的给分。
-# C = 控件树为主 + 纯 VLM 网格兜底（值 +10 分）
-declared_path: C
-
 device_serial: auto        # auto = 自动选唯一在线设备，否则直接报错
 display_id: null           # 保持 null；仅当 `--check` 报告多屏且
                             # 捕获到的不是中控屏时才设置
@@ -77,8 +71,7 @@ glm:
 # 范围由规则 4.2 固定：CEA1.3 预装集 + 哔哩哔哩 / 飞书 / 外卖。
 # 借到车机后用 `python main.py --packages` 填包名——
 # LightGUIAgent 提示词里的 App 列表（美团/淘宝/微信）是手机端的，在车机上大多不适用。
-# 设置页勾选哪些已配置应用参与 --check 包名核对和任务直启；未列出的应用不记录。
-check_packages: [QQ音乐, 哔哩哔哩, 飞书]
+# 设置页维护目标应用清单；--check 核对全部目标包名，任务开始时模型可选择 ADB 直启。
 apps:
   - name: QQ音乐
     aliases: [QQ Music]
@@ -89,6 +82,7 @@ apps:
   - name: 飞书
     package: com.ss.android.lark
   - name: 美团
+    aliases: [美团外卖, 外卖]
     package: com.sankuai.meituan.car
 
 log_dir: artifacts/logs

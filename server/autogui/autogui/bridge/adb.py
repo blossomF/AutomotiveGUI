@@ -400,7 +400,11 @@ class Device:
             if r.ok and "Error" not in r.stdout:
                 time.sleep(delay)
                 return "am"
-        self.adb("shell", "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1", timeout=10)
+        output = self.adb("shell", "monkey", "-p", package,
+                          "-c", "android.intent.category.LAUNCHER", "1", timeout=10)
+        if "Events injected: 1" not in output:
+            raise ADBError(("shell", "monkey", "-p", package), 0,
+                           stdout=f"没有启动活动：{output.strip()[:300]}")
         time.sleep(delay)
         return "monkey"
 

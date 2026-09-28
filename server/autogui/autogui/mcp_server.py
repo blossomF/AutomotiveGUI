@@ -40,7 +40,7 @@ def build_server():
     def _info() -> str:  # pragma: no cover - 平凡函数
         return (
             f"Automotive GUI Agent bridge. device={tools.dev().serial} "
-            f"screen={tools.get_screen_size()} declared_path={cfg.declared_path} "
+            f"screen={tools.get_screen_size()} "
             f"tools={len(tools.TOOLS)}"
         )
 

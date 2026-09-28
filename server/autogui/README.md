@@ -58,7 +58,7 @@ python main.py --packages                # 看车机上到底装了哪些包
 #   → 把想用的包名填进 config.yaml 的 apps: [{name, package}]
 
 python main.py --dump-report             # 实测各 App 控件树质量
-#   → 生成 artifacts/dump-report.md，据此定 config 的 declared_path: A/B/C
+#   → 生成 artifacts/dump-report.md，用于排查控件树质量
 
 python main.py "在音乐App里播放周杰伦的《七里香》"
 ```
@@ -75,7 +75,11 @@ flowchart LR
     VOICE["可选语音输入"] --> ASR["ASR 转文字"] --> TASK
     TASK --> MAIN["main.py: 配置与设备绑定"]
     MAIN --> PREP["Runner.prepare: 日志 / 技能 / 执行器"]
-    PREP --> OBS["perceive: 截图 + XML"]
+    PREP --> INIT{"文本模型: 应用在缓存中?"}
+    INIT -->|选择已配置应用| LAUNCH["ADB 启动应用"]
+    LAUNCH -->|还有后续操作| OBS["perceive: 截图 + XML"]
+    LAUNCH -->|纯打开| ENDNODE["finish: 结果与日志"]
+    INIT -->|观测界面| OBS
     OBS --> GUARD["guard: 限制检查"]
     GUARD --> ROUTE{"route"}
     ROUTE -->|XML 可用| TREE["decide: 树文本给 GLM"]
@@ -113,8 +117,7 @@ flowchart LR
 | 2 | **vlm**（网格截图） | 树为空 / 自绘界面 / tree 返回越界 `node_ref` | 1 次 + 1 张图 |
 | 可选 | **Skill 指南** | 模型选择合适技能且参数齐全 | 加载指南后再调用模型；不自动操作设备 |
 
-`declared_path` 是提交给评委的声明。规则 4.4 明确"声明与实际实现不符按实际给分"，所以这个值**必须
-由 `python main.py --dump-report` 的实测结果决定**，不要手改 `config.yaml`。
+运行时固定控件树优先、VLM 兜底，不提供 A/B/C 切换配置。`--dump-report` 用于检查各应用的树质量；赛事路径 C 声明以真实任务日志和演示证据支持。
 
 降级是真实发生的代码路径，决策链里会打印 `tree 决策无效 → 本轮降级 vlm` 这样的行，供 AI Reviewer 核验。
 
@@ -134,17 +137,17 @@ flowchart LR
 | `python -m autogui.mcp_server`                      | 作为 stdio MCP server 给外部客户端用 |
 | `python -m autogui.mcp_server --list-tools`         | 打印工具清单与 schema |
 
-覆盖默认配置：`--exec-mode mcp`、`--path B`、`--config 路径`。
+覆盖默认配置：`--exec-mode mcp`、`--config 路径`。
 
 ---
 
 ## 5. 决策链样例
 
-规则 4.7 要求实时打印。真实一次运行的形状（`--path C`，Easy 任务）：
+规则 4.7 要求实时打印。一次运行日志的形状：
 
 ```
 ====================================================================
-Automotive GUI Agent  |  路径 C  |  exec=local
+Automotive GUI Agent  |  tree→vlm  |  exec=local
 ====================================================================
   任务: 在音乐App里播放周杰伦的《七里香》
   设备: 192.168.1.37:5555
@@ -199,14 +202,15 @@ Automotive GUI Agent  |  路径 C  |  exec=local
 
 | 键 | 默认 | 什么时候改 |
 |---|---|---|
-| `declared_path` | `C` | **只**按 `--dump-report` 结果改 |
 | `exec_mode` | `local` | MCP 不通时留 `local`；要演示 MCP 时改 `mcp` |
 | `grid.mode` | `auto` | 默认按截图计算；面板勾选“手动设置网格”后为 `manual`，使用 `cols/rows` |
 | `agent.reflection` | `cheap` | `always` 更准但每步多 1 次调用；`off` 最快但丢掉恢复 |
-| `check_packages` | 见配置文件 | 设置页勾选参与 `--check` 包名核对及严格指令直启的应用；必须已列在 `apps` 中 |
+| `apps` | 见配置文件 | 设置页全量维护目标应用名称、包名和别名；`--check` 核对全部目标应用 |
 
 `glm.model` 需要换成组委会实际发的型号 id。
 面板设置页 `http://127.0.0.1:8777/settings` 可填写模型 URL、名称和 API Key，单独验证连接；`--check` 不发模型请求。逐项自检说明见[环境自检说明与优化方案](../../doc/环境自检说明与优化方案.md)。
+
+普通任务先发一次仅含指令与应用名称/别名的文本模型请求。模型选择缓存 ID 后，执行器按配置包名 ADB 启动；纯打开任务到此结束，复合任务再抓屏和 XML。模型选择 `OBSERVE`、返回无效 ID 或启动失败时进入原有观测流程。首次请求计入任务日志的 `initial_model` 和 token 用量；缓存未命中时会增加一次模型调用。
 
 ---
 
@@ -220,7 +224,7 @@ Automotive GUI Agent  |  路径 C  |  exec=local
 | `--check` 里「IME 未被改坏」✗ | **不要继续**。说明输入法被换走了，中文输入会静默失败。见 `autogui/bridge/input.py` 的 `_via_adbkeyboard` |
 | 截图拿到的不是中控屏 | 车机多屏，`screencap` 默认屏不对。已在 `bridge/adb.py` 用 `--display` 前的 PNG 签名裁剪兜底；仍错则设 `display_id` |
 | 中文输入变成字母 | 正常——车机可能禁装 yadb/ADBKeyboard，自动降级到 ASCII。确认方式：`--check` 的「输入策略」 |
-| 一直 `BACK` 到桌面 | 树不可用且在原地打转。临时用 `--path A` 走纯网格；或给该 App 补 skill 配方 |
+| 一直 `BACK` 到桌面 | 检查该页面 XML 候选及 VLM 降级日志，并修正动作或 Skill 指导 |
 | 跑两步就 `no_progress` 停止 | `agent.no_progress_limit` 调大；或该界面确实需要滑动，看决策链里 `route` 是否错判 |
 | `GraphRecursionError` | 把 `agent.max_steps` 调小。递归上限按 `max_steps*6+20` 自动算 |
 

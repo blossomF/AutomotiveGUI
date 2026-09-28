@@ -90,8 +90,7 @@ def public_settings(config_path: Path) -> dict:
             "silence_threshold": cfg.voice.silence_threshold,
         },
         "apps": [{"name": app.name, "package": app.package,
-                  "aliases": list(app.aliases or []),
-                  "checked": app.name in cfg.check_packages} for app in cfg.apps if app.in_scope],
+                  "aliases": list(app.aliases or [])} for app in cfg.apps if app.in_scope],
     }
 
 
@@ -132,22 +131,7 @@ def _replace_fields(source: str, updates: dict[str, dict[str, object]]) -> str:
     return "".join(lines)
 
 
-def _replace_top_level(source: str, key: str, value: object) -> str:
-    """更新一个顶层 YAML 标量/流式列表，同时保留其他行与注释。"""
-    lines = source.splitlines(keepends=True)
-    newline = "\r\n" if "\r\n" in source else "\n"
-    encoded = json.dumps(value, ensure_ascii=False)
-    for i, line in enumerate(lines):
-        if line.startswith(f"{key}:"):
-            lines[i] = f"{key}: {encoded}{_comment(line)}{newline}"
-            break
-    else:
-        before_apps = next((i for i, line in enumerate(lines) if line.startswith("apps:")), len(lines))
-        lines.insert(before_apps, f"{key}: {encoded}{newline}")
-    return "".join(lines)
-
-
-_PKG_RE = re.compile(r"^[A-Za-z0-9._]+$")
+_PKG_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+$")
 _SAFE_SCALAR_RE = re.compile(r"^[A-Za-z0-9_\u4e00-\u9fff.\-+]+$")
 
 
@@ -171,9 +155,6 @@ def _apps_fields(payload: dict) -> list | None:
         name = str(item.get("name") or "").strip()
         if not name:
             raise ValueError("应用名称不能为空")
-        if name in seen:
-            raise ValueError(f"应用名称重复：{name}")
-        seen.add(name)
         package = str(item.get("package") or "").strip()
         if package and not _PKG_RE.fullmatch(package):
             raise ValueError(f"包名不合法：{package}（仅允许字母、数字、点、下划线）")
@@ -182,11 +163,16 @@ def _apps_fields(payload: dict) -> list | None:
             aliases_raw = [a for a in re.split(r"[,，、;；\s]+", aliases_raw) if a]
         if not isinstance(aliases_raw, list) or not all(isinstance(a, str) for a in aliases_raw):
             raise ValueError(f"应用 {name} 的别名必须是字符串列表")
+        aliases = [a.strip() for a in aliases_raw if a.strip()]
+        for label in [name, *aliases]:
+            normalized = re.sub(r"\s+", "", label).casefold()
+            if normalized in seen:
+                raise ValueError(f"应用名称或别名重复：{label}")
+            seen.add(normalized)
         out.append({
             "name": name,
             "package": package,
-            "aliases": [a.strip() for a in aliases_raw if str(a).strip()],
-            "checked": bool(item.get("checked", False)),
+            "aliases": aliases,
         })
     return out
 
@@ -240,13 +226,11 @@ def _atomic_write(config_path: Path, updated: str) -> None:
 
 
 def save_apps(config_path: Path, apps: list) -> dict:
-    """只保存应用清单：重写 apps: 段，check_packages 由勾选项推导；不动模型/ASR/网格字段。"""
+    """只保存完整应用清单；不动模型、ASR 和网格字段。"""
     parsed = _apps_fields({"apps": apps})
     if parsed is None:
         raise ValueError("apps 必须是列表")
     updated = _replace_apps_section(config_path.read_text(encoding="utf-8"), parsed)
-    updated = _replace_top_level(updated, "check_packages",
-                                 [a["name"] for a in parsed if a["checked"]])
     _atomic_write(config_path, updated)
     return public_settings(config_path)
 
@@ -282,15 +266,6 @@ def save_settings(config_path: Path, payload: dict) -> dict:
     url, name, key = _model_fields(payload, current)
     grid = _grid_fields(payload, current)
     apps = _apps_fields(payload)
-    if apps is not None:
-        # 表单提交了应用清单：check_packages 由勾选项推导
-        selected = [a["name"] for a in apps if a["checked"]]
-    else:
-        selected = payload.get("check_packages", current.check_packages)
-        known_apps = {app.name for app in current.apps if app.in_scope}
-        if (not isinstance(selected, list) or any(not isinstance(name, str) or name not in known_apps
-                                                   for name in selected) or len(selected) != len(set(selected))):
-            raise ValueError("包名核对名单只能选择配置文件中已有的应用，且不能重复")
     model_raw = payload.get("model") or {}
     model_updates: dict[str, object] = {
         "base_url": url, "model": name,
@@ -329,7 +304,6 @@ def save_settings(config_path: Path, payload: dict) -> dict:
     updated = _replace_fields(config_path.read_text(encoding="utf-8"), updates)
     if apps is not None:
         updated = _replace_apps_section(updated, apps)
-    updated = _replace_top_level(updated, "check_packages", selected)
     _atomic_write(config_path, updated)
     return public_settings(config_path)
 

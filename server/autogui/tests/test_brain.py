@@ -99,7 +99,7 @@ def test_unparsable_reflection_is_unknown_not_silently_A():
 
 
 def _ctx(**kw) -> Context:
-    base = dict(task="在音乐App里播放周杰伦的《七里香》", declared_path="C", history_window=5, token_budget=8000)
+    base = dict(task="在音乐App里播放周杰伦的《七里香》", history_window=5, token_budget=8000)
     base.update(kw)
     return Context(**base)
 
@@ -111,6 +111,7 @@ def test_tree_observation_is_text_only():
     text, kept, counts = c.trim(cands)
     assert "#1 " in text
     assert "base64" not in text.lower()
+    assert "定位路径" not in text
     assert counts["approx_input"] < 8000
 
 

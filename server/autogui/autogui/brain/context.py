@@ -2,7 +2,7 @@
 
 四层，见 技术方案评估.md §5.1：
 
-  permanent   任务 + 声明路径 + 动作 schema + 技能索引/已选指南
+  permanent   任务 + 动作 schema + 技能索引/已选指南
   sliding     最近 N 步纯文本，含失败步                          ~500 tok
   entities    跨步骤关键事实（时间 / 地点 / 歌曲 / 商品）         ~150 tok
   observation 候选列表（文本）或网格图（二选一，绝不都要）        1-2k / 图
@@ -41,7 +41,6 @@ class Context:
     """模型为一次决策看到的全部内容（已裁剪）。"""
 
     task: str
-    declared_path: str
     history: list[dict] = field(default_factory=list)
     entities: dict = field(default_factory=dict)
     progress: str = ""
@@ -58,7 +57,6 @@ class Context:
     def permanent_block(self) -> str:
         lines = [
             f"任务：{self.task}",
-            f"定位路径：{self.declared_path}（tree=控件树优先，vlm=网格兜底）",
             f"动作类型：{', '.join(ACTION_NAMES)}",
         ]
         if self.app_index:
@@ -124,7 +122,7 @@ class Context:
 
         def build(w: int, k: int) -> tuple[str, dict]:
             c = Context(
-                task=self.task, declared_path=self.declared_path, history=self.history,
+                task=self.task, history=self.history,
                 entities=self.entities, skill_index=self.skill_index,
                 active_skill_guide=self.active_skill_guide, app_index=self.app_index,
                 history_window=w, candidate_limit=k,

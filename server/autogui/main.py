@@ -3,14 +3,12 @@
     python main.py "在音乐App里播放周杰伦的《七里香》"   # 跑一个任务
     python main.py --packages                     # 列出已安装的包（用于填 config.yaml）
     python main.py --check                        # 设备 + 抓帧 + 输入自检
-    python main.py --dump-report                  # 9/19 路径 A/B/C 决策表
+    python main.py --dump-report                  # 逐 App 控件树质量报告
     python main.py --mcp-check                     # 列出 MCP 工具面
     python main.py --selftest                      # 不需要车机、不需要网络
 
-``--dump-report`` 之所以存在，是因为路径声明值 +10 分，且只能由实测数据决定：
-竞赛规则规定声明高于实际实现的按实际给分（章程 §4.4）。它会遍历每个已配置的 App，
-dump 真实 UI 树，统计能拿到多少*可寻址*候选，并写出 ``artifacts/dump-report.md``
-供验收会使用。
+``--dump-report`` 遍历已配置 App，dump 真实 UI 树，统计可寻址候选并写出
+``artifacts/dump-report.md``，供定位质量排查与验收使用。
 
 ``--check`` 包含一条专门的 IME 往返断言，对应 技术方案评估.md §2 A-2 的 P0 风险：
 移植来的 ADBKeyboard 路径原本会还原成写死的 Gboard，而车机上并没有 Gboard。
@@ -38,7 +36,6 @@ def _bootstrap(cfg):
 
 
 def cmd_run(args, cfg) -> int:
-    from autogui.app_routes import match_prelaunch
     from autogui.brain.glm_client import GLMClient
     from autogui.core.graph import Runner
 
@@ -47,11 +44,8 @@ def cmd_run(args, cfg) -> int:
     if args.skill_only:
         return _run_skill_direct(args, cfg, tools)
 
-    route = match_prelaunch(task, cfg)
-    app, only_open = route if route else (None, False)
-    glm = None if only_open else GLMClient(cfg.glm)
-    runner = Runner(cfg=cfg, task=task, glm=glm,
-                    prelaunch_app=app, prelaunch_only=only_open)
+    glm = GLMClient(cfg.glm)
+    runner = Runner(cfg=cfg, task=task, glm=glm)
     result = runner.execute()
     return 0 if result["success"] else 1
 
@@ -175,9 +169,8 @@ def cmd_check(cfg) -> int:
     if total >= 4500:
         warn("采集速度", f"串行合计 {total:.0f}ms ≥ 4500ms")
 
-    # 最后核对设置页勾选的应用；check_packages 为空时默认核对 美团/QQ音乐/哔哩哔哩。
-    names = cfg.check_packages or ("美团", "QQ音乐", "哔哩哔哩")
-    selected = [app for app in cfg.apps if app.in_scope and app.name in names]
+    # 最后核对设置页维护的全部目标应用；不记录其他 App。
+    selected = [app for app in cfg.apps if app.in_scope]
     if selected:
         try:
             installed = set(device.list_packages())
@@ -189,14 +182,14 @@ def cmd_check(cfg) -> int:
         except ADBError as e:
             warn("应用包名查询", f"失败：{e}")
     else:
-        print("  [i] 应用包名                     未勾选应用，跳过")
+        print("  [i] 应用包名                     未配置应用，跳过")
     print("=" * 72)
     print("设备硬检查通过；请核对上方警告" if ok else "存在设备硬故障，请先处理 ✗ 项")
     return 0 if ok else 1
 
 
 def cmd_dump_report(cfg) -> int:
-    """遍历已配置的 App，实测控件树质量。输出是 9/19 路径决策的依据。"""
+    """遍历已配置的 App，实测控件树质量。"""
     from autogui.perception.tree import candidates_from_xml
 
     tools = _bootstrap(cfg)
@@ -226,26 +219,18 @@ def cmd_dump_report(cfg) -> int:
         time.sleep(0.5)
 
     usable_count = sum(1 for r in rows if r[4] == "可用")
-    if usable_count >= 3:
-        verdict = "C（tree 主 + vlm 兜底，+10）"
-    elif usable_count >= 1:
-        verdict = "B（仅控件树，+5）"
-    else:
-        verdict = "A（纯 VLM 网格，+0）"
-
     out = Path(__file__).resolve().parent / "artifacts" / "dump-report.md"
     out.parent.mkdir(exist_ok=True)
     lines = [
-        "# 控件树质量实测（路径 A/B/C 决策依据）", "",
+        "# 控件树质量实测", "",
         f"- 设备：`{device.serial}`  屏幕：`{device.screen_size()}`",
         f"- 时间：{time.strftime('%Y-%m-%d %H:%M:%S')}", "",
         "| App | dump bytes | 可寻址候选 | 其中 clickable | 结论 |",
         "|---|---|---|---|---|",
     ]
     lines += [f"| {r[0]} | {r[1]} | {r[2]} | {r[3]} | {r[4]} |" for r in rows]
-    lines += ["", f"**可用 App 数：{usable_count} → 建议声明路径 {verdict}**", "",
-              "> 决策规则（aidoc/9-19验收清单.md §二）：≥3 可用→C；1–2→B；0→A。",
-              "> 章程 §4.4：声明与实际实现不符按实际给分，故以本表为准。"]
+    lines += ["", f"**可用 App 数：{usable_count}**", "",
+              "> 运行时固定控件树优先；树不可用时降级到 VLM。"]
     out.write_text("\n".join(lines), encoding="utf-8")
 
     print("\n" + "\n".join(lines[6:]))
@@ -324,7 +309,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("task", nargs="?", default="", help='natural-language task, e.g. "在B站搜索并播放..."; use with --packages/--check/--dump-report/--mcp-check/--selftest"')
     p.add_argument("--config", default=None, help="path to config.yaml")
     p.add_argument("--exec-mode", choices=["local", "mcp"], default=None, help="override config exec_mode")
-    p.add_argument("--path", choices=["A", "B", "C"], default=None, help="override declared positioning path")
     p.add_argument("--skill-only", action="store_true", help='run one recipe with no model, e.g. --skill-only "music.play_song=七里香"')
     p.add_argument("--packages", action="store_true", help="list installed packages and exit")
     p.add_argument("--check", action="store_true", help="device/capture/input self-test and exit")
@@ -345,8 +329,6 @@ def main(argv: list[str] | None = None) -> int:
     cfg = Config.load(args.config)
     if args.exec_mode:
         cfg.exec_mode = args.exec_mode
-    if args.path:
-        cfg.declared_path = args.path
 
     try:
         if args.selftest:

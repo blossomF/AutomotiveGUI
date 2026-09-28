@@ -37,7 +37,7 @@ def test_check_reports_auto_grid_and_warnings_without_model(monkeypatch, capsys)
                           apps=[SimpleNamespace(name="QQ音乐", package="com.example.music", in_scope=True),
                                 SimpleNamespace(name="飞书", package="com.example.feishu", in_scope=True),
                                 SimpleNamespace(name="其他", package="com.other.unlisted", in_scope=True)],
-                          check_packages=["QQ音乐", "飞书"])
+                          )
     monkeypatch.setattr(main, "_bootstrap", lambda _: tools)
     monkeypatch.setattr(adb, "png_size", lambda _: (1080, 2400))
     monkeypatch.setattr(tree, "candidates_from_xml", lambda *args, **kwargs: [object()] * 34)
@@ -50,6 +50,6 @@ def test_check_reports_auto_grid_and_warnings_without_model(monkeypatch, capsys)
     assert "[✓] 自检串行采集耗时" in output
     assert "应用 QQ音乐" in output and "com.example.music 已安装" in output
     assert "[!] 应用 飞书" in output
-    assert "应用 其他" not in output
+    assert "应用 其他" in output
     assert output.index("自检串行采集耗时") < output.index("应用 QQ音乐")
     assert "模型" not in output

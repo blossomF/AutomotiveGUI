@@ -140,17 +140,7 @@ class VoiceConfig(BaseModel):
 
 
 class AppConfig(BaseModel):
-    """一个我们被允许操作的车机 App。
-
-    竞赛规则 4.2 把场景限定在 CEA1.3 预装集 + 哔哩哔哩 / 飞书 / 外卖，
-    所以这是一个封闭列表——``main.py --check`` 遍历它来生成路径 A/B/C
-    决策表。
-
-    ``package`` 在借到车机之前留空：运行
-    ``python main.py --packages`` 看实际装了什么，而不是照着
-    ``LightGUIAgent/lightguiagent/claude_client.py:160-163`` 里那份
-    手机向的列表猜。
-    """
+    """设置页维护的目标应用名称、别名和实际安装包名。"""
 
     name: str
     package: str = ""
@@ -160,7 +150,6 @@ class AppConfig(BaseModel):
 
 class Config(BaseModel):
     exec_mode: Literal["local", "mcp"] = "local"
-    declared_path: Literal["A", "B", "C"] = "C"  # 9/19 依据实测 dump 结果冻结
     device_serial: str = "auto"
     display_id: Optional[int] = None  # 默认捕获不是中控屏时才设置
     input_chain: list[str] = Field(default_factory=lambda: ["yadb", "adbkeyboard", "ascii"])
@@ -170,7 +159,6 @@ class Config(BaseModel):
     skills: SkillConfig = Field(default_factory=SkillConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
     apps: list[AppConfig] = Field(default_factory=list)
-    check_packages: list[str] = Field(default_factory=list)
     log_dir: str = "test/log"
     verbose: bool = True
     debug: bool = False  # 细粒度日志开关（截图/XML/GLM交互落盘），生产环境保持False

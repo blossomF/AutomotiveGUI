@@ -9,8 +9,11 @@ venv/
 
 # 运行时产物
 artifacts/
+/.dashboard.pid
+/.dashboard.log
+/.dashboard.log.err
 
-# 密钥（只进环境变量）
+# 本地环境变量文件
 .env
 .env.*
 

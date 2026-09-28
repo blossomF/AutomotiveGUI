@@ -61,6 +61,14 @@ def test_keyword_alone_never_selects_or_runs_skill(tmp_path, task):
     runner.log.close()
 
 
+def test_route_is_always_tree_first_then_vlm(tmp_path):
+    runner, _ = _runner(tmp_path, [])
+    assert runner.route({"step": 1}) == {"route": "tree"}
+    runner.obs.tree_usable = False
+    assert runner.route({"step": 1}) == {"route": "vlm"}
+    runner.log.close()
+
+
 def test_model_selection_loads_guide_then_model_chooses_action(tmp_path):
     runner, seen = _runner(tmp_path, [
         {"type": "SKILL", "skill": "music.play_song", "params": {"song": "七里香"}},

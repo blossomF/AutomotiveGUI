@@ -2,7 +2,9 @@
 
 图结构::
 
-    START → perceive → guard ─┬(limit hit)──────────────────────────→ finish → END
+    START → initial_model ─┬(已配置应用)→ ADB launch ┬(纯打开)→ END
+                           └(未命中/需继续)────────────┴→ perceive → guard
+    perceive → guard ─┬(limit hit)──────────────────────────→ finish → END
                               └→ route ─┬(tree)→ decide ─┬(SKILL)→ run_skill → decide
                                         └(vlm) ─→ decide ─┴(action)→ act → verify
                                                                    ├(progress)→ perceive
@@ -33,6 +35,7 @@ from autogui.bridge import tools
 from autogui.bridge.adb import ADBError
 from autogui.brain.context import Context
 from autogui.brain.glm_client import GLMClient, GLMError
+from autogui.app_routes import choose_initial_route
 from autogui.config import AppConfig, Config, PROJECT_ROOT
 from autogui.core import guard
 from autogui.core.decision_log import DecisionLog
@@ -84,15 +87,11 @@ class Runner:
     skill_activated_this_step: bool = False
     # 本步 decide 已尝试次数：tree 降级 vlm 重决策每步最多 1 次（防 decide 乒乓）
     decide_attempts: int = 0
-    # 严格命中已勾选应用时，直接用配置包名 ADB 启动；纯打开指令跳过模型。
-    prelaunch_app: AppConfig | None = None
-    prelaunch_only: bool = False
 
     def __post_init__(self) -> None:
         """构造完成后按配置初始化 Context（四层上下文管理器，token 预算裁剪）。"""
         self.context = Context(
             task=self.task,
-            declared_path=self.cfg.declared_path,
             history_window=self.cfg.agent.history_window,
             token_budget=self.cfg.agent.token_budget,
             candidate_limit=self.cfg.agent.tree_candidate_limit,
@@ -119,13 +118,13 @@ class Runner:
         # （实测写出 app='哔哩哔哩'，被 bridge/adb.py 的包名校验拒掉）。
         apps = [a for a in (self.cfg.apps or []) if getattr(a, "package", "")]
         self.context.app_index = "\n".join(f"{a.name}={a.package}" for a in apps)
-        self.log.banner(f"Automotive GUI Agent  |  路径 {self.cfg.declared_path}  |  exec={self.executor.name}")
+        self.log.banner(f"Automotive GUI Agent  |  tree→vlm  |  exec={self.executor.name}")
         self.log.kv("任务", self.task)
         self.log.kv("设备", tools.dev().serial)
         self.log.kv("技能", f"{len(self.book.by_id) if self.book else 0} 个可用")
         if self.log.debug:
             self.log.phase("setup", f"debug 目录 {self.log.debug_dir}",
-                           declared_path=self.cfg.declared_path, reflection=self.cfg.agent.reflection)
+                           reflection=self.cfg.agent.reflection)
 
     @property
     def elapsed(self) -> float:
@@ -197,23 +196,18 @@ class Runner:
         return {"done": False}
 
     def route(self, state: AgentState) -> dict:
-        """只按控件树质量选择 tree/vlm；关键词绝不触发设备配方。
-
-        声明路径 A 意味着完全跳过 tree，而不只是“不优先”，
-        这样声明的能力与实际走的代码路径不会矛盾。
-        """
-        path = self.cfg.declared_path
+        """固定控件树优先；树不可用时降级到 VLM。"""
         if self.log.debug:
-            self.log.phase("route", "评估", path=path, guide_count=len(self.book.by_id) if self.book else 0,
+            self.log.phase("route", "评估", guide_count=len(self.book.by_id) if self.book else 0,
                            tree_usable=bool(self.obs and self.obs.tree_usable),
                            candidates=len(self.obs.candidates) if self.obs else 0)
-        if path in ("B", "C") and self.obs and self.obs.tree_usable:
+        if self.obs and self.obs.tree_usable:
             if self.log.debug:
                 self.log.detail("route", f"tree可用: 候选{len(self.obs.candidates)}")
             self.log.phase("route", f"tree（控件树可用：候选{len(self.obs.candidates)}）")
             return {"route": "tree"}
 
-        reason = "声明路径 A" if path == "A" else f"控件树不可用（候选{len(self.obs.candidates) if self.obs else 0}）"
+        reason = f"控件树不可用（候选{len(self.obs.candidates) if self.obs else 0}）"
         if self.log.debug:
             self.log.detail("route", f"降级VLM: {reason}")
         self.log.phase("route", f"vlm 网格兜底 — {reason}")
@@ -763,20 +757,32 @@ class Runner:
         """运行整个状态机：初始化后 invoke 直到 END（KeyboardInterrupt/异常降级为失败结果），
         生成决策链汇总，返回 success/status/steps/耗时/日志路径等结果 dict。"""
         self.prepare()
-        if self.prelaunch_app is not None:
-            launched = self._prelaunch_configured_app()
-            if self.prelaunch_only:
-                elapsed = self.elapsed
-                success = bool(launched)
-                status = "complete" if success else "app_unavailable"
-                summary = self.log.summary(
-                    success=success, status=status, steps=1 if success else 0,
-                    usage={}, route_counts=self.route_counts,
-                    vlm_reflections=0, elapsed=elapsed,
-                )
-                return {"success": success, "status": status, "steps": 1 if success else 0,
-                        "elapsed": round(elapsed, 1), "summary": summary,
-                        "log_file": str(self.log.path), "events": self.log.events}
+        if self.glm is not None:
+            has_cached_app = any(app.in_scope and app.package for app in self.cfg.apps)
+            if has_cached_app:
+                self.route_counts["initial_model"] = self.route_counts.get("initial_model", 0) + 1
+            try:
+                initial = choose_initial_route(self.task, self.cfg.apps, self.glm)
+                self.log.phase("route", f"首次文本判断：{initial.reason}",
+                               app=initial.app.name if initial.app else "",
+                               finish_after_launch=initial.finish_after_launch,
+                               model_ms=round(self.glm.last_call.latency_ms, 1) if has_cached_app else 0,
+                               model_tokens=self.glm.last_call.total_tokens if has_cached_app else 0)
+            except (GLMError, ValueError) as e:
+                initial = None
+                self.log.phase("route", f"首次文本判断失败，进入屏幕观测：{e}")
+            if initial and initial.app and self._launch_selected_app(initial.app):
+                if initial.finish_after_launch:
+                    elapsed = self.elapsed
+                    usage = self.glm.usage.as_dict()
+                    summary = self.log.summary(
+                        success=True, status="complete", steps=1,
+                        usage=usage, route_counts=self.route_counts,
+                        vlm_reflections=0, elapsed=elapsed,
+                    )
+                    return {"success": True, "status": "complete", "steps": 1,
+                            "elapsed": round(elapsed, 1), "summary": summary,
+                            "log_file": str(self.log.path), "events": self.log.events}
         app = self.graph()
         # LangGraph 默认 recursion_limit=25 个 superstep；
         # 我们的循环每步约5个节点，20 步大约需要 120。不显式设置的话，长任务会死在一个
@@ -784,7 +790,7 @@ class Runner:
         limit = self.cfg.agent.max_steps * 8 + 20
         try:
             final = app.invoke(
-                {"task": self.task, "declared_path": self.cfg.declared_path, "step": 0,
+                {"task": self.task, "step": 0,
                  "no_progress": 0, "recover_depth": 0, "done": False, "success": False},
                 config={"recursion_limit": limit},
             )
@@ -814,18 +820,19 @@ class Runner:
             "events": self.log.events,
         }
 
-    def _prelaunch_configured_app(self) -> bool:
-        """只对选中的配置包执行一次启动，失败则留下可见日志。"""
-        app = self.prelaunch_app
-        self.log.phase("route", f"配置应用直启：{app.name} → {app.package}（无模型决策）")
+    def _launch_selected_app(self, app: AppConfig) -> bool:
+        """按模型选出的缓存 ID 启动应用；失败交给界面观测流程。"""
+        self.log.phase("route", f"模型选择应用直启：{app.name} → {app.package}")
         try:
             result = self.executor.call("launch_app", package=app.package)
+            if result.startswith("TOOL_ERROR"):
+                raise RuntimeError(result)
         except Exception as e:
-            self.log.phase("error", f"{app.name} ADB 启动失败：{e}")
+            self.log.phase("error", f"{app.name} ADB 启动失败，回退界面观测：{e}")
+            self.context.record(0, "initial", "LAUNCH", f"{app.name} 启动失败：{e}", failed=True)
             return False
-        self.log.step_begin(1)
         self.log.phase("act", f"已通过 ADB 打开 {app.name}", package=app.package, result=result)
         self.context.entities["已打开应用"] = app.name
         self.context.progress = f"已打开 {app.name}；继续完成用户指令"
-        self.route_counts["adb_prelaunch"] = 1
+        self.route_counts["model_adb_launch"] = 1
         return True

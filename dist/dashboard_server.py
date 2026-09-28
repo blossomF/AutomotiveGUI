@@ -733,7 +733,6 @@ BASE_CSS = r"""
   .app-row input[type=text] { font:inherit; font-size:13px; padding:7px 9px;
     border:1px solid #cbd2d9; border-radius:7px; background:#fff; min-width:0; }
   .app-row input[type=text]:focus { border-color:#2563eb; }
-  .app-row .app-check { flex:0 0 auto; width:16px; height:16px; cursor:pointer; }
   .app-row .app-name { flex:1 1 110px; }
   .app-row .app-pkg { flex:2 1 220px; }
   .app-row .app-alias { flex:1 1 90px; }
@@ -1159,8 +1158,7 @@ function appRows(){
     rows.push({
       name:row.querySelector('.app-name').value.trim(),
       package:row.querySelector('.app-pkg').value.trim(),
-      aliases:row.querySelector('.app-alias').value.split(/[,，、;；]/).map(s=>s.trim()).filter(Boolean),
-      checked:row.querySelector('.app-check').checked
+      aliases:row.querySelector('.app-alias').value.split(/[,，、;；]/).map(s=>s.trim()).filter(Boolean)
     });
   });
   return rows;
@@ -1169,8 +1167,6 @@ function markDirty(row){ row.dataset.dirty='1'; }
 function buildAppRow(app){
   app=app||{};
   const row=document.createElement('div'); row.className='app-row';
-  const cb=document.createElement('input'); cb.type='checkbox'; cb.className='app-check';
-  cb.checked=Boolean(app.checked); cb.title='勾选=参与 --check 包名核对与任务直启';
   const name=document.createElement('input'); name.type='text'; name.className='app-name';
   name.placeholder='应用名称（如 美团）'; name.value=app.name||'';
   const pkg=document.createElement('input'); pkg.type='text'; pkg.className='app-pkg';
@@ -1180,8 +1176,7 @@ function buildAppRow(app){
   const del=document.createElement('button'); del.type='button'; del.className='app-del';
   del.textContent='删除'; del.onclick=()=>{ row.remove(); };
   [name,pkg,alias].forEach(el=>el.addEventListener('input',()=>markDirty(row)));
-  cb.addEventListener('change',()=>markDirty(row));
-  row.append(cb,name,pkg,alias,del);
+  row.append(name,pkg,alias,del);
   return row;
 }
 function renderAppRows(apps){
@@ -1531,7 +1526,7 @@ PAGE_SETTINGS_TPL = r"""<!DOCTYPE html>
 
   <section class="settings-card">
     <h2>应用配置</h2>
-    <p class="settings-hint">此处配置需要做任务的三方应用；勾选的应用参与 --check 最后一步包名核对与任务直启。可增删改；「重新加载」会从车机获取已安装应用列表用于包名补全，并把当前应用清单（含新改的包名）缓存到 config.yaml，供 adb 直接打开。</p>
+    <p class="settings-hint">此处维护全部目标应用；--check 核对全部已配置包名。模型可选择缓存中的应用并通过 ADB 直启。「重新加载」从设备获取包名用于补全，并将当前应用清单全量保存到 config.yaml。</p>
     <div id="appCheckList" class="app-check-list">正在读取应用配置…</div>
     <div class="settings-actions">
       <button id="addAppBtn" type="button">+ 添加应用</button>

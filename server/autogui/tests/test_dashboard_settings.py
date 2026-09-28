@@ -40,7 +40,6 @@ def test_settings_save_preserves_unrelated_config_and_manual_precedence(config_p
     data = save_settings(config_path, {
         "model": {"url": "https://new.example/v1", "name": "new-model", "api_key": ""},
         "grid": {"mode": "manual", "cols": 12, "rows": 24},
-        "check_packages": ["QQ音乐"],
     })
     source = config_path.read_text(encoding="utf-8")
     assert "debug: true" in source
@@ -48,10 +47,9 @@ def test_settings_save_preserves_unrelated_config_and_manual_precedence(config_p
     assert data["model"]["url"] == "https://new.example/v1"
     assert data["grid"] == {"mode": "manual", "cols": 12, "rows": 24}
     assert data["apps"] == [
-        {"name": "QQ音乐", "package": "com.example.music", "aliases": [], "checked": True},
-        {"name": "飞书", "package": "com.example.feishu", "aliases": [], "checked": False},
+        {"name": "QQ音乐", "package": "com.example.music", "aliases": []},
+        {"name": "飞书", "package": "com.example.feishu", "aliases": []},
     ]
-    assert Config.load(config_path).check_packages == ["QQ音乐"]
     assert grid_preview(config_path, (1080, 2400))["active"]["cols"] == 12
     assert grid_preview(config_path, (1080, 2400))["auto"] == {"cols": 11, "rows": 22}
 
@@ -93,7 +91,11 @@ def test_saved_settings_reappear_after_reload(config_path, monkeypatch):
     assert reloaded["voice"]["silence_threshold"] == 300
 
 
-def test_save_settings_persists_glm_and_voice_numeric_fields(config_path):
+def test_save_settings_persists_glm_and_voice_numeric_fields(config_path, monkeypatch):
+    import autogui.security as security
+
+    monkeypatch.setattr(security, "encrypt", lambda value: f"ENC({value})")
+    monkeypatch.setattr(security, "resolve_secret", lambda value: value[4:-1])
     data = save_settings(config_path, {
         "model": {"url": "https://new.example/v1", "name": "new-model", "api_key": "",
                   "temperature": 0.2, "max_tokens": 4096, "timeout": 90, "max_retries": 6},
@@ -165,11 +167,6 @@ def test_bad_model_url_cannot_be_saved(config_path):
     assert Config.load(config_path).glm.base_url == "https://old.example/v1"
 
 
-def test_settings_rejects_unconfigured_app(config_path):
-    with pytest.raises(ValueError, match="已有的应用"):
-        save_settings(config_path, {"check_packages": ["未配置应用"]})
-
-
 def test_dashboard_settings_page_and_api_work_without_device(config_path, monkeypatch):
     root = Path(__file__).resolve().parents[3]
     module_path = root / "dist" / "dashboard_server.py"
@@ -199,8 +196,8 @@ def test_dashboard_settings_page_and_api_work_without_device(config_path, monkey
         assert saved["ok"] and saved["grid"]["mode"] == "manual"
         assert Config.load(config_path).grid.cols == 12
         body = json.dumps({"apps": [
-            {"name": "飞书", "package": "com.example.feishu2", "aliases": ["Lark"], "checked": True},
-            {"name": "新应用", "package": "com.example.new", "aliases": [], "checked": False},
+            {"name": "飞书", "package": "com.example.feishu2", "aliases": ["Lark"]},
+            {"name": "新应用", "package": "com.example.new", "aliases": []},
         ]}).encode()
         request = urllib.request.Request(base + "/api/settings/apps", body,
                                          headers={"Content-Type": "application/json"}, method="POST")
@@ -208,7 +205,7 @@ def test_dashboard_settings_page_and_api_work_without_device(config_path, monkey
             saved = json.load(response)
         assert saved["ok"]
         assert [a["name"] for a in saved["apps"]] == ["飞书", "新应用"]
-        assert Config.load(config_path).check_packages == ["飞书"]
+        assert [a.name for a in Config.load(config_path).apps] == ["飞书", "新应用"]
     finally:
         server.shutdown()
         server.server_close()
@@ -217,9 +214,9 @@ def test_dashboard_settings_page_and_api_work_without_device(config_path, monkey
 
 def test_save_apps_add_remove_modify_and_preserve_comments(config_path):
     saved = save_apps(config_path, [
-        {"name": "QQ音乐", "package": "com.new.music", "aliases": ["QQ Music"], "checked": True},
-        {"name": "美团", "package": "com.sankuai.meituan.car", "aliases": [], "checked": True},
-        {"name": "哔哩哔哩", "package": "", "aliases": ["B站"], "checked": False},
+        {"name": "QQ音乐", "package": "com.new.music", "aliases": ["QQ Music"]},
+        {"name": "美团", "package": "com.sankuai.meituan.car", "aliases": []},
+        {"name": "哔哩哔哩", "package": "", "aliases": ["B站"]},
     ])
     source = config_path.read_text(encoding="utf-8")
     assert "# manual fallback" in source
@@ -230,9 +227,8 @@ def test_save_apps_add_remove_modify_and_preserve_comments(config_path):
     assert cfg.apps[0].package == "com.new.music"
     assert cfg.apps[0].aliases == ["QQ Music"]
     assert cfg.apps[2].package == ""
-    assert cfg.check_packages == ["QQ音乐", "美团"]
     assert saved["apps"][1] == {"name": "美团", "package": "com.sankuai.meituan.car",
-                                "aliases": [], "checked": True}
+                                "aliases": []}
 
 
 def test_save_settings_with_apps_payload(config_path):
@@ -240,13 +236,12 @@ def test_save_settings_with_apps_payload(config_path):
         "model": {"url": "https://new.example/v1", "name": "new-model", "api_key": ""},
         "grid": {"mode": "auto", "cols": 20, "rows": 10},
         "apps": [
-            {"name": "飞书", "package": "com.example.feishu", "aliases": [], "checked": True},
-            {"name": "新应用", "package": "com.example.new", "aliases": [], "checked": False},
+            {"name": "飞书", "package": "com.example.feishu", "aliases": []},
+            {"name": "新应用", "package": "com.example.new", "aliases": []},
         ],
     })
     cfg = Config.load(config_path)
     assert [a.name for a in cfg.apps] == ["飞书", "新应用"]
-    assert cfg.check_packages == ["飞书"]
     assert data["model"]["url"] == "https://new.example/v1"
 
 
@@ -263,10 +258,10 @@ def test_save_apps_rejects_bad_input(config_path):
 
 def test_public_settings_returns_aliases(config_path):
     save_apps(config_path, [{"name": "哔哩哔哩", "package": "com.bilibili.bilithings",
-                             "aliases": ["B站"], "checked": True}])
+                             "aliases": ["B站"]}])
     apps = public_settings(config_path)["apps"]
     assert apps[0]["aliases"] == ["B站"]
-    assert apps[0]["checked"] is True
+    assert "checked" not in apps[0]
 
 
 def test_device_apps_filters_system_and_caches(config_path, monkeypatch):

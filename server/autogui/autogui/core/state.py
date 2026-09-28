@@ -24,7 +24,6 @@ Route = Literal["skill", "tree", "vlm"]
 class AgentState(TypedDict, total=False):
     # 目标
     task: str
-    declared_path: str
 
     # 循环计数与上限
     step: int
