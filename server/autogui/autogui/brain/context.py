@@ -2,7 +2,7 @@
 
 四层，见 技术方案评估.md §5.1：
 
-  permanent   任务 + 声明路径 + 动作 schema + 技能索引            ~600 tok
+  permanent   任务 + 声明路径 + 动作 schema + 技能索引/已选指南
   sliding     最近 N 步纯文本，含失败步                          ~500 tok
   entities    跨步骤关键事实（时间 / 地点 / 歌曲 / 商品）         ~150 tok
   observation 候选列表（文本）或网格图（二选一，绝不都要）        1-2k / 图
@@ -46,6 +46,7 @@ class Context:
     entities: dict = field(default_factory=dict)
     progress: str = ""
     skill_index: str = ""
+    active_skill_guide: str = ""
     app_index: str = ""
 
     history_window: int = 5
@@ -64,6 +65,8 @@ class Context:
             lines.append("可用应用（LAUNCH 的 app 字段填这里的包名）：\n" + self.app_index)
         if self.skill_index:
             lines.append("可用技能：\n" + self.skill_index)
+        if self.active_skill_guide:
+            lines.append("当前已加载的技能指导（不要再次选择同一 SKILL）：\n" + self.active_skill_guide)
         return "\n".join(lines)
 
     # ── 滑动块 ───────────────────────────────────────────────────────────────
@@ -122,7 +125,8 @@ class Context:
         def build(w: int, k: int) -> tuple[str, dict]:
             c = Context(
                 task=self.task, declared_path=self.declared_path, history=self.history,
-                entities=self.entities, skill_index=self.skill_index, app_index=self.app_index,
+                entities=self.entities, skill_index=self.skill_index,
+                active_skill_guide=self.active_skill_guide, app_index=self.app_index,
                 history_window=w, candidate_limit=k,
             )
             body = kept[:k]

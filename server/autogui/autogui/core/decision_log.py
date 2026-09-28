@@ -6,8 +6,9 @@
 散落在图各处的 ``print`` 调用。
 
 结构沿用 ``LightGUIAgent/lightguiagent/logger.py`` 的 JSONL 方式，
-并增加我们架构特别需要的字段：``route``（本步由 skill/tree/vlm
-哪条路由服务）、``sig``（屏幕指纹）、``vlm_calls`` 和 ``tokens``。
+并增加我们架构特别需要的字段：``route``（tree/vlm 决策路径；
+``skill_guide`` 仅表示模型加载指南）、``sig``（屏幕指纹）、
+``vlm_calls`` 和 ``tokens``。
 
 两个输出，始终同步：
   * stdout 上的人类可读行，阶段列做补宽，便于纵向扫读决策链
@@ -178,7 +179,7 @@ class DecisionLog:
             f"  token  in/out   {usage.get('prompt_tokens', 0):,} / {usage.get('completion_tokens', 0):,}"
             f"   合计 {usage.get('total_tokens', 0):,}",
             f"  JSON 重试        {usage.get('retries', 0)}",
-            f"  路由分布        " + "  ".join(f"{k}={v}" for k, v in sorted(route_counts.items())) if route_counts else "  路由分布        -",
+            f"  决策/指南次数  " + "  ".join(f"{k}={v}" for k, v in sorted(route_counts.items())) if route_counts else "  决策/指南次数  -",
             f"  决策链日志      {self.path}",
             _c("─" * 68, "1"),
         ]

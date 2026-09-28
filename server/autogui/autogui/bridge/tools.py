@@ -199,7 +199,7 @@ def sleep(seconds: float = 1.0) -> str:
 
 
 def run_skill(name: str, params_json: str = "{}") -> str:
-    """执行声明式 YAML 技能。零 VLM 调用。
+    """外部 MCP 显式调用的 YAML 配方执行器；普通 Agent 不调用它。
 
     延迟 import 让 ``skills`` 保持在 bridge 依赖方向之外。
     """
@@ -214,7 +214,7 @@ def run_skill(name: str, params_json: str = "{}") -> str:
     try:
         trace = run_by_name(name, params)
     except SkillMiss as e:
-        # 不是要上报为失败的错误——调用方会降级到 tree/vlm。
+        # 将失败原因交给显式调用方处理。
         return f"SKILL_MISS {name}: {e}"
     except ADBError as e:
         return f"SKILL_ADB_FAIL {name}: {e}"

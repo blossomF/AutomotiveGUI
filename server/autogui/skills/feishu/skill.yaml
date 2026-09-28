@@ -13,8 +13,11 @@ popups:
 skills:
   - name: send_message
     summary: 给指定联系人发送一条文字消息
-    triggers: [飞书, 发消息, 联系, 通知一下, feishu, lark]
     params: [contact, text]
+    guide: |
+      仅在用户明确要求通过飞书给 {contact} 发送消息时使用；消息内容必须来自用户原话：{text}。
+      找到并核对联系人，再输入消息。发送前检查收件人和文本均准确，避免发给同名联系人或发送额外内容。
+      发送后以聊天界面中的实际消息为完成证据。用户只是要求阅读消息、建日程或导航时，不要发送消息。
     steps:
       - { act: launch }
       - { act: dismiss_popups }
@@ -32,8 +35,10 @@ skills:
 
   - name: open_chat
     summary: 打开与指定联系人的聊天窗口
-    triggers: [找, 看看, 打开对话]
     params: [contact]
+    guide: |
+      适用于用户明确要求查看飞书联系人 {contact} 的聊天。先核对联系人身份，再打开对应会话。
+      如需读取消息，仅根据屏幕上可见内容提取信息；不要擅自回复或发送消息。
     steps:
       - { act: launch }
       - { act: dismiss_popups }

@@ -1,8 +1,6 @@
 # 音乐（CEA1.3 预装）
-# hint 的文本值在借到车机实测前都是占位符：
-# 先运行 `python main.py --dump-report`，再把每个 hint 换成
-# 该 App UI 树里真实出现的字符串。解析不了的 hint 会抛 SkillMiss，
-# 该步落回通用 tree/vlm 路由——所以错误的 hint 只花掉一轮，不会让任务失败。
+# 普通任务只读取 guide，不执行下面的 steps。
+# steps 属于显式 --skill-only 配方；hint 是占位符，需在车机实测校准。
 name: music
 app:
   package: ""            # 用 `python main.py --packages` 填
@@ -15,8 +13,11 @@ popups:
 skills:
   - name: play_song
     summary: 在音乐 App 搜索指定歌曲并播放
-    triggers: [播放, 来一首, 听一下, play]
     params: [song]
+    guide: |
+      适用于用户明确要求在音乐应用播放歌曲 {song}。先确认当前应用和页面；需要时从可用应用列表启动音乐应用。
+      找到搜索入口，输入歌名并查看结果；如有同名歌曲，结合用户给出的歌手等信息消歧。
+      点击目标歌曲后，确认播放页显示正确曲目且处于播放状态，才可报告完成。找不到时不要猜测或播放其它歌曲。
     steps:
       - { act: launch }
       - { act: dismiss_popups }
@@ -30,7 +31,9 @@ skills:
 
   - name: pause
     summary: 暂停当前播放
-    triggers: [暂停]
+    guide: |
+      仅在用户明确要求暂停当前音乐时使用。先确认处于音乐播放界面且正在播放，找到对应的暂停控件。
+      点击后检查播放状态确已暂停；如果已暂停，不要再次点击以免恢复播放。
     steps:
       - { act: click, hint: { desc: "暂停" } }
       - { act: complete }

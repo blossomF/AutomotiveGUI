@@ -1,21 +1,9 @@
-"""声明式 YAML 配方，零 VLM 调用执行。
+"""技能目录：普通任务提供模型指南，显式调试入口保留 YAML 配方。
 
-文件格式沿用 ``android-agent/gitd/skills/<app>/skill.yaml``——包名、
-带参数和步骤列表的命名技能——以及该项目的 ``popup_detectors`` 思路
-（``adb.py:134-150`` 加 :690-739 的三层 ``dismiss_popups``）。我们
-刻意**不**照搬的是它的 ``Action``/``Workflow`` 类体系（前置条件/
-后置条件/回滚）：那套抽象是为跨设备回放录制宏而建的，把车机 UI
-映射到上面会花掉我们没有的几天。步骤就是一个 dict，由 dispatcher
-解析。
-
-让这一层不只是存在、还能得分的两条规则：
-
-  * **解析不了的 hint 抛 ``SkillMiss``，由 router 转成向通用
-    tree/vlm 路由的优雅降级。** 因此一个脆弱的配方永远不会比没有
-    配方更糟——这正是技能可以一周内批量编写且安全的原因。它也和
-    挣 +10 技术深度的降级路径共用同一套实现。
-  * **坐标永远不写进配方。** hint 是 text/desc/rid 匹配器，每步
-    对*新鲜的* dump 解析，所以配方能扛住 UI 改版和分辨率变化。
+``SkillBook.index`` 把带 guide 的技能签名放入模型上下文；模型选择
+``SKILL`` 后，``guidance`` 只返回指导文字，不操作设备。``run`` 是
+``--skill-only`` 和 MCP 工具显式调用的旧配方执行器，按新抓取的 XML
+解析 hint；两种入口不能混为普通任务的自动路由。
 """
 
 from __future__ import annotations
@@ -54,28 +42,19 @@ class Skill:
     app: str
     name: str
     summary: str
+    guide: str = ""
     params: list[str] = field(default_factory=list)
     steps: list[dict] = field(default_factory=list)
     popups: list[dict] = field(default_factory=list)
-    triggers: list[str] = field(default_factory=list)
     package: str = ""
 
-    def signature(self, unavailable: bool = False) -> str:
+    def signature(self) -> str:
         """一行技能签名，注入永久提示词块。
 
-        ⚠️ 必须写**全名**（``app.name``）。只写短名会让模型和内部键对不上：
-        日志/上下文里失败的是 ``bilibili.search_video``，而它看到的清单是
-        ``search_video`` → 模型会断定"上次名字写错了，改用 search_video"，
-        可短名解析回来还是同一个技能，于是反复重试同一个跑不通的配方
-        （实测白烧 6 步）。清单与内部键用同一个写法，模型才不会误诊。
+        使用 ``app.name`` 全名，与模型返回的 SKILL.name 和内部键一致。
         """
         args = ", ".join(f"{p}=..." for p in self.params)
-        mark = "  ⛔已失效(勿再选)" if unavailable else ""
-        return f"{self.app}.{self.name}({args}) — {self.summary}{mark}"
-
-    def trigger_words(self) -> list[str]:
-        """声明的触发词，缺省回退到技能名和 App 名。"""
-        return [t for t in self.triggers if t] or [self.name.replace("_", ""), self.app]
+        return f"{self.app}.{self.name}({args}) — {self.summary}"
 
 
 class SkillBook:
@@ -110,25 +89,34 @@ class SkillBook:
                     app=doc.get("name", path.parent.name),
                     name=name,
                     summary=spec.get("summary", ""),
+                    guide=str(spec.get("guide") or "").strip(),
                     params=list(spec.get("params") or []),
                     steps=list(spec.get("steps") or []),
                     popups=popups,
-                    triggers=[str(x) for x in (spec.get("triggers") or [])],
                     package=package,
                 )
                 self.by_id[f"{skill.app}.{skill.name}"] = skill
 
-    def index(self, unavailable: set[str] | None = None) -> str:
-        """每个技能一行，注入永久提示词块。
-
-        ``unavailable`` 是已被判定不可用（重试次数用尽）的技能 key 集合——
-        在清单里就地标出来。之前清单是静态的，模型看不到"这个已经废了"，
-        于是反复选中同一个失败配方；标出来才能真正止损。
-        """
-        dead = unavailable or set()
+    def index(self) -> str:
+        """只展示有模型指导内容的技能；旧式 ADB 配方不会被模型误选。"""
         return "\n".join(
-            s.signature(k in dead) for k, s in sorted(self.by_id.items(), key=lambda kv: kv[1].app)
+            s.signature() for _, s in sorted(self.by_id.items(), key=lambda kv: kv[1].app) if s.guide
         ) or "（无）"
+
+    def guidance(self, key: str, params: dict | None = None) -> str:
+        """返回给模型的操作指导，不执行任何设备动作。"""
+        skill = self.get(key)
+        if skill is None or not skill.guide:
+            raise SkillMiss(f"no model guide for {key!r}")
+        args = dict(params or {})
+        missing = [p for p in skill.params if not str(args.get(p, "")).strip()]
+        if missing:
+            raise SkillMiss(f"{key} missing guide params: {', '.join(missing)}")
+        guide = self._sub(skill, skill.guide, args)
+        return (f"技能 {skill.app}.{skill.name}；参数：{args}\n"
+                f"{guide}\n"
+                "这只是操作指导。必须根据当前屏幕逐步选择动作；不匹配时放弃此指导。"
+                "只有看到目标已达成的证据才回答 COMPLETE。")
 
     def get(self, key: str) -> Skill | None:
         if key in self.by_id:

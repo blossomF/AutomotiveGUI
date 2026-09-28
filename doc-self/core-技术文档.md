@@ -25,9 +25,9 @@
 
 3. **降级是真实代码路径，且全程留痕（路径 C 声明的证据链，§5.2）。**
    声明路径 C 的唯一风险是评审判定"实际只有 B"（章程 §4.4：虚报按实际给分）。所以每一级降级都被日志记录判据：
-   - `route` 节点每步打印 `skill|tree|vlm` 与依据（"关键词命中，0 次 VLM" / "控件树可用：候选 40" / "控件树不可用（候选 0）"）；
+   - `route` 节点每步打印 `tree|vlm` 与依据（"控件树可用：候选 40" / "控件树不可用（候选 0）"）；
    - **tree→vlm 中途降级**：`decide[tree]` 返回的 `node_ref` 越界 → 不报错、不重试，改判 vlm 再决策一次（`decide_attempts` 每步上限 2，防止在 decide 之间乒乓直到墙钟触发）；
-   - **skill→tree/vlm 降级**：`SkillMiss` 时记录"配方未命中，降级到通用路径"，且该 skill 加入 `skill_failures` 不再尝试；
+   - **模型选择 Skill 指南**：`decide` 返回 `SKILL` 后记录所选名称/参数，`run_skill` 仅加载指南，然后按原 tree/VLM 路线重新决策；无自动配方执行；
    - MCP→local 降级：`make_executor` 握手失败返回可用 local 执行器 + 一行警告。
    交付物里附一次**刻意触发的降级样例**（自绘/树空界面），日志留痕比任何措辞都有说服力。
 
@@ -61,24 +61,27 @@
    - `MCPExecutor`：走 `mcp.shared.memory` 内存传输的**真实 JSON-RPC**（无 subprocess、无 Windows 管道怪癖），异步会话固定在私有事件循环，对外同步门面；外部客户端（Claude Code 等）则通过 stdio 连 `python -m autogui.mcp_server`，两者到达完全相同的工具列表；
    - `make_executor`：mcp 握手失败 → 返回 local + 降级备注。绑定是设备的属性、不是传输的属性，所以两路结果必须一致（`--mcp-check` 做同源校验）。
 
-8. **LangGraph 的细节：`recursion_limit = max_steps*6+20`。**
+8. **LangGraph 的细节：`recursion_limit = max_steps*8+20`。**
    LangGraph 默认 25 个 superstep，本循环每步约 5 个节点，20 步约需 120。不显式设置，长任务会死在一个看起来像 harness bug 的 `GraphRecursionError` 上。
 
 ---
 
 ## 2. 运行逻辑（图结构）
 
+下图是 **LangGraph 内部节点图**。用户指令先经 `main.py`（可选语音先转文字），再经 `Runner.prepare()` 初始化，才进入这里的 `START`。从输入开始的完整流程见[代码流程与联调日志导读](../doc/代码流程与联调日志导读.md)。
+
 ```
 START → perceive → guard ─┬(任一上限触发)─────────────────────────→ finish → END
-                          └→ route ─┬(skill 命中)→ run_skill ─┐
-                                    ├(tree 可用) → decide ────┼→ act → verify ─┬(有进展/指纹变)→ perceive
-                                    └(树不可用)  → decide ────┘                ├(COMPLETE/FAIL) → finish
-                                                                               └(B/C)→ recovery(Back→Home→重启)→ perceive
+                          └→ route ─┬(tree 可用)→ decide ─┬(SKILL)→ run_skill → decide
+                                    └(树不可用)→ decide ──┴(动作)→ act → verify
+                                                                      ├(继续)→ perceive
+                                                                      ├(COMPLETE/FAIL)→ finish
+                                                                      └(B/C)→ recovery→ perceive
 条件边明细：
   guard   after_guard：done → finish，否则 route
-  route   after_route：skill → run_skill；tree/vlm → decide
-  run_skill：有动作 → act（技能执行完自带 COMPLETE）；SkillMiss 降级 → 直接 route 结果
-  decide  after_decide：retry_decision → decide（vlm 重判，≤2 次/步）；否则 act
+  route   after_route：tree/vlm → decide
+  run_skill：加载模型指南后 → decide（不执行 ADB）
+  decide  after_decide：SKILL → run_skill；retry_decision → decide（vlm 重判）；否则 act
   act     after_act：有 last_action → verify；空动作 → perceive
   verify  after_verify：done → finish；recover_depth ≥1 → recovery；否则 perceive
   recovery → perceive（固定回边）

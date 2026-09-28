@@ -14,8 +14,11 @@ popups:
 skills:
   - name: search_and_add
     summary: 搜索指定商品并加入购物车
-    triggers: [美团, 外卖, 点外卖, 点餐, meituan, takeout]
     params: [item]
+    guide: |
+      适用于用户明确要求在外卖应用寻找 {item} 并加入购物车。先核对目标店铺、商品和规格；用户说“第一家店”时按当前搜索排序选择第一家。
+      找到商品后加入购物车，并核对购物车中商品名称、数量和店铺。加入购物车不等于下单；未经用户明确要求不要提交订单或付款。
+      商品或店铺不符时继续查找，不要因为点击过“加入购物车”就报告完成。
     steps:
       - { act: launch }
       - { act: dismiss_popups }

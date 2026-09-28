@@ -67,25 +67,32 @@ Windows 用户可以全部用 `run.bat` 代劳：`run.bat setup` / `run.bat chec
 
 ## 2. 架构
 
+```mermaid
+flowchart LR
+    INPUT["用户文字指令"] --> TASK["任务文本"]
+    VOICE["可选语音输入"] --> ASR["ASR 转文字"] --> TASK
+    TASK --> MAIN["main.py: 配置与设备绑定"]
+    MAIN --> PREP["Runner.prepare: 日志 / 技能 / 执行器"]
+    PREP --> OBS["perceive: 截图 + XML"]
+    OBS --> GUARD["guard: 限制检查"]
+    GUARD --> ROUTE{"route"}
+    ROUTE -->|XML 可用| TREE["decide: 树文本给 GLM"]
+    ROUTE -->|XML 不可用或降级| VLM["decide: 网格图给 GLM"]
+    TREE -->|node_ref 越界或决策无效| VLM
+    TREE -->|模型选择 SKILL| SKILL["run_skill: 加载指南，不操作设备"]
+    VLM -->|模型选择 SKILL| SKILL
+    SKILL -->|原路线 tree| TREE
+    SKILL -->|原路线 vlm| VLM
+    TREE --> ACT["act: local / MCP 工具 → ADB"]
+    VLM --> ACT
+    ACT --> VERIFY["verify: 结算动作效果"]
+    VERIFY -->|继续| OBS
+    VERIFY -->|需要恢复| RECOVERY["recovery"] --> OBS
+    VERIFY -->|完成或失败| ENDNODE["finish: 结果与日志"]
+    GUARD -->|超限| ENDNODE
 ```
-┌──────────── 大脑 · LangGraph 状态机（autogui/core/graph.py）────────────┐
-│ START → perceive → guard ─┬(超限)→ finish → END                        │
-│                           └→ route ─┬ skill → run_skill ─┐             │
-│                                     ├ tree  → decide    ─┼→ act → verify│
-│                                     └ vlm   → decide    ─┘   ↓          │
-│        perceive ←── progress ←── (0 次 VLM：屏幕指纹变了)      │         │
-│        recovery ←── stuck ←── (1 次 VLM：指纹没变才反思 A/B/C) ┘         │
-└──────────────────────────────────┬──────────────────────────────────────┘
-                                   │ exec_mode: local │ mcp
-┌──────────────────────────────────▼──────────────────────────────────────┐
-│ 薄 MCP Server（autogui/mcp_server.py，19 个工具，@mcp.tool() 纯套壳）      │
-└──────────────────────────────────┬──────────────────────────────────────┘
-┌──────────────────────────────────▼──────────────────────────────────────┐
-│ ADB 桥（autogui/bridge/：exec-out 抓帧 · 控件树解析 · IME 安全的中文输入）  │
-└──────────────────────────────────┬──────────────────────────────────────┘
-                                   │ ADB
-                            CEA1.3 车机（主屏）
-```
+
+`route` 只选 tree/VLM。模型可以在 `decide` 中选择 `SKILL`，加载指南后再决定具体动作；普通指令不会因关键词而直接执行配方。完整条件边见[代码流程与联调日志导读](../../doc/代码流程与联调日志导读.md)。
 
 三条不可破的约束：
 
@@ -100,9 +107,9 @@ Windows 用户可以全部用 `run.bat` 代劳：`run.bat setup` / `run.bat chec
 
 | | 通道 | 触发条件 | 每次决策开销 |
 |---|---|---|---|
-| 1 | **Skill**（声明式配方） | 任务命中关键词且配方可执行 | **0 次 VLM** |
-| 2 | **tree**（控件树 → 模型选 `node_ref`） | `uiautomator dump` 有 ≥3 个可寻址候选 | 1 次，**纯文本，不发图** |
-| 3 | **vlm**（网格截图） | 树为空 / 自绘界面 / tree 返回越界 `node_ref` | 1 次 + 1 张图 |
+| 1 | **tree**（控件树 → 模型选 `node_ref`） | `uiautomator dump` 有 ≥3 个可寻址候选 | 1 次，**纯文本，不发图** |
+| 2 | **vlm**（网格截图） | 树为空 / 自绘界面 / tree 返回越界 `node_ref` | 1 次 + 1 张图 |
+| 可选 | **Skill 指南** | 模型选择合适技能且参数齐全 | 加载指南后再调用模型；不自动操作设备 |
 
 `declared_path` 是提交给评委的声明。规则 4.4 明确"声明与实际实现不符按实际给分"，所以这个值**必须
 由 `python main.py --dump-report` 的实测结果决定**，不要手改 `config.yaml`。
@@ -226,8 +233,7 @@ Automotive GUI Agent  |  路径 C  |  exec=local
 - **不处理登录、支付、验证码**。规则不允许，也没做。
 - **网格模式列标签单字母**，所以 `grid.cols ≤ 26`。横屏 20 列够用。
 - **`estimate_tokens` 是启发式**，不是真 tokenizer，只用于决定裁剪多少；对外报告的是 GLM 返回的真实用量。
-- **Skill 配方的 hint 文本需在真机上实测填写**。仓库里现带的 `music`/`bilibili` 配方含占位文本，
-  未跑 `--dump-report` 前会 `SkillMiss` 并自动降级——这是设计行为，不是崩溃。
+- **显式 `--skill-only` 配方的 hint 文本需在真机上实测填写**。仓库里现带的 `music`/`bilibili` 配方含占位文本；普通指令只读取 `guide`，不执行这些步骤。
 
 ---
 
@@ -262,8 +268,7 @@ autogui/
 │   │   ├── decision_log.py 规则 4.7 决策链 + JSONL
 │   │   └── executor.py    local / mcp 双通道
 │   └── skills/
-│       ├── base.py        YAML 配方执行器（0 次 VLM）
-│       └── router.py      关键词命中 + 参数抽取
+│       └── base.py        模型指南加载 + 显式配方执行器
 ├── skills/                配方的实际存放处（<app>/skill.yaml），与同名包分开
 └── tests/                 离线单测，不需要车机与网络
 ```

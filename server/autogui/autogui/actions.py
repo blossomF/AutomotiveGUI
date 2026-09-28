@@ -65,7 +65,7 @@ ACTIONS: tuple[ActionSpec, ...] = (
     ActionSpec("BACK", (), "System back — leaves a wrong page or dismisses a dialog"),
     ActionSpec("HOME", (), "System home — escape hatch when a page is unrecoverable"),
     ActionSpec("LAUNCH", ("app",), "Start an app by package name"),
-    ActionSpec("SKILL", ("name", "params?"), "Run a declarative recipe instead of stepping"),
+    ActionSpec("SKILL", ("name", "params?"), "Load task guidance; no device action; next decision remains with the model"),
     ActionSpec("WAIT", ("seconds?",), "Let an animation or network load settle"),
     ActionSpec("COMPLETE", ("result?",), "Task done — say what was achieved"),
     ActionSpec("FAIL", ("reason",), "Task cannot be completed — stop and explain"),
@@ -75,7 +75,7 @@ ACTION_NAMES: tuple[str, ...] = tuple(a.name for a in ACTIONS)
 TERMINAL: frozenset[str] = frozenset({"COMPLETE", "FAIL"})
 
 # 可以用“屏幕指纹变化”来校验效果、而不必花一次 VLM 调用的动作。
-MUTATING: frozenset[str] = frozenset({"CLICK", "LONG_PRESS", "TYPE", "SCROLL", "DRAG", "BACK", "HOME", "LAUNCH", "SKILL"})
+MUTATING: frozenset[str] = frozenset({"CLICK", "LONG_PRESS", "TYPE", "SCROLL", "DRAG", "BACK", "HOME", "LAUNCH"})
 
 SCROLL_DIRECTIONS = ("down", "up", "left", "right")
 

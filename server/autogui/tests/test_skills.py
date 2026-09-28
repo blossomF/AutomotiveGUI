@@ -1,4 +1,4 @@
-"""技能层：YAML 加载、关键词路由、SkillMiss 降级契约。
+"""技能层：模型指导与显式配方执行的边界。
 
 这些测试都不触碰设备——执行器的设备调用由真机上的
 ``main.py --skill-only`` 覆盖。
@@ -9,7 +9,6 @@ import textwrap
 import pytest
 
 from autogui.skills.base import DEFAULT_POPUPS, GENERIC_DISMISS, SkillBook, SkillMiss
-from autogui.skills.router import match_keywords
 
 MUSIC_YAML = textwrap.dedent(
     """
@@ -21,8 +20,8 @@ MUSIC_YAML = textwrap.dedent(
     skills:
       - name: play_song
         summary: 搜索并播放
-        triggers: [播放, 来一首]
         params: [song]
+        guide: 先搜索 {song}，核对歌曲与播放状态后才能完成。
         steps:
           - { act: launch }
           - { act: dismiss_popups }
@@ -31,7 +30,7 @@ MUSIC_YAML = textwrap.dedent(
           - { act: complete }
       - name: pause
         summary: 暂停
-        triggers: [暂停]
+        guide: 先检查当前确实正在播放，再点击暂停并复核。
         steps:
           - { act: click, hint: { desc: "暂停" } }
     """
@@ -81,28 +80,24 @@ def test_malformed_yaml_is_skipped_not_fatal(tmp_path):
     assert book.by_id  # 合法的那个仍然加载成功
 
 
-# ── 路由 ───────────────────────────────────────────────────────────────────────
+# ── 模型指导 ───────────────────────────────────────────────────────────────────
 
 
-def test_keyword_trigger_and_param_extraction(book):
-    hit = match_keywords("帮我在音乐里播放《七里香》", book)
-    assert hit is not None
-    skill, params = hit
-    assert skill.name == "play_song"
-    assert params == {"song": "七里香"}
+def test_guidance_is_text_and_does_not_touch_device(book):
+    text = book.guidance("music.play_song", {"song": "七里香"})
+    assert "七里香" in text
+    assert "核对歌曲与播放状态" in text
+    assert "只有看到目标已达成" in text
 
 
-def test_colon_form_also_extracts_a_param(book):
-    hit = match_keywords("播放: 晴天", book)
-    assert hit and hit[1] == {"song": "晴天"}
+def test_guidance_requires_params(book):
+    with pytest.raises(SkillMiss, match="missing guide params"):
+        book.guidance("music.play_song", {})
 
 
-def test_unrelated_task_matches_nothing(book):
-    assert match_keywords("把空调调到 24 度", book) is None
-
-
-def test_empty_task_matches_nothing(book):
-    assert match_keywords("", book) is None
+def test_index_only_shows_skills_with_guides(book):
+    book.get("music.pause").guide = ""
+    assert "music.pause" not in book.index()
 
 
 # ── 降级契约 ───────────────────────────────────────────────────────────────────

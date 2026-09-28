@@ -3,19 +3,19 @@
 图结构::
 
     START → perceive → guard ─┬(limit hit)──────────────────────────→ finish → END
-                              └→ route ─┬(skill)→ run_skill ─┐
-                                        ├(tree) → decide    ─┼→ act → verify ─┬(progress)→ perceive
-                                        └(vlm) ─→ decide    ─┘                ├(terminal) → finish
-                                                                              └(stuck)───→ recovery → guard
+                              └→ route ─┬(tree)→ decide ─┬(SKILL)→ run_skill → decide
+                                        └(vlm) ─→ decide ─┴(action)→ act → verify
+                                                                   ├(progress)→ perceive
+                                                                   ├(terminal)→ finish
+                                                                   └(stuck)───→ recovery → guard
 
 本文件为 Harness 得分要展示的三件事，以及参照实现的不足：
 
 * **有界循环。** ``core/guard.py`` 按步数、无进展*和*墙钟时间三重停止。
   LightGUIAgent 只限制步数（``agent.py:389``），其余全靠信任模型。
-* **真实的降级，而不是永远跑不到的 fallback。** route 按 skill → tree → vlm
-  选择，且 tree 可以在决策中途把这一轮交给 vlm（越界的 ``node_ref``）。
-  两种转换都被记入日志，这让“路径 C”的声明可验证而不是口头断言——
-  见 技术方案评估.md §5.2。
+* **真实的降级。** route 按控件树质量选 tree/vlm；tree 决策中的越界
+  ``node_ref`` 会转入 vlm。模型还可以选择 SKILL，加载指导文字后重新决策，
+  不由关键词直接操作设备。切换过程记录到决策日志。
 * **反思的成本被正确定价。** ``Mobile-Agent-v2/run.py:388-424`` 每步都花
   一次模型调用做反思，加上规划和记忆调用，约 4 次/步。这里屏幕指纹
   变化即可免费判定大多数步骤，双图反思只在屏幕看起来没变化时才运行。
@@ -42,11 +42,6 @@ from autogui.perception import grid as grid_mod
 from autogui.perception import tree as tree_mod
 from autogui.perception.capture import Observation, observe
 from autogui.skills.base import SkillBook, SkillMiss
-from autogui.skills.router import match_keywords
-
-# 同一个技能最多尝试几次（含首次）。第 2 次给的是"瞬时故障"的一次重试机会；
-# 用尽后该技能被标为失效并写进提示词清单，模型不会再选它。
-MAX_SKILL_ATTEMPTS = 2
 
 
 @dataclass
@@ -73,7 +68,7 @@ class Runner:
     # 四层上下文管理器（历史/进度/实体/技能索引 + token 预算裁剪）
     # 不进构造器：依赖 cfg 的多个参数，在 __post_init__ 里初始化
     context: Context = field(init=False, default=None)  # type: ignore[assignment]
-    # 技能库：YAML 配方集合（<app>/skill.yaml），skills.enabled 时加载
+    # 技能库：普通流程提供模型指南；显式 --skill-only 才执行 YAML 配方
     book: SkillBook | None = None
 
     # 运行开始时刻（time.time()），用于墙钟耗时与 guard 超时判定
@@ -82,13 +77,11 @@ class Runner:
     route_counts: dict = field(default_factory=dict)
     # 累计 VLM 反思次数（verify 里调 _reflect 才 +1），结尾汇总用
     reflections: int = 0
-    # 技能 key → 已失败次数。失败一次不立刻拉黑：车机上的技能失败常是**瞬时**的
-    # （等待文本超时、弹窗没来得及消失），直接拉黑会让"本可成功"的配方被永久
-    # 放弃，然后模型在通用路径上瞎试。给一次自动重试，到 MAX_SKILL_ATTEMPTS
-    # 次才判定失效（并写进提示词清单，止损）。
-    skill_failures: dict = field(default_factory=dict)
-    # route 节点命中后暂存的 (skill_key, params)，供 run_skill 节点消费
+    # 模型选择的 (skill_key, params)，供 run_skill 节点加载指导；不会执行配方。
     pending_skill: tuple | None = None
+    pending_route: str = "tree"
+    activated_skills: set[str] = field(default_factory=set)
+    skill_activated_this_step: bool = False
     # 本步 decide 已尝试次数：tree 降级 vlm 重决策每步最多 1 次（防 decide 乒乓）
     decide_attempts: int = 0
 
@@ -117,7 +110,7 @@ class Runner:
                 print(f"  ⚠ {note}")
         if self.cfg.skills.enabled and self.book is None:
             self.book = SkillBook(PROJECT_ROOT / self.cfg.skills.directory, tools.dev(), tools.text_input())
-            self.context.skill_index = self.book.index(self._unavailable_skills())
+            self.context.skill_index = self.book.index()
         # 把 config.yaml 的 apps 段接进提示词。此前这个初始化配置只被
         # main.py --dump-report 读过，模型完全不知道包名，LAUNCH 时只能瞎猜
         # （实测写出 app='哔哩哔哩'，被 bridge/adb.py 的包名校验拒掉）。
@@ -143,6 +136,7 @@ class Runner:
         step = state.get("step", 0) + 1
         self.log.step_begin(step)
         self.decide_attempts = 0
+        self.skill_activated_this_step = False
         try:
             self.prev_obs = self.obs
             self.obs, self.grid = observe(
@@ -199,28 +193,16 @@ class Runner:
         return {"done": False}
 
     def route(self, state: AgentState) -> dict:
-        """按 skill → tree → vlm 的优先级选择。
+        """只按控件树质量选择 tree/vlm；关键词绝不触发设备配方。
 
         声明路径 A 意味着完全跳过 tree，而不只是“不优先”，
         这样声明的能力与实际走的代码路径不会矛盾。
         """
         path = self.cfg.declared_path
         if self.log.debug:
-            self.log.phase("route", "评估", path=path, skills_enabled=bool(self.book),
+            self.log.phase("route", "评估", path=path, guide_count=len(self.book.by_id) if self.book else 0,
                            tree_usable=bool(self.obs and self.obs.tree_usable),
                            candidates=len(self.obs.candidates) if self.obs else 0)
-        if self.book and path in ("B", "C"):
-            key = self._first_available_skill(state.get("task") or self.task)
-            if key:
-                self.pending_skill = key
-                if self.log.debug:
-                    self.log.detail("route", f"skill关键词命中: {key[0]}")
-                self.log.phase("route", f"skill={key[0]}（关键词命中，0 次 VLM）")
-                return {"route": "skill"}
-            self.pending_skill = None
-            if self.log.debug:
-                self.log.detail("route", "关键词未命中可用技能，继续评估控件树")
-
         if path in ("B", "C") and self.obs and self.obs.tree_usable:
             if self.log.debug:
                 self.log.detail("route", f"tree可用: 候选{len(self.obs.candidates)}")
@@ -233,67 +215,26 @@ class Runner:
         self.log.phase("route", f"vlm 网格兜底 — {reason}")
         return {"route": "vlm"}
 
-    def _skill_available(self, key: str) -> bool:
-        """该技能还有重试余额吗（失败次数 < 上限）。"""
-        return self.skill_failures.get(key, 0) < MAX_SKILL_ATTEMPTS
-
-    def _unavailable_skills(self) -> set:
-        """重试余额已用尽的技能 key 集合——供提示词清单标注"已失效"。"""
-        return {k for k, n in self.skill_failures.items() if n >= MAX_SKILL_ATTEMPTS}
-
-    def _mark_skill_failure(self, key: str) -> None:
-        """记一次技能失败，并**立刻刷新注入提示词的技能清单**。
-
-        清单原本只在 prepare() 里生成一次，失败后不会变——模型因此不知道
-        某个技能已经废了，会一直选它。刷新后清单里会出现"⛔已失效(勿再选)"。
-        """
-        self.skill_failures[key] = self.skill_failures.get(key, 0) + 1
-        n = self.skill_failures[key]
-        if n < MAX_SKILL_ATTEMPTS:
-            self.log.phase("skill", f"{key} 失败第 {n} 次，仍可重试一次")
-        if self.book is not None:
-            self.context.skill_index = self.book.index(self._unavailable_skills())
-
-    def _first_available_skill(self, task: str):
-        """按任务关键词找第一个命中且仍可用的技能，返回 (技能key, 参数)，无命中返回 None。"""
-        if not self.book:
-            return None
-        hit = match_keywords(task, self.book)
-        if not hit:
-            return None
-        skill, params = hit
-        key = f"{skill.app}.{skill.name}"
-        if not self._skill_available(key):
-            return None
-        return (key, params)
-
     def run_skill(self, state: AgentState) -> dict:
-        """技能节点：直接执行声明式配方（0 次模型调用）；SkillMiss 记录失败并降级 tree/vlm 通用路径。"""
+        """模型选中 Skill 后仅加载指导，随后让模型基于当前观察决定动作。"""
         key, params = self.pending_skill or (None, None)
         if not key:
-            return {"route": "tree"}
-        self.log.phase("skill", f"执行 {key} params={params}")
+            return {"route": self.pending_route, "action": {}, "retry_decision": True}
         try:
-            # log_cb 让 book.run() 每跑完一步就实时写日志——面板在配方执行期间
-            # 就能看到子步骤逐步出现，而不是等配方全跑完才一次性堆出来。
-            trace = self.book.run(key, params, log_cb=lambda s: self.log.phase("skill", s.strip()))
-            self.route_counts["skill"] = self.route_counts.get("skill", 0) + 1
-            self.context.record(state.get("step", 0), "skill", f"SKILL {key}", "声明式配方执行",
-                                detail=f"{len(trace)} 步")
-            return {"action": {"type": "COMPLETE", "explain": f"技能 {key} 执行完成", "result": key},
-                    "last_action": {"type": "SKILL"}}
+            guide = self.book.guidance(key, params)
+            self.context.active_skill_guide = guide
+            self.activated_skills.add(key)
+            self.route_counts["skill_guide"] = self.route_counts.get("skill_guide", 0) + 1
+            self.log.phase("skill", f"加载 {key} 指导（{len(guide)} 字）；未执行 ADB")
+            self.context.record(state.get("step", 0), "skill", f"SKILL {key}", "加载指导，等待模型选择动作")
         except SkillMiss as e:
-            # 关键设计：一个脆弱的配方只花掉一步，然后通用路由接管。
-            # 作为一次“被观测到的降级”记入日志。
-            self._mark_skill_failure(key)
-            self.log.phase("skill", f"配方未命中，降级到通用路径：{e}")
-            self.context.record(state.get("step", 0), "skill", f"SKILL {key}", "hint 解析失败", failed=True,
-                                detail=str(e)[:60])
-            return {"route": "tree" if (self.obs and self.obs.tree_usable) else "vlm", "action": {}}
-        except ADBError as e:
-            self._mark_skill_failure(key)
-            self.log.phase("error", f"技能执行中 ADB 故障：{e}")
-            return {"done": True, "success": False, "status": "error", "error": str(e), "action": {}}
+            self.log.phase("skill", f"指导不可用：{e}")
+            self.context.record(state.get("step", 0), "skill", f"SKILL {key}", str(e), failed=True)
+        finally:
+            self.pending_skill = None
+        # 同一张观察上重新决策；不付一次额外 ADB 采集成本。
+        self.decide_attempts = 0
+        return {"route": self.pending_route, "action": {}, "retry_decision": True}
 
     def decide(self, state: AgentState) -> dict:
         """决策节点：调 GLM 产出本步动作。tree 模式只发控件树纯文本，vlm 模式附网格截图；
@@ -368,39 +309,36 @@ class Runner:
             return {"route": "vlm", "action": {}, "retry_decision": True}
 
         if action.get("type") == "SKILL":
-            # 模型在 decide 步主动选技能（router.py docstring 承诺的能力）。
-            # 必须交给 run_skill 节点执行——act 的 dispatch 表只映射设备动作，
-            # 直接落到那里会报 "no dispatch for SKILL"，白烧一步。
+            # 一步最多加载一次指导，防止模型反复选 SKILL 而不操作界面。
             key, params = self._resolve_skill_choice(action)
-            if key:
+            if key and not self.skill_activated_this_step:
+                self.skill_activated_this_step = True
                 self.pending_skill = (key, params)
-                self.log.phase("route", f"模型选择技能 {key} params={params} → run_skill")
+                self.pending_route = route
+                self.log.phase("route", f"模型选择技能 {key} params={params} → 加载指导，不执行配方")
                 return {"route": "skill", "action": {}, "retry_decision": False}
-            known = self.book.get(str(action.get("skill") or "")) if self.book else None
-            why = "重试次数用尽，已失效" if known is not None else "清单里没有这个技能名"
-            self.log.phase("route", f"技能 {action.get('skill')!r} 不可用（{why}）→ 重新决策")
+            why = "本步已加载过指导" if self.skill_activated_this_step else "技能不存在、缺少指导/参数或已加载过"
+            self.log.phase("route", f"技能 {action.get('skill')!r} 不可用（{why}）→ 下一轮重新观察")
             self.context.record(state.get("step", 0), route, "SKILL",
-                                f"技能不可用（{why}）——请改用其它技能或直接操作控件", failed=True)
+                                f"技能不可用（{why}）——请直接操作当前控件", failed=True)
             return {"action": {}, "retry_decision": False, "no_progress": state.get("no_progress", 0) + 1}
 
         return {"action": action, "route": route, "retry_decision": False}
 
     def _resolve_skill_choice(self, action: dict) -> tuple[str | None, dict]:
-        """把模型写的技能名解析成 SkillBook 的 key。返回 (key, params)，不可用时 key=None。
-
-        模型常只写短名（``search_video``）而非全名（``bilibili.search_video``），
-        ``SkillBook.get`` 已做后缀匹配。重试次数用尽的技能不再接受——否则模型会
-        反复选中同一个跑不通的配方，把步数全烧在同一件事上。
-        """
+        """只接受有指导、有全部参数、且本任务尚未加载过的技能。"""
         if not self.book:
             return None, {}
         skill = self.book.get(str(action.get("skill") or ""))
-        if skill is None:
+        if skill is None or not skill.guide:
             return None, {}
         key = f"{skill.app}.{skill.name}"
-        if not self._skill_available(key):
+        if key in self.activated_skills:
             return None, {}
-        return key, dict(action.get("params") or {})
+        params = action.get("params") or {}
+        if not isinstance(params, dict) or any(not str(params.get(p, "")).strip() for p in skill.params):
+            return None, {}
+        return key, dict(params)
 
     def _action_detail(self, action: dict) -> str:
         """提取动作第一个非空的关键参数（node_ref/grid/text 等），供日志与反思提示词使用。"""
@@ -749,11 +687,11 @@ class Runner:
         return "finish" if state.get("done") else "router"
 
     def after_route(self, state: AgentState) -> str:
-        """条件边：route=skill → run_skill；tree/vlm → decide。"""
-        return {"skill": "run_skill", "tree": "decide", "vlm": "decide"}.get(state.get("route"), "decide")
+        """普通任务的 route 只选择 tree/vlm；Skill 由模型在 decide 中明确选择。"""
+        return "decide"
 
     def after_decide(self, state: AgentState) -> str:
-        """条件边：模型选了技能 → run_skill（复用配方执行与降级逻辑）；
+        """条件边：模型选了技能 → 加载指导；
         本步要求重新决策（tree 降级 vlm）→ 回 decide；否则 → act。"""
         if state.get("route") == "skill":
             return "run_skill"
@@ -761,7 +699,6 @@ class Runner:
 
     def after_act(self, state: AgentState) -> str:
         """条件边：有动作实际执行（last_action 非空）→ verify 结算；无动作（放弃本步）→ 直接回 perceive。"""
-        # 技能步骤本身会改变设备；verify 读取动作后的帧。
         return "verify" if state.get("last_action") else "perceive"
 
     def after_verify(self, state: AgentState) -> str:
@@ -792,10 +729,8 @@ class Runner:
         g.set_entry_point("perceive")
         g.add_edge("perceive", "guard")
         g.add_conditional_edges("guard", self.after_guard, {"finish": "finish", "router": "router"})
-        g.add_conditional_edges("router", self.after_route,
-                                {"run_skill": "run_skill", "decide": "decide"})
-        g.add_conditional_edges("run_skill", lambda s: "act" if (s.get("action") or {}).get("type") else "guard",
-                                {"act": "act", "guard": "guard"})
+        g.add_conditional_edges("router", self.after_route, {"decide": "decide"})
+        g.add_edge("run_skill", "decide")
         # 一个无效的 tree 决策会在 vlm 路由上重新进入 decide 一次
         # （路径 C 降级）；有效决策进入 act。
         g.add_conditional_edges("decide", self.after_decide,
@@ -817,7 +752,7 @@ class Runner:
         # LangGraph 默认 recursion_limit=25 个 superstep；
         # 我们的循环每步约5个节点，20 步大约需要 120。不显式设置的话，长任务会死在一个
         # 看起来像 harness bug 的 GraphRecursionError 上。
-        limit = self.cfg.agent.max_steps * 6 + 20
+        limit = self.cfg.agent.max_steps * 8 + 20
         try:
             final = app.invoke(
                 {"task": self.task, "declared_path": self.cfg.declared_path, "step": 0,

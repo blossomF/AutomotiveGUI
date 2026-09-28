@@ -55,7 +55,15 @@
 
 ## 2. 运行逻辑
 
+先有用户输入，随后才进入本节的 `core.decide`。`route` 按 XML 质量选 tree/VLM；模型可以选择 `SKILL` 加载操作指南，再次进入 `decide` 决定具体动作。完整控制流见[代码流程与联调日志导读](../doc/代码流程与联调日志导读.md)。
+
 ```
+用户文字指令 / 可选语音 → ASR 文本
+   ↓
+main.py → Runner.prepare → perceive(截图 + XML) → guard → route
+   ├─ tree → 文本候选送模型
+   └─ vlm → 网格截图送模型
+   ↓
 core.decide 节点
    │
    ├─ context.trim(cands) ──────────────► context_text（四层拼接，≤ token_budget）
@@ -75,6 +83,8 @@ core.decide 节点
    │     └─ 仍不可用 → ValueError 上抛 → core 降级 tree→vlm / 计无进展步
    │
    └─ 返回 (action, last_call)；action 附带 _progress / _entities
+
+模型若回答 SKILL → core.run_skill 加载指南（无 ADB）→ 同一观察重新进入 core.decide
          → core 把 entities 并入 context，progress 更新滑动层
 
 core.verify 节点（反思路径）

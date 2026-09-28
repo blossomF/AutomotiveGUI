@@ -53,11 +53,11 @@ def cmd_run(args, cfg) -> int:
 
 
 def _run_skill_direct(args, cfg, tools) -> int:
-    """完全跳过模型直接跑一个配方——零 VLM 调用的性能场景。"""
+    """显式 --skill-only 调试入口：跳过模型直接执行配方。"""
     from autogui.skills.base import SkillBook, SkillMiss
 
     book = SkillBook(Path(__file__).resolve().parent / cfg.skills.directory, tools.dev(), tools.text_input())
-    print(f"可用技能：\n{book.index()}\n")
+    print("可用配方：\n" + "\n".join(sorted(book.by_id)) + "\n")
 
     key, _, param = args.task.partition("=")
     key = key.strip()
