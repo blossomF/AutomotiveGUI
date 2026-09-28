@@ -461,7 +461,8 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         _touch()                     # 有请求 = 页面还在
         try:
-            if path in ("/api/settings", "/api/settings/test-model", "/api/settings/test-asr"):
+            if path in ("/api/settings", "/api/settings/test-model", "/api/settings/test-asr",
+                        "/api/settings/apps-device", "/api/settings/apps"):
                 if not self._settings_allowed():
                     self._send_json({"ok": False, "error": "设置仅允许本机访问"}, 403)
                     return
@@ -518,6 +519,18 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/settings/test-asr":
                 try:
                     self._send_json(_settings_api().test_asr(CONFIG_PATH, payload))
+                except Exception as e:
+                    self._send_json({"ok": False, "error": str(e)}, 400)
+            elif path == "/api/settings/apps-device":
+                try:
+                    self._send_json(_settings_api().device_apps(CONFIG_PATH, force=bool(payload.get("force"))))
+                except Exception as e:
+                    self._send_json({"ok": False, "error": f"获取车机应用列表失败：{e}"}, 500)
+            elif path == "/api/settings/apps":
+                try:
+                    with _SETTINGS_LOCK:
+                        saved = _settings_api().save_apps(CONFIG_PATH, payload.get("apps") or [])
+                    self._send_json({"ok": True, **saved})
                 except Exception as e:
                     self._send_json({"ok": False, "error": str(e)}, 400)
             else:
@@ -715,9 +728,19 @@ BASE_CSS = r"""
   .settings-message.error { color:#b91c1c; }
   .settings-message.good { color:#047857; }
   .app-check-list { display:grid; gap:8px; }
-  .app-check-list label { display:flex; align-items:center; gap:8px; padding:8px 10px;
-                          border:1px solid #e4e7eb; border-radius:8px; }
-  .app-check-list small { color:#52606d; overflow-wrap:anywhere; }
+  .app-row { display:flex; align-items:center; gap:8px; padding:8px 10px;
+             border:1px solid #e4e7eb; border-radius:8px; }
+  .app-row input[type=text] { font:inherit; font-size:13px; padding:7px 9px;
+    border:1px solid #cbd2d9; border-radius:7px; background:#fff; min-width:0; }
+  .app-row input[type=text]:focus { border-color:#2563eb; }
+  .app-row .app-check { flex:0 0 auto; width:16px; height:16px; cursor:pointer; }
+  .app-row .app-name { flex:1 1 110px; }
+  .app-row .app-pkg { flex:2 1 220px; }
+  .app-row .app-alias { flex:1 1 90px; }
+  .app-row.filled .app-pkg { border-color:#059669; background:#ecfdf5; }
+  .app-row .app-del { flex:0 0 auto; border:1px solid #fca5a5; background:#fff;
+    color:#dc2626; border-radius:7px; padding:6px 10px; cursor:pointer; font-size:13px; }
+  .app-row .app-del:hover { background:#fee2e2; }
   .eye-wrap { position:relative; display:flex; align-items:center; }
   .eye-wrap input { flex:1; padding-right:38px; }
   .eye-btn { position:absolute; right:8px; top:50%; transform:translateY(-50%);
@@ -1129,32 +1152,88 @@ loadTasks(qsTask);
 
 SETTINGS_JS = r"""
 let screenPreview = null;
-function renderAppChecks(apps){
+let devicePackages = [];
+function appRows(){
+  const rows=[];
+  document.querySelectorAll('#appCheckList .app-row').forEach(row=>{
+    rows.push({
+      name:row.querySelector('.app-name').value.trim(),
+      package:row.querySelector('.app-pkg').value.trim(),
+      aliases:row.querySelector('.app-alias').value.split(/[,，、;；]/).map(s=>s.trim()).filter(Boolean),
+      checked:row.querySelector('.app-check').checked
+    });
+  });
+  return rows;
+}
+function markDirty(row){ row.dataset.dirty='1'; }
+function buildAppRow(app){
+  app=app||{};
+  const row=document.createElement('div'); row.className='app-row';
+  const cb=document.createElement('input'); cb.type='checkbox'; cb.className='app-check';
+  cb.checked=Boolean(app.checked); cb.title='勾选=参与 --check 包名核对与任务直启';
+  const name=document.createElement('input'); name.type='text'; name.className='app-name';
+  name.placeholder='应用名称（如 美团）'; name.value=app.name||'';
+  const pkg=document.createElement('input'); pkg.type='text'; pkg.className='app-pkg';
+  pkg.list='devicePackages'; pkg.placeholder='包名（如 com.xxx.yyy，可自动补全）'; pkg.value=app.package||'';
+  const alias=document.createElement('input'); alias.type='text'; alias.className='app-alias';
+  alias.placeholder='别名（逗号分隔，可选）'; alias.value=(app.aliases||[]).join(', ');
+  const del=document.createElement('button'); del.type='button'; del.className='app-del';
+  del.textContent='删除'; del.onclick=()=>{ row.remove(); };
+  [name,pkg,alias].forEach(el=>el.addEventListener('input',()=>markDirty(row)));
+  cb.addEventListener('change',()=>markDirty(row));
+  row.append(cb,name,pkg,alias,del);
+  return row;
+}
+function renderAppRows(apps){
   const container=$('#appCheckList');
   container.replaceChildren();
-  if(!apps.length){ container.textContent='config.yaml 尚未配置应用。'; return; }
-  for(const app of apps){
-    const label=document.createElement('label');
-    const checkbox=document.createElement('input');
-    checkbox.type='checkbox'; checkbox.className='app-check';
-    checkbox.dataset.name=app.name; checkbox.checked=Boolean(app.checked);
-    const name=document.createElement('strong'); name.textContent=app.name;
-    const pkg=document.createElement('small'); pkg.textContent=app.package || '未填写包名';
-    label.append(checkbox,name,pkg); container.append(label);
+  if(!apps.length){
+    const hint=document.createElement('p'); hint.className='settings-hint';
+    hint.textContent='config.yaml 尚未配置应用。点击下方「+ 添加应用」。';
+    container.append(hint);
+    return;
   }
+  for(const app of apps) container.append(buildAppRow(app));
 }
+function normToken(s){ return String(s).toLowerCase().replace(/[^a-z0-9]/g,''); }
+function autoFillEmpty(){
+  let filled=0;
+  document.querySelectorAll('#appCheckList .app-row').forEach(row=>{
+    if(row.dataset.dirty!=='1') return;
+    const pkgInput=row.querySelector('.app-pkg');
+    if(pkgInput.value.trim()) return;
+    const tokens=[row.querySelector('.app-name').value.trim(),
+      ...row.querySelector('.app-alias').value.split(/[,，、;；]/).map(s=>s.trim()).filter(Boolean)];
+    const candidates=new Set();
+    for(const token of tokens){
+      const n=normToken(token);
+      if(n.length<3) continue;
+      for(const p of devicePackages){ if(normToken(p).includes(n)) candidates.add(p); }
+    }
+    if(candidates.size===1){
+      pkgInput.value=[...candidates][0];
+      row.classList.add('filled');
+      filled++;
+    }
+  });
+  return filled;
+}
+function numOrNull(id){ const v=$(id).value.trim(); return v==='' ? undefined : Number(v); }
 function settingsPayload(){
   return {
     model: {url:$('#modelUrl').value.trim(), name:$('#modelName').value.trim(),
-            api_key:$('#apiKey').value.trim()},
+            api_key:$('#apiKey').value.trim(),
+            temperature:numOrNull('#modelTemperature'), max_tokens:numOrNull('#modelMaxTokens'),
+            timeout:numOrNull('#modelTimeout'), max_retries:numOrNull('#modelMaxRetries')},
     voice: {appid:$('#voiceAppid').value.trim(),
             api_key:$('#voiceApiKey').value.trim(),
             api_secret:$('#voiceApiSecret').value.trim(),
-            iat_url:$('#voiceIatUrl').value.trim()},
+            iat_url:$('#voiceIatUrl').value.trim(),
+            max_seconds:numOrNull('#voiceMaxSeconds'), silence_seconds:numOrNull('#voiceSilenceSeconds'),
+            silence_threshold:numOrNull('#voiceSilenceThreshold')},
     grid: {mode:$('#gridManual').checked ? 'manual' : 'auto',
            cols:Number($('#gridCols').value), rows:Number($('#gridRows').value)},
-    check_packages:Array.from(document.querySelectorAll('.app-check:checked'),
-                              checkbox=>checkbox.dataset.name)
+    apps: appRows()
   };
 }
 function status(id, message, good){
@@ -1183,6 +1262,10 @@ async function readSettings(){
     $('#modelUrl').value = data.model.url;
     $('#modelName').value = data.model.name;
     $('#apiKey').value = data.model.api_key || '';
+    $('#modelTemperature').value = data.model.temperature;
+    $('#modelMaxTokens').value = data.model.max_tokens;
+    $('#modelTimeout').value = data.model.timeout;
+    $('#modelMaxRetries').value = data.model.max_retries;
     $('#gridManual').checked = data.grid.mode === 'manual';
     $('#gridCols').value = data.grid.cols;
     $('#gridRows').value = data.grid.rows;
@@ -1190,7 +1273,10 @@ async function readSettings(){
     $('#voiceApiKey').value = data.voice.api_key || '';
     $('#voiceApiSecret').value = data.voice.api_secret || '';
     $('#voiceIatUrl').value = data.voice.iat_url || '';
-    renderAppChecks(data.apps || []);
+    $('#voiceMaxSeconds').value = data.voice.max_seconds;
+    $('#voiceSilenceSeconds').value = data.voice.silence_seconds;
+    $('#voiceSilenceThreshold').value = data.voice.silence_threshold;
+    renderAppRows(data.apps || []);
     updateGrid();
   } catch(error){ status('#saveStatus', error.message, false); }
 }
@@ -1245,7 +1331,10 @@ $('#saveBtn').onclick = async () => {
     $('#voiceApiKey').value = data.voice.api_key || '';
     $('#voiceApiSecret').value = data.voice.api_secret || '';
     $('#voiceIatUrl').value = data.voice.iat_url || '';
-    renderAppChecks(data.apps || []);
+    $('#voiceMaxSeconds').value = data.voice.max_seconds;
+    $('#voiceSilenceSeconds').value = data.voice.silence_seconds;
+    $('#voiceSilenceThreshold').value = data.voice.silence_threshold;
+    renderAppRows(data.apps || []);
     status('#saveStatus', '设置已保存；新任务会读取新配置。', true);
     updateGrid();
   } catch(error){ status('#saveStatus', error.message, false); }
@@ -1265,6 +1354,33 @@ document.querySelectorAll('.eye-btn').forEach(btn => {
     }
   });
 });
+$('#addAppBtn').onclick = () => {
+  const row = buildAppRow({});
+  markDirty(row);
+  $('#appCheckList').append(row);
+  row.querySelector('.app-name').focus();
+};
+$('#reloadAppsBtn').onclick = async () => {
+  const button = $('#reloadAppsBtn'); button.disabled = true;
+  const st = $('#appsDeviceStatus');
+  st.className = 'settings-message good';
+  st.textContent = '正在从车机获取已安装应用列表…';
+  try {
+    const data = await postSettings('/api/settings/apps-device', {});
+    if(!data.ok) throw new Error(data.error || '获取应用列表失败');
+    devicePackages = data.packages || [];
+    const dl = $('#devicePackages'); dl.replaceChildren();
+    for(const p of devicePackages){ const o=document.createElement('option'); o.value=p; dl.append(o); }
+    const filled = autoFillEmpty();
+    st.textContent = `已获取 ${data.count} 个应用包名${data.cached ? '（短缓存）' : ''}；自动补全 ${filled} 项，正在缓存…`;
+    const saved = await postSettings('/api/settings/apps', {apps: appRows()});
+    renderAppRows(saved.apps || []);
+    st.textContent = `完成：获取 ${data.count} 个应用包名，自动补全 ${filled} 项；应用配置已缓存到 config.yaml，adb 可直接打开。`;
+  } catch(error){
+    st.className = 'settings-message error';
+    st.textContent = '重新加载失败：' + error.message;
+  } finally { button.disabled = false; }
+};
 readSettings(); readPreview();
 """
 
@@ -1371,6 +1487,12 @@ PAGE_SETTINGS_TPL = r"""<!DOCTYPE html>
         <button type="button" class="eye-btn" data-target="apiKey" title="显示/隐藏">eye</button>
       </div>
     </label>
+    <div class="settings-row">
+      <label class="field">Temperature<input id="modelTemperature" type="number" step="0.1" min="0" max="2" placeholder="0.1"></label>
+      <label class="field">Max Tokens<input id="modelMaxTokens" type="number" step="1" min="1" placeholder="2048"></label>
+      <label class="field">Timeout（秒）<input id="modelTimeout" type="number" step="1" min="1" placeholder="60"></label>
+      <label class="field">Max Retries<input id="modelMaxRetries" type="number" step="1" min="0" max="10" placeholder="4"></label>
+    </div>
     <div class="settings-actions"><button id="verifyBtn" type="button">验证连接</button></div>
     <div id="verifyStatus" class="settings-message" role="status" aria-live="polite"></div>
   </section>
@@ -1387,6 +1509,11 @@ PAGE_SETTINGS_TPL = r"""<!DOCTYPE html>
         </div>
       </label>
       <label class="field">请求地址<input id="voiceIatUrl" type="text" placeholder="留空 = 讯飞公网 wss://iat-api.xfyun.cn/v2/iat"></label>
+      <div class="settings-row">
+        <label class="field">最长录音（秒）<input id="voiceMaxSeconds" type="number" step="1" min="3" max="120" placeholder="15"></label>
+        <label class="field">静音停止（秒）<input id="voiceSilenceSeconds" type="number" step="0.1" min="0.2" max="5" placeholder="0.8"></label>
+        <label class="field">静音阈值 RMS<input id="voiceSilenceThreshold" type="number" step="1" min="50" max="3000" placeholder="120"></label>
+      </div>
       <div class="settings-actions"><button id="asrVerifyBtn" type="button">验证连接</button></div>
       <div id="asrVerifyStatus" class="settings-message" role="status" aria-live="polite"></div>
     </div>
@@ -1403,9 +1530,15 @@ PAGE_SETTINGS_TPL = r"""<!DOCTYPE html>
   </section>
 
   <section class="settings-card">
-    <h2>应用包名核对与快速打开</h2>
-    <p class="settings-hint">只勾选 config.yaml 已配置的应用。--check 最后核对它们是否安装；明确的打开指令可直接通过 ADB 启动。</p>
+    <h2>应用配置</h2>
+    <p class="settings-hint">此处配置需要做任务的三方应用；勾选的应用参与 --check 最后一步包名核对与任务直启。可增删改；「重新加载」会从车机获取已安装应用列表用于包名补全，并把当前应用清单（含新改的包名）缓存到 config.yaml，供 adb 直接打开。</p>
     <div id="appCheckList" class="app-check-list">正在读取应用配置…</div>
+    <div class="settings-actions">
+      <button id="addAppBtn" type="button">+ 添加应用</button>
+      <button id="reloadAppsBtn" type="button">重新加载</button>
+    </div>
+    <div id="appsDeviceStatus" class="settings-message" role="status" aria-live="polite"></div>
+    <datalist id="devicePackages"></datalist>
   </section>
 
   <div class="settings-actions"><button id="saveBtn" class="primary" type="button">保存设置</button></div>

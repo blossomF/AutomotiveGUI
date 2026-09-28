@@ -34,6 +34,7 @@ class InputResult:
         self.typed = typed        # 实际发出去的内容（可能与请求不同）
         self.note = note
         self.fallback_needed = strategy == "ascii" and typed != "" and not typed.isascii()
+        self.pinyin_fallback = False  # 拼音首字母回退标志：调用方应跳过 ENTER，等 agent 点联想词
 
     def __repr__(self) -> str:  # pragma: no cover - 调试辅助
         return f"InputResult(strategy={self.strategy!r}, typed={self.typed!r}, note={self.note!r})"
@@ -185,6 +186,17 @@ class TextInput:
     def _via_ascii(self, text: str, delay: float) -> InputResult:
         folded = ascii_typeable(text)
         if not folded.strip():
+            # 纯中文（无 ASCII 形式）：输入拼音首字母简写，靠 App 联想候选，
+            # 由 agent 下一轮点选；不发 ENTER（提交会搜拼音原词，且挡住联想条）。
+            initials = to_pinyin_initials(text)
+            if initials:
+                self.device.adb("shell", "input", "text", input_text_arg(initials), timeout=10)
+                time.sleep(delay)
+                r = InputResult("ascii", initials,
+                                f"pinyin-initials fallback from {text!r} to {initials!r}; "
+                                f"ENTER skipped — click the matching app suggestion")
+                r.pinyin_fallback = True
+                return r
             return InputResult("ascii", "", f"cannot type {text!r}: no ASCII form. Tap a suggestion strip instead.")
         self.device.adb("shell", "input", "text", input_text_arg(folded), timeout=10)
         time.sleep(delay)
@@ -215,3 +227,24 @@ def to_pinyin_fallback(text: str) -> str:
     """
     ascii_part = re.sub(r"[^A-Za-z0-9]", "", text)
     return ascii_part
+
+
+def to_pinyin_initials(text: str) -> str:
+    """中文转拼音首字母简写（如“兰州拉面” -> "lzl m" -> "lzlm"）。
+    
+    仅当 pypinyin 可用且文本包含 CJK 字符时返回结果，否则返回空字符串。
+    用于 ascii 降级时的搜索框兜底输入。
+    """
+    cjk_chars = [ch for ch in text if '\u4e00' <= ch <= '\u9fff']
+    if not cjk_chars:
+        return ""
+    try:
+        from pypinyin import lazy_pinyin, Style
+    except ImportError:
+        return ""
+    initials = []
+    for ch in cjk_chars:
+        py = lazy_pinyin(ch, style=Style.FIRST_LETTER)
+        if py:
+            initials.append(py[0])
+    return "".join(initials).lower()

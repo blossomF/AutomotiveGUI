@@ -307,16 +307,24 @@ class Device:
         out = self.adb_soft("shell", "dumpsys", "SurfaceFlinger", "--display-id", timeout=timeout).stdout
         return [m for m in re.findall(r"Display ID:\s*(\d+)", out)]
 
-    def dump_xml(self, remote: str = "/sdcard/autogui_ui.xml", timeout: float = 15) -> str:
+    def dump_xml(self, remote: str = "/sdcard/autogui_ui.xml", timeout: float = 8) -> str:
         """以 uiautomator XML 形式获取 UI 层级。
 
         ``uiautomator dump`` 默认拒绝覆盖，所以先删。再用一次
         ``exec-out cat`` 读回文件，避免第二次 adb 传输。
         （原文 adb.py:456-463，去掉 portal 快速通道——见 A-1）
+
+        超时取 8s：WebView 重的页面（如车机/手机 H5 搜索页）uiautomator
+        可能挂起 10s+ 且最终仍返回空树（实测 11.4s/0 节点）。宁可快速
+        失败返回空树，让 route 走 VLM 网格兜底。
         """
         started = time.perf_counter()
-        self.adb_soft("shell", "rm", "-f", remote, timeout=timeout)
-        r = self.adb_soft("shell", "uiautomator", "dump", remote, timeout=timeout)
+        try:
+            self.adb_soft("shell", "rm", "-f", remote, timeout=timeout)
+            r = self.adb_soft("shell", "uiautomator", "dump", remote, timeout=timeout)
+        except ADBError as e:  # rm/dump 挂起超时 → 按空树处理，走 VLM 兜底
+            self._trace_xml("", started, "timeout", str(e)[:200], remote)
+            return ""
         if not r.ok and "dump failed" in (r.stdout + r.stderr).lower():
             xml = ""
             self._trace_xml(xml, started, "dump_failed", (r.stdout + " " + r.stderr).strip(), remote)

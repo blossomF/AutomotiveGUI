@@ -175,8 +175,9 @@ def cmd_check(cfg) -> int:
     if total >= 4500:
         warn("采集速度", f"串行合计 {total:.0f}ms ≥ 4500ms")
 
-    # 最后核对设置页勾选的应用；只记录配置中的目标，不枚举其他 App。
-    selected = [app for app in cfg.apps if app.in_scope and app.name in cfg.check_packages]
+    # 最后核对设置页勾选的应用；check_packages 为空时默认核对 美团/QQ音乐/哔哩哔哩。
+    names = cfg.check_packages or ("美团", "QQ音乐", "哔哩哔哩")
+    selected = [app for app in cfg.apps if app.in_scope and app.name in names]
     if selected:
         try:
             installed = set(device.list_packages())

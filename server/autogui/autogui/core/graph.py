@@ -398,8 +398,18 @@ class Runner:
             if action.get("submit"):
                 # 搜索类输入框：输完补发 ENTER 触发提交并收起遮挡结果的软键盘
                 # （车机实测 KEYCODE_ENTER 同时完成两件事；普通表单不带 submit）。
-                ex.call("keyevent", key="KEYCODE_ENTER")
-                r = (r + " + ENTER(submit)").strip(" +")
+                # 例外：ascii 降级为拼音首字母时跳过 ENTER——靠 App 联想候选，
+                # 由 agent 下一轮点击；实际没输进任何字符时更不能 ENTER
+                # （会把搜索框残留文本提交出去，制造错误搜索结果）。
+                from autogui.bridge import tools as _tools
+                lr = _tools.last_input_result()
+                if lr is not None and lr.pinyin_fallback:
+                    r = r + " [ENTER skipped: pinyin-initials typed, click the matching app suggestion]"
+                elif lr is None or not (lr.typed or "").strip():
+                    r = r + " [ENTER skipped: nothing actually typed]"
+                else:
+                    ex.call("keyevent", key="KEYCODE_ENTER")
+                    r = (r + " + ENTER(submit)").strip(" +")
             return r
         if a_type == "SCROLL":
             return self._scroll(action["direction"])

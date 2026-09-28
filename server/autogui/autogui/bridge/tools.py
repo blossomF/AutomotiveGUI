@@ -22,10 +22,11 @@ import base64
 import time
 
 from autogui.bridge.adb import ADBError, Device, find_node, get_device, nodes
-from autogui.bridge.input import STRATEGIES, TextInput
+from autogui.bridge.input import STRATEGIES, TextInput, InputResult, InputResult
 
 _device: Device | None = None
 _text_input: TextInput | None = None
+_last_input_result: "InputResult | None" = None
 
 
 def bind_device(serial: str | None = "auto", *, input_chain: list[str] | None = None,
@@ -130,9 +131,16 @@ def swipe(x1: int, y1: int, x2: int, y2: int, ms: int = 400) -> str:
 
 def input_text(text: str, clear_first: bool = False) -> str:
     """输入到聚焦的输入框，按 yadb -> ADBKeyboard -> ASCII 降级。"""
+    global _last_input_result
     result = text_input().type(text, clear_first=clear_first)
+    _last_input_result = result
     note = f" [{result.note}]" if result.note else ""
     return f"OK input({result.strategy}) sent={result.typed!r}{note}"
+
+
+def last_input_result() -> "InputResult | None":
+    """最近一次 input_text 的 InputResult（同进程内供 graph 判断是否发 ENTER）。"""
+    return _last_input_result
 
 
 def keyevent(key: str) -> str:

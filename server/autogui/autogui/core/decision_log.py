@@ -128,12 +128,15 @@ class DecisionLog:
         except OSError:
             return None
 
-    def save_text(self, name: str, content: str) -> Path | None:
+    # 按内容类型给中间产物选扩展名（xml/glm 交互本是 XML/JSON，不再一律 .txt）
+    _KIND_EXT = {"xml": "xml", "glm_request": "json", "glm_response": "json"}
+
+    def save_text(self, name: str, content: str, *, extension: str = "txt") -> Path | None:
         """落盘文本文件，仅debug模式。返回文件路径。"""
         if not self.debug or not hasattr(self, 'debug_dir') or not self.debug_dir:
             return None
         try:
-            path = self.debug_dir / f"{name}.txt"
+            path = self.debug_dir / f"{name}.{extension}"
             path.write_text(content, encoding='utf-8')
             return path
         except OSError:
@@ -145,7 +148,7 @@ class DecisionLog:
             return None
         self._artifact_seq += 1
         name = f"step{self.step:02d}_{self._artifact_seq:04d}_{kind}"
-        path = self.save_text(name, content)
+        path = self.save_text(name, content, extension=self._KIND_EXT.get(kind, "txt"))
         self.phase(kind, f"{kind} → {path.name if path else '保存失败'}",
                    artifact=path.name if path else "", chars=len(content), **metrics)
         return path

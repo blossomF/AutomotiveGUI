@@ -66,8 +66,10 @@ glm:
   api_key: "ENC(AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAAUGqbIjO8Fk2fZGdpE2yBUgAAAAACAAAAAAAQZgAAAAEAACAAAACuF92hL5K0/JPysPJgg/iXRJ3MkmjemEawp8Bur9QsugAAAAAOgAAAAAIAACAAAAD0Ah8tqzY0YP2HgbYuIjYVjYxg/dwn/mr+rO0kslMTQCAAAADG7kFt1WwSmlavlcSKRsGaRRu+zM2TeqOOAwVi95MPy0AAAACUOffnwUuJ77gKIeXDAxUIhhoyBVutrY6eCwXPnKc9BLN+WaPxFgiwOci9IhUAIrE1OHFiaRdQBX80jAZYUVPz)" # 留空 → 回退 GLM_API_KEY 环境变量（我们的 ThunderSoft 官方 key）
   api_key_env: GLM_API_KEY
   temperature: 0.1
-  max_tokens: 2048    # ts-glm-53-flash 带思维链，思维链也计入 completion_tokens：
-                      # 1024 会被吃满（实测 10 次调用用掉 10132 tok ≈ 每次撞上限）→ 输出截断→重试
+  max_tokens: 4096    # 【标记：ts-glm-53-flash 思维链模型，需单独适配】思维链也计入
+                      # completion_tokens：2048 容易被思维链吃满 → 输出截断/空响应
+                      # （9/28 美团外卖任务实测 2 次 empty completion，重试各多花 15~32s）。
+                      # 已提升至 4096；若仍出现截断，继续上调并观察单步耗时。
   timeout: 60         # 正常决策实测 5~30s；60s 上限既覆盖慢响应，又让挂死请求
                       # 尽快超时进入重试（120s 时单步挂死会直接吃掉整个任务预算）
   max_retries: 4       # 网关间歇故障会伪装成 400 roles/超时且可自愈：指数退避 1/2/4/8s，共 5 次撞健康实例
@@ -80,18 +82,14 @@ check_packages: [QQ音乐, 哔哩哔哩, 飞书]
 apps:
   - name: QQ音乐
     aliases: [QQ Music]
-    package: com.mosi.mosc.onlinemedia.qqmusic      # 车机实测已装；测试任务集 TK-QQ-* 全部针对它
-  - name: 酷我音乐
-    package: com.mosi.mosc.onlinemedia.kuwomusic   # 车机另有 kugoumusic/wyymusic，勿与 QQ音乐 混
-  - name: 导航
-    package: com.fawvw.vehicle.navi.ceaapp         # 原厂导航；车机另有 com.baidu.mapauto.pass
+    package: com.mosi.mosc.onlinemedia.qqmusic
   - name: 哔哩哔哩
     aliases: [B站]
-    package: com.bilibili.bilithings               # 车机版（原 tv.danmaku.bili 是手机版，车机无此包）
+    package: com.bilibili.bilithings
   - name: 飞书
-    package: com.ss.android.lark                   # 车机版（原 com.lark.android.mcloud 车机无此包）
-  - name: 外卖
-    package: com.sankuai.meituan.car               # 美团车机版（原 takeoutnew 车机无此包）
+    package: com.ss.android.lark
+  - name: 美团
+    package: com.sankuai.meituan.car
 
 log_dir: artifacts/logs
 verbose: true

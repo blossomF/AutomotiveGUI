@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -29,6 +30,16 @@ def _model_fields(payload: dict, current: Config) -> tuple[str, str, str]:
     if not name:
         raise ValueError("模型名称不能为空")
     return url, name, key
+
+
+def _num_field(raw: dict, key: str, fallback: object, caster) -> object:
+    """读取可选数字字段；未填/留空时沿用当前值，非法值直接拒绝。"""
+    if key not in raw or raw[key] in ("", None):
+        return fallback
+    try:
+        return caster(raw[key])
+    except (TypeError, ValueError):
+        raise ValueError(f"{key} 必须是数字")
 
 
 def _grid_fields(payload: dict, current: Config) -> GridConfig:
@@ -63,15 +74,23 @@ def public_settings(config_path: Path) -> dict:
     return {
         "model": {"url": cfg.glm.base_url, "name": cfg.glm.model,
                   "api_key": _plain(str(glm_raw.get("api_key") or "")),
-                  "api_key_configured": bool(cfg.glm.api_key)},
+                  "api_key_configured": bool(cfg.glm.api_key),
+                  "temperature": cfg.glm.temperature,
+                  "max_tokens": cfg.glm.max_tokens,
+                  "timeout": cfg.glm.timeout,
+                  "max_retries": cfg.glm.max_retries},
         "grid": {"mode": cfg.grid.mode, "cols": cfg.grid.cols, "rows": cfg.grid.rows},
         "voice": {
             "appid": str(voice_raw.get("appid") or ""),
             "api_key": str(voice_raw.get("api_key") or ""),
             "api_secret": _plain(str(voice_raw.get("api_secret") or "")),
             "iat_url": str(voice_raw.get("iat_url") or ""),
+            "max_seconds": cfg.voice.max_seconds,
+            "silence_seconds": cfg.voice.silence_seconds,
+            "silence_threshold": cfg.voice.silence_threshold,
         },
         "apps": [{"name": app.name, "package": app.package,
+                  "aliases": list(app.aliases or []),
                   "checked": app.name in cfg.check_packages} for app in cfg.apps if app.in_scope],
     }
 
@@ -128,17 +147,158 @@ def _replace_top_level(source: str, key: str, value: object) -> str:
     return "".join(lines)
 
 
+_PKG_RE = re.compile(r"^[A-Za-z0-9._]+$")
+_SAFE_SCALAR_RE = re.compile(r"^[A-Za-z0-9_\u4e00-\u9fff.\-+]+$")
+
+
+def _yaml_scalar(value: str) -> str:
+    """无特殊字符的标量裸写（与 config.yaml 现有风格一致），否则 JSON 引号。"""
+    return value if _SAFE_SCALAR_RE.fullmatch(value) else json.dumps(value, ensure_ascii=False)
+
+
+def _apps_fields(payload: dict) -> list | None:
+    """解析并校验前端提交的 apps 列表；payload 无 apps 键时返回 None。"""
+    if "apps" not in payload:
+        return None
+    raw = payload["apps"]
+    if not isinstance(raw, list):
+        raise ValueError("apps 必须是列表")
+    out = []
+    seen = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ValueError("apps 每一项必须是对象")
+        name = str(item.get("name") or "").strip()
+        if not name:
+            raise ValueError("应用名称不能为空")
+        if name in seen:
+            raise ValueError(f"应用名称重复：{name}")
+        seen.add(name)
+        package = str(item.get("package") or "").strip()
+        if package and not _PKG_RE.fullmatch(package):
+            raise ValueError(f"包名不合法：{package}（仅允许字母、数字、点、下划线）")
+        aliases_raw = item.get("aliases") or []
+        if isinstance(aliases_raw, str):
+            aliases_raw = [a for a in re.split(r"[,，、;；\s]+", aliases_raw) if a]
+        if not isinstance(aliases_raw, list) or not all(isinstance(a, str) for a in aliases_raw):
+            raise ValueError(f"应用 {name} 的别名必须是字符串列表")
+        out.append({
+            "name": name,
+            "package": package,
+            "aliases": [a.strip() for a in aliases_raw if str(a).strip()],
+            "checked": bool(item.get("checked", False)),
+        })
+    return out
+
+
+def _replace_apps_section(source: str, apps: list) -> str:
+    """整段重写 apps: 配置块，其余行与注释保留；段缺失时插入到 log_dir 之前。"""
+    lines = source.splitlines(keepends=True)
+    newline = "\r\n" if "\r\n" in source else "\n"
+    entries = []
+    for app in apps:
+        entries.append(f"  - name: {_yaml_scalar(app['name'])}")
+        if app["aliases"]:
+            entries.append(f"    aliases: {json.dumps(app['aliases'], ensure_ascii=False)}")
+        if app["package"]:
+            entries.append(f"    package: {_yaml_scalar(app['package'])}")
+    head = next((i for i, line in enumerate(lines) if line.startswith("apps:")), None)
+    if head is None:
+        pos = next((i for i, line in enumerate(lines) if line.startswith("log_dir:")), len(lines))
+        block = ["apps:"] + entries if entries else ["apps: []"]
+        lines[pos:pos] = [f"{l}{newline}" for l in block]
+        return "".join(lines)
+    if lines[head][len("apps:"):].strip():
+        lines[head:head + 1] = (["apps:"] + entries) if entries else [f"apps: []{newline}"]
+        return "".join(lines)
+    tail = next((i for i in range(head + 1, len(lines))
+                 if lines[i].strip() and not lines[i][0].isspace()
+                 and not lines[i].lstrip().startswith("#")), len(lines))
+    if entries:
+        lines[head + 1:tail] = [f"{l}{newline}" for l in entries]
+    else:
+        lines[head] = f"apps: []{newline}"
+        del lines[head + 1:tail]
+    return "".join(lines)
+
+
+def _atomic_write(config_path: Path, updated: str) -> None:
+    """先用正式配置解析器验证一次，再同目录原子替换写盘。"""
+    import yaml
+
+    Config(**(yaml.safe_load(updated) or {}))
+    temp_name = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", delete=False,
+                                         dir=config_path.parent, prefix=".autogui-settings-") as temp:
+            temp.write(updated)
+            temp_name = temp.name
+        os.replace(temp_name, config_path)
+    finally:
+        if temp_name and os.path.exists(temp_name):
+            os.unlink(temp_name)
+
+
+def save_apps(config_path: Path, apps: list) -> dict:
+    """只保存应用清单：重写 apps: 段，check_packages 由勾选项推导；不动模型/ASR/网格字段。"""
+    parsed = _apps_fields({"apps": apps})
+    if parsed is None:
+        raise ValueError("apps 必须是列表")
+    updated = _replace_apps_section(config_path.read_text(encoding="utf-8"), parsed)
+    updated = _replace_top_level(updated, "check_packages",
+                                 [a["name"] for a in parsed if a["checked"]])
+    _atomic_write(config_path, updated)
+    return public_settings(config_path)
+
+
+_DEVICE_APPS_TTL = 120.0
+_DEVICE_APPS_CACHE: dict = {"ts": 0.0, "packages": None}
+
+
+def device_apps(config_path: Path, force: bool = False) -> dict:
+    """从车机拉取已安装应用包名（短缓存；与 main.py --packages 同口径过滤系统前缀）。
+
+    供设置页「重新加载」做包名补全与核对。
+    """
+    now = time.time()
+    cached = _DEVICE_APPS_CACHE["packages"]
+    if not force and cached is not None and now - _DEVICE_APPS_CACHE["ts"] < _DEVICE_APPS_TTL:
+        return {"ok": True, "packages": cached, "cached": True, "count": len(cached)}
+    cfg = Config.load(config_path)
+    from autogui.bridge.adb import get_device
+
+    device = get_device(cfg.device_serial, display=cfg.display_id)
+    packages = device.list_packages()
+    interesting = [p for p in packages
+                   if not p.startswith(("com.android.", "android.", "com.google."))]
+    _DEVICE_APPS_CACHE["ts"] = now
+    _DEVICE_APPS_CACHE["packages"] = interesting
+    return {"ok": True, "packages": interesting, "cached": False, "count": len(interesting)}
+
+
 def save_settings(config_path: Path, payload: dict) -> dict:
     """校验后原子保存。api_key 和 api_secret 加密存储，其余明文。"""
     current = Config.load(config_path)
     url, name, key = _model_fields(payload, current)
     grid = _grid_fields(payload, current)
-    selected = payload.get("check_packages", current.check_packages)
-    known_apps = {app.name for app in current.apps if app.in_scope}
-    if (not isinstance(selected, list) or any(not isinstance(name, str) or name not in known_apps
-                                               for name in selected) or len(selected) != len(set(selected))):
-        raise ValueError("包名核对名单只能选择配置文件中已有的应用，且不能重复")
-    model_updates: dict[str, object] = {"base_url": url, "model": name}
+    apps = _apps_fields(payload)
+    if apps is not None:
+        # 表单提交了应用清单：check_packages 由勾选项推导
+        selected = [a["name"] for a in apps if a["checked"]]
+    else:
+        selected = payload.get("check_packages", current.check_packages)
+        known_apps = {app.name for app in current.apps if app.in_scope}
+        if (not isinstance(selected, list) or any(not isinstance(name, str) or name not in known_apps
+                                                   for name in selected) or len(selected) != len(set(selected))):
+            raise ValueError("包名核对名单只能选择配置文件中已有的应用，且不能重复")
+    model_raw = payload.get("model") or {}
+    model_updates: dict[str, object] = {
+        "base_url": url, "model": name,
+        "temperature": _num_field(model_raw, "temperature", current.glm.temperature, float),
+        "max_tokens": _num_field(model_raw, "max_tokens", current.glm.max_tokens, int),
+        "timeout": _num_field(model_raw, "timeout", current.glm.timeout, float),
+        "max_retries": _num_field(model_raw, "max_retries", current.glm.max_retries, int),
+    }
     if key:
         from autogui.security import encrypt
         model_updates["api_key"] = encrypt(key)
@@ -157,6 +317,9 @@ def save_settings(config_path: Path, payload: dict) -> dict:
         if api_secret:
             voice_updates["api_secret"] = _enc(api_secret)
         voice_updates["iat_url"] = iat_url
+        voice_updates["max_seconds"] = _num_field(voice_raw, "max_seconds", current.voice.max_seconds, float)
+        voice_updates["silence_seconds"] = _num_field(voice_raw, "silence_seconds", current.voice.silence_seconds, float)
+        voice_updates["silence_threshold"] = _num_field(voice_raw, "silence_threshold", current.voice.silence_threshold, int)
     updates = {
         "glm": model_updates,
         "grid": {"mode": grid.mode, "cols": grid.cols, "rows": grid.rows},
@@ -164,20 +327,10 @@ def save_settings(config_path: Path, payload: dict) -> dict:
     if voice_updates:
         updates["voice"] = voice_updates
     updated = _replace_fields(config_path.read_text(encoding="utf-8"), updates)
+    if apps is not None:
+        updated = _replace_apps_section(updated, apps)
     updated = _replace_top_level(updated, "check_packages", selected)
-    # 再用正式配置解析器验证一次，写盘采用同目录原子替换。
-    import yaml
-    Config(**(yaml.safe_load(updated) or {}))
-    temp_name = None
-    try:
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", delete=False,
-                                         dir=config_path.parent, prefix=".autogui-settings-") as temp:
-            temp.write(updated)
-            temp_name = temp.name
-        os.replace(temp_name, config_path)
-    finally:
-        if temp_name and os.path.exists(temp_name):
-            os.unlink(temp_name)
+    _atomic_write(config_path, updated)
     return public_settings(config_path)
 
 
