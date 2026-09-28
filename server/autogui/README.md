@@ -195,7 +195,7 @@ Automotive GUI Agent  |  路径 C  |  exec=local
 
 ## 6. 配置
 
-全在 `config.yaml`，默认值见 `autogui/config.py`。最常改的四个：
+全在 `config.yaml`，默认值见 `autogui/config.py`。常改的配置：
 
 | 键 | 默认 | 什么时候改 |
 |---|---|---|
@@ -203,6 +203,7 @@ Automotive GUI Agent  |  路径 C  |  exec=local
 | `exec_mode` | `local` | MCP 不通时留 `local`；要演示 MCP 时改 `mcp` |
 | `grid.mode` | `auto` | 默认按截图计算；面板勾选“手动设置网格”后为 `manual`，使用 `cols/rows` |
 | `agent.reflection` | `cheap` | `always` 更准但每步多 1 次调用；`off` 最快但丢掉恢复 |
+| `check_packages` | 见配置文件 | 设置页勾选参与 `--check` 包名核对及严格指令直启的应用；必须已列在 `apps` 中 |
 
 `glm.model` 需要换成组委会实际发的型号 id。
 面板设置页 `http://127.0.0.1:8777/settings` 可填写模型 URL、名称和 API Key，单独验证连接；`--check` 不发模型请求。逐项自检说明见[环境自检说明与优化方案](../../doc/环境自检说明与优化方案.md)。

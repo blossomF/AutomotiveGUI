@@ -714,6 +714,10 @@ BASE_CSS = r"""
   .settings-message { min-height:22px; font-size:13px; margin-top:10px; white-space:pre-wrap; }
   .settings-message.error { color:#b91c1c; }
   .settings-message.good { color:#047857; }
+  .app-check-list { display:grid; gap:8px; }
+  .app-check-list label { display:flex; align-items:center; gap:8px; padding:8px 10px;
+                          border:1px solid #e4e7eb; border-radius:8px; }
+  .app-check-list small { color:#52606d; overflow-wrap:anywhere; }
   .eye-wrap { position:relative; display:flex; align-items:center; }
   .eye-wrap input { flex:1; padding-right:38px; }
   .eye-btn { position:absolute; right:8px; top:50%; transform:translateY(-50%);
@@ -1125,6 +1129,20 @@ loadTasks(qsTask);
 
 SETTINGS_JS = r"""
 let screenPreview = null;
+function renderAppChecks(apps){
+  const container=$('#appCheckList');
+  container.replaceChildren();
+  if(!apps.length){ container.textContent='config.yaml 尚未配置应用。'; return; }
+  for(const app of apps){
+    const label=document.createElement('label');
+    const checkbox=document.createElement('input');
+    checkbox.type='checkbox'; checkbox.className='app-check';
+    checkbox.dataset.name=app.name; checkbox.checked=Boolean(app.checked);
+    const name=document.createElement('strong'); name.textContent=app.name;
+    const pkg=document.createElement('small'); pkg.textContent=app.package || '未填写包名';
+    label.append(checkbox,name,pkg); container.append(label);
+  }
+}
 function settingsPayload(){
   return {
     model: {url:$('#modelUrl').value.trim(), name:$('#modelName').value.trim(),
@@ -1134,7 +1152,9 @@ function settingsPayload(){
             api_secret:$('#voiceApiSecret').value.trim(),
             iat_url:$('#voiceIatUrl').value.trim()},
     grid: {mode:$('#gridManual').checked ? 'manual' : 'auto',
-           cols:Number($('#gridCols').value), rows:Number($('#gridRows').value)}
+           cols:Number($('#gridCols').value), rows:Number($('#gridRows').value)},
+    check_packages:Array.from(document.querySelectorAll('.app-check:checked'),
+                              checkbox=>checkbox.dataset.name)
   };
 }
 function status(id, message, good){
@@ -1170,6 +1190,7 @@ async function readSettings(){
     $('#voiceApiKey').value = data.voice.api_key || '';
     $('#voiceApiSecret').value = data.voice.api_secret || '';
     $('#voiceIatUrl').value = data.voice.iat_url || '';
+    renderAppChecks(data.apps || []);
     updateGrid();
   } catch(error){ status('#saveStatus', error.message, false); }
 }
@@ -1224,6 +1245,7 @@ $('#saveBtn').onclick = async () => {
     $('#voiceApiKey').value = data.voice.api_key || '';
     $('#voiceApiSecret').value = data.voice.api_secret || '';
     $('#voiceIatUrl').value = data.voice.iat_url || '';
+    renderAppChecks(data.apps || []);
     status('#saveStatus', '设置已保存；新任务会读取新配置。', true);
     updateGrid();
   } catch(error){ status('#saveStatus', error.message, false); }
@@ -1378,6 +1400,12 @@ PAGE_SETTINGS_TPL = r"""<!DOCTYPE html>
     </div>
     <p id="gridPreview" class="settings-hint">正在读取屏幕尺寸…</p>
     <p class="settings-hint">默认按实际截图尺寸自动计算；手动覆盖只对保存后的新任务生效。</p>
+  </section>
+
+  <section class="settings-card">
+    <h2>应用包名核对与快速打开</h2>
+    <p class="settings-hint">只勾选 config.yaml 已配置的应用。--check 最后核对它们是否安装；明确的打开指令可直接通过 ADB 启动。</p>
+    <div id="appCheckList" class="app-check-list">正在读取应用配置…</div>
   </section>
 
   <div class="settings-actions"><button id="saveBtn" class="primary" type="button">保存设置</button></div>

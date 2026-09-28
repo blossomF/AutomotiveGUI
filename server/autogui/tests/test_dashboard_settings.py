@@ -22,6 +22,8 @@ def config_path(tmp_path, monkeypatch):
         "grid:\n  cols: 20 # manual fallback\n  rows: 10\n"
         "glm:\n  model: old-model\n  base_url: https://old.example/v1\n  api_key: ''\n"
         "voice:\n  appid: ''\n  api_key: ''\n  api_secret: ''\n"
+        "apps:\n  - name: QQ音乐\n    package: com.example.music\n"
+        "  - name: 飞书\n    package: com.example.feishu\n"
         "debug: true\n", encoding="utf-8",
     )
     return path
@@ -38,30 +40,35 @@ def test_settings_save_preserves_unrelated_config_and_manual_precedence(config_p
     data = save_settings(config_path, {
         "model": {"url": "https://new.example/v1", "name": "new-model", "api_key": ""},
         "grid": {"mode": "manual", "cols": 12, "rows": 24},
+        "check_packages": ["QQ音乐"],
     })
     source = config_path.read_text(encoding="utf-8")
     assert "debug: true" in source
     assert "# manual fallback" in source
     assert data["model"]["url"] == "https://new.example/v1"
     assert data["grid"] == {"mode": "manual", "cols": 12, "rows": 24}
+    assert data["apps"] == [
+        {"name": "QQ音乐", "package": "com.example.music", "checked": True},
+        {"name": "飞书", "package": "com.example.feishu", "checked": False},
+    ]
+    assert Config.load(config_path).check_packages == ["QQ音乐"]
     assert grid_preview(config_path, (1080, 2400))["active"]["cols"] == 12
     assert grid_preview(config_path, (1080, 2400))["auto"] == {"cols": 11, "rows": 22}
 
 
-def test_key_is_encrypted_and_never_returned(config_path, monkeypatch):
+def test_key_is_encrypted_on_disk_and_reloaded_for_local_settings(config_path, monkeypatch):
     import autogui.security as security
 
     monkeypatch.setattr(security, "encrypt", lambda key: "ENC(fake)" if key == "secret-value" else "")
     monkeypatch.setattr(security, "resolve_secret", lambda value: "secret-value" if value == "ENC(fake)" else "")
     saved = save_settings(config_path, {"model": {"api_key": "secret-value"}})
     assert "secret-value" not in config_path.read_text(encoding="utf-8")
-    assert "secret-value" not in str(saved)
+    assert saved["model"]["api_key"] == "secret-value"
     assert saved["model"]["api_key_configured"] is True
-    assert saved["model"]["api_key_state"] == "saved"
-    assert "api_key" not in public_settings(config_path)["model"]
+    assert public_settings(config_path)["model"]["api_key"] == "secret-value"
 
 
-def test_saved_settings_reappear_after_reload_without_revealing_secrets(config_path, monkeypatch):
+def test_saved_settings_reappear_after_reload(config_path, monkeypatch):
     import autogui.security as security
 
     monkeypatch.setattr(security, "encrypt", lambda value: f"ENC({value[::-1]})")
@@ -74,18 +81,15 @@ def test_saved_settings_reappear_after_reload_without_revealing_secrets(config_p
     reloaded = public_settings(config_path)
     assert reloaded["model"] == {
         "url": "https://saved.example/v1", "name": "saved-model",
-        "api_key_configured": True, "api_key_state": "saved",
+        "api_key": "model-secret", "api_key_configured": True,
     }
     assert reloaded["grid"] == {"mode": "manual", "cols": 12, "rows": 24}
-    assert reloaded["voice"]["configured"] is True
-    assert reloaded["voice"]["fields"] == {
-        "appid": "saved", "api_key": "saved", "api_secret": "saved",
-    }
-    assert "model-secret" not in str(reloaded)
-    assert "voice-secret" not in str(reloaded)
+    assert reloaded["voice"]["appid"] == "app-id"
+    assert reloaded["voice"]["api_key"] == "voice-key"
+    assert reloaded["voice"]["api_secret"] == "voice-secret"
 
 
-def test_unreadable_ciphertext_is_reported_explicitly(config_path, monkeypatch):
+def test_unreadable_ciphertext_does_not_appear_configured(config_path, monkeypatch):
     import autogui.security as security
 
     monkeypatch.setattr(security, "resolve_secret", lambda _: (_ for _ in ()).throw(OSError("unavailable")))
@@ -93,7 +97,7 @@ def test_unreadable_ciphertext_is_reported_explicitly(config_path, monkeypatch):
     config_path.write_text(source.replace("api_key: ''", "api_key: ENC(other-user)"), encoding="utf-8")
     status = public_settings(config_path)["model"]
     assert status["api_key_configured"] is False
-    assert status["api_key_state"] == "unavailable"
+    assert status["api_key"] == "ENC(other-user)"
 
 
 def test_model_verification_uses_unsaved_form_and_does_not_modify_config(config_path):
@@ -126,6 +130,11 @@ def test_bad_model_url_cannot_be_saved(config_path):
     assert Config.load(config_path).glm.base_url == "https://old.example/v1"
 
 
+def test_settings_rejects_unconfigured_app(config_path):
+    with pytest.raises(ValueError, match="已有的应用"):
+        save_settings(config_path, {"check_packages": ["未配置应用"]})
+
+
 def test_dashboard_settings_page_and_api_work_without_device(config_path, monkeypatch):
     root = Path(__file__).resolve().parents[3]
     module_path = root / "dist" / "dashboard_server.py"
@@ -140,11 +149,11 @@ def test_dashboard_settings_page_and_api_work_without_device(config_path, monkey
     try:
         with urllib.request.urlopen(base + "/settings") as response:
             html = response.read().decode("utf-8")
-        assert "验证连接" in html and "gridManual" in html
+        assert "验证连接" in html and "gridManual" in html and "appCheckList" in html
         with urllib.request.urlopen(base + "/api/settings") as response:
             settings = json.load(response)
         assert settings["grid"]["mode"] == "auto"
-        assert "api_key" not in settings["model"]
+        assert settings["model"]["api_key"] == ""
         body = json.dumps({"grid": {"mode": "manual", "cols": 12, "rows": 24}}).encode()
         request = urllib.request.Request(base + "/api/settings", body,
                                          headers={"Content-Type": "application/json"}, method="POST")

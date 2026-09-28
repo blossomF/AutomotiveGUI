@@ -38,6 +38,7 @@ def _bootstrap(cfg):
 
 
 def cmd_run(args, cfg) -> int:
+    from autogui.app_routes import match_prelaunch
     from autogui.brain.glm_client import GLMClient
     from autogui.core.graph import Runner
 
@@ -46,8 +47,11 @@ def cmd_run(args, cfg) -> int:
     if args.skill_only:
         return _run_skill_direct(args, cfg, tools)
 
-    glm = GLMClient(cfg.glm)
-    runner = Runner(cfg=cfg, task=task, glm=glm)
+    route = match_prelaunch(task, cfg)
+    app, only_open = route if route else (None, False)
+    glm = None if only_open else GLMClient(cfg.glm)
+    runner = Runner(cfg=cfg, task=task, glm=glm,
+                    prelaunch_app=app, prelaunch_only=only_open)
     result = runner.execute()
     return 0 if result["success"] else 1
 
@@ -170,6 +174,21 @@ def cmd_check(cfg) -> int:
     report("自检串行采集耗时", True, f"≈{total:.0f}ms（截图 + XML；主流程另行并行采集）")
     if total >= 4500:
         warn("采集速度", f"串行合计 {total:.0f}ms ≥ 4500ms")
+
+    # 最后核对设置页勾选的应用；只记录配置中的目标，不枚举其他 App。
+    selected = [app for app in cfg.apps if app.in_scope and app.name in cfg.check_packages]
+    if selected:
+        try:
+            installed = set(device.list_packages())
+            for app in selected:
+                if app.package and app.package in installed:
+                    report(f"应用 {app.name}", True, f"{app.package} 已安装")
+                else:
+                    warn(f"应用 {app.name}", f"配置包名 {app.package or '(空)'} 未安装或未配置")
+        except ADBError as e:
+            warn("应用包名查询", f"失败：{e}")
+    else:
+        print("  [i] 应用包名                     未勾选应用，跳过")
     print("=" * 72)
     print("设备硬检查通过；请核对上方警告" if ok else "存在设备硬故障，请先处理 ✗ 项")
     return 0 if ok else 1

@@ -75,14 +75,18 @@ glm:
 # 范围由规则 4.2 固定：CEA1.3 预装集 + 哔哩哔哩 / 飞书 / 外卖。
 # 借到车机后用 `python main.py --packages` 填包名——
 # LightGUIAgent 提示词里的 App 列表（美团/淘宝/微信）是手机端的，在车机上大多不适用。
+# 设置页勾选哪些已配置应用参与 --check 包名核对和任务直启；未列出的应用不记录。
+check_packages: [QQ音乐, 哔哩哔哩, 飞书]
 apps:
   - name: QQ音乐
+    aliases: [QQ Music]
     package: com.mosi.mosc.onlinemedia.qqmusic      # 车机实测已装；测试任务集 TK-QQ-* 全部针对它
   - name: 酷我音乐
     package: com.mosi.mosc.onlinemedia.kuwomusic   # 车机另有 kugoumusic/wyymusic，勿与 QQ音乐 混
   - name: 导航
     package: com.fawvw.vehicle.navi.ceaapp         # 原厂导航；车机另有 com.baidu.mapauto.pass
   - name: 哔哩哔哩
+    aliases: [B站]
     package: com.bilibili.bilithings               # 车机版（原 tv.danmaku.bili 是手机版，车机无此包）
   - name: 飞书
     package: com.ss.android.lark                   # 车机版（原 com.lark.android.mcloud 车机无此包）

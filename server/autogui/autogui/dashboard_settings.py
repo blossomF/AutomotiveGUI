@@ -71,6 +71,8 @@ def public_settings(config_path: Path) -> dict:
             "api_secret": _plain(str(voice_raw.get("api_secret") or "")),
             "iat_url": str(voice_raw.get("iat_url") or ""),
         },
+        "apps": [{"name": app.name, "package": app.package,
+                  "checked": app.name in cfg.check_packages} for app in cfg.apps if app.in_scope],
     }
 
 
@@ -111,11 +113,31 @@ def _replace_fields(source: str, updates: dict[str, dict[str, object]]) -> str:
     return "".join(lines)
 
 
+def _replace_top_level(source: str, key: str, value: object) -> str:
+    """更新一个顶层 YAML 标量/流式列表，同时保留其他行与注释。"""
+    lines = source.splitlines(keepends=True)
+    newline = "\r\n" if "\r\n" in source else "\n"
+    encoded = json.dumps(value, ensure_ascii=False)
+    for i, line in enumerate(lines):
+        if line.startswith(f"{key}:"):
+            lines[i] = f"{key}: {encoded}{_comment(line)}{newline}"
+            break
+    else:
+        before_apps = next((i for i, line in enumerate(lines) if line.startswith("apps:")), len(lines))
+        lines.insert(before_apps, f"{key}: {encoded}{newline}")
+    return "".join(lines)
+
+
 def save_settings(config_path: Path, payload: dict) -> dict:
     """校验后原子保存。api_key 和 api_secret 加密存储，其余明文。"""
     current = Config.load(config_path)
     url, name, key = _model_fields(payload, current)
     grid = _grid_fields(payload, current)
+    selected = payload.get("check_packages", current.check_packages)
+    known_apps = {app.name for app in current.apps if app.in_scope}
+    if (not isinstance(selected, list) or any(not isinstance(name, str) or name not in known_apps
+                                               for name in selected) or len(selected) != len(set(selected))):
+        raise ValueError("包名核对名单只能选择配置文件中已有的应用，且不能重复")
     model_updates: dict[str, object] = {"base_url": url, "model": name}
     if key:
         from autogui.security import encrypt
@@ -142,6 +164,7 @@ def save_settings(config_path: Path, payload: dict) -> dict:
     if voice_updates:
         updates["voice"] = voice_updates
     updated = _replace_fields(config_path.read_text(encoding="utf-8"), updates)
+    updated = _replace_top_level(updated, "check_packages", selected)
     # 再用正式配置解析器验证一次，写盘采用同目录原子替换。
     import yaml
     Config(**(yaml.safe_load(updated) or {}))

@@ -154,6 +154,7 @@ class AppConfig(BaseModel):
 
     name: str
     package: str = ""
+    aliases: list[str] = Field(default_factory=list)
     in_scope: bool = True
 
 
@@ -169,6 +170,7 @@ class Config(BaseModel):
     skills: SkillConfig = Field(default_factory=SkillConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
     apps: list[AppConfig] = Field(default_factory=list)
+    check_packages: list[str] = Field(default_factory=list)
     log_dir: str = "test/log"
     verbose: bool = True
     debug: bool = False  # 细粒度日志开关（截图/XML/GLM交互落盘），生产环境保持False

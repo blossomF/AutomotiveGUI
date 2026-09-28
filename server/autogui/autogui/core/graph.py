@@ -33,7 +33,7 @@ from autogui.bridge import tools
 from autogui.bridge.adb import ADBError
 from autogui.brain.context import Context
 from autogui.brain.glm_client import GLMClient, GLMError
-from autogui.config import Config, PROJECT_ROOT
+from autogui.config import AppConfig, Config, PROJECT_ROOT
 from autogui.core import guard
 from autogui.core.decision_log import DecisionLog
 from autogui.core.executor import make_executor
@@ -84,6 +84,9 @@ class Runner:
     skill_activated_this_step: bool = False
     # 本步 decide 已尝试次数：tree 降级 vlm 重决策每步最多 1 次（防 decide 乒乓）
     decide_attempts: int = 0
+    # 严格命中已勾选应用时，直接用配置包名 ADB 启动；纯打开指令跳过模型。
+    prelaunch_app: AppConfig | None = None
+    prelaunch_only: bool = False
 
     def __post_init__(self) -> None:
         """构造完成后按配置初始化 Context（四层上下文管理器，token 预算裁剪）。"""
@@ -750,6 +753,20 @@ class Runner:
         """运行整个状态机：初始化后 invoke 直到 END（KeyboardInterrupt/异常降级为失败结果），
         生成决策链汇总，返回 success/status/steps/耗时/日志路径等结果 dict。"""
         self.prepare()
+        if self.prelaunch_app is not None:
+            launched = self._prelaunch_configured_app()
+            if self.prelaunch_only:
+                elapsed = self.elapsed
+                success = bool(launched)
+                status = "complete" if success else "app_unavailable"
+                summary = self.log.summary(
+                    success=success, status=status, steps=1 if success else 0,
+                    usage={}, route_counts=self.route_counts,
+                    vlm_reflections=0, elapsed=elapsed,
+                )
+                return {"success": success, "status": status, "steps": 1 if success else 0,
+                        "elapsed": round(elapsed, 1), "summary": summary,
+                        "log_file": str(self.log.path), "events": self.log.events}
         app = self.graph()
         # LangGraph 默认 recursion_limit=25 个 superstep；
         # 我们的循环每步约5个节点，20 步大约需要 120。不显式设置的话，长任务会死在一个
@@ -786,3 +803,19 @@ class Runner:
             "log_file": str(self.log.path),
             "events": self.log.events,
         }
+
+    def _prelaunch_configured_app(self) -> bool:
+        """只对选中的配置包执行一次启动，失败则留下可见日志。"""
+        app = self.prelaunch_app
+        self.log.phase("route", f"配置应用直启：{app.name} → {app.package}（无模型决策）")
+        try:
+            result = self.executor.call("launch_app", package=app.package)
+        except Exception as e:
+            self.log.phase("error", f"{app.name} ADB 启动失败：{e}")
+            return False
+        self.log.step_begin(1)
+        self.log.phase("act", f"已通过 ADB 打开 {app.name}", package=app.package, result=result)
+        self.context.entities["已打开应用"] = app.name
+        self.context.progress = f"已打开 {app.name}；继续完成用户指令"
+        self.route_counts["adb_prelaunch"] = 1
+        return True
