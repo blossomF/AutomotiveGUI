@@ -52,18 +52,18 @@ skills:
 #   python -m autogui.security set voice.api_secret
 # 或设置环境变量 IFLYTEK_APPID / IFLYTEK_API_KEY / IFLYTEK_API_SECRET。
 voice:
-  appid: ""             # python -m autogui.security set voice.appid
-  api_key: ""   # 留空 → 回退 IFLYTEK_API_KEY 环境变量；录入：python -m autogui.security set voice.api_key
-  api_secret: ""        # python -m autogui.security set voice.api_secret
-  iat_url: ""            # 留空 = 讯飞公网 wss://iat-api.xfyun.cn/v2/iat
+  appid: "ad8987fe" # python -m autogui.security set voice.appid
+  api_key: "dc1a6fb17594d12d553a42ce745d23e2" # 留空 → 回退 IFLYTEK_API_KEY 环境变量；录入：python -m autogui.security set voice.api_key
+  api_secret: "ENC(AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAAUGqbIjO8Fk2fZGdpE2yBUgAAAAACAAAAAAAQZgAAAAEAACAAAABdKxfpAwQxxig2lfMAeaB3kpriaPt9Stp37RRxEunsCAAAAAAOgAAAAAIAACAAAABgRy4eUMlH4/Zo8XcWSec57Upaomsz8SuCaOyEUAKS+jAAAADh4LYB6+YJ5NW8W6TRz3o0sL/Mq5c6DwS9fJVg8YIB9wRe7GmgckbvALeq1T8/8NdAAAAA02n8cWLMAM3731vipRLad6JMFVyQTpSet97fIo9vhWd/qKL5OUh9b3OT4D60KvqurevLc0HuRvfe0GZipHBwqg==)" # python -m autogui.security set voice.api_secret
+  iat_url: "wss://iat-api.xfyun.cn/v2/iat" # 留空 = 讯飞公网 wss://iat-api.xfyun.cn/v2/iat
   max_seconds: 15        # 最长录音秒数
   silence_seconds: 0.8   # 尾部连续静音后自动停止
   silence_threshold: 120 # 静音判定 RMS 阈值（实测底噪<90，说话200~540）
 
 glm:
-  model: "GLM"
+  model: "Qwen-vlm"
   base_url: "https://llm-gateway.dev.cn-vwa.volkswagen-cea.com"
-  api_key: "ENC(AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAAUGqbIjO8Fk2fZGdpE2yBUgAAAAACAAAAAAAQZgAAAAEAACAAAAAoJYXVwcIeMmcw6SdSFvqu3cS0NBfJGPf/xWvd6NOiewAAAAAOgAAAAAIAACAAAABriAfH8gHeY4x/zOxIgCGEiYQgHinm7UPEpxYPCh6Z/CAAAADVcA3Q4si9mZdyks0btwiV+2kPYXtU+ZUrIElxrvDBgkAAAADSw5v5potKbtYLYBihFvOBfA3YndOUkTWdA3IsdKQhl/rjWIKeWsbTnT3IbBq1nu6Hhss5rvtzmqZK8n3/tNaJ)" # 留空 → 回退 GLM_API_KEY 环境变量（我们的 ThunderSoft 官方 key）
+  api_key: "ENC(AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAAUGqbIjO8Fk2fZGdpE2yBUgAAAAACAAAAAAAQZgAAAAEAACAAAACuF92hL5K0/JPysPJgg/iXRJ3MkmjemEawp8Bur9QsugAAAAAOgAAAAAIAACAAAAD0Ah8tqzY0YP2HgbYuIjYVjYxg/dwn/mr+rO0kslMTQCAAAADG7kFt1WwSmlavlcSKRsGaRRu+zM2TeqOOAwVi95MPy0AAAACUOffnwUuJ77gKIeXDAxUIhhoyBVutrY6eCwXPnKc9BLN+WaPxFgiwOci9IhUAIrE1OHFiaRdQBX80jAZYUVPz)" # 留空 → 回退 GLM_API_KEY 环境变量（我们的 ThunderSoft 官方 key）
   api_key_env: GLM_API_KEY
   temperature: 0.1
   max_tokens: 2048    # ts-glm-53-flash 带思维链，思维链也计入 completion_tokens：

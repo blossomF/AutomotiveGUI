@@ -461,7 +461,7 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         _touch()                     # 有请求 = 页面还在
         try:
-            if path in ("/api/settings", "/api/settings/test-model"):
+            if path in ("/api/settings", "/api/settings/test-model", "/api/settings/test-asr"):
                 if not self._settings_allowed():
                     self._send_json({"ok": False, "error": "设置仅允许本机访问"}, 403)
                     return
@@ -513,6 +513,11 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/settings/test-model":
                 try:
                     self._send_json(_settings_api().test_model(CONFIG_PATH, payload))
+                except Exception as e:
+                    self._send_json({"ok": False, "error": str(e)}, 400)
+            elif path == "/api/settings/test-asr":
+                try:
+                    self._send_json(_settings_api().test_asr(CONFIG_PATH, payload))
                 except Exception as e:
                     self._send_json({"ok": False, "error": str(e)}, 400)
             else:
@@ -709,6 +714,12 @@ BASE_CSS = r"""
   .settings-message { min-height:22px; font-size:13px; margin-top:10px; white-space:pre-wrap; }
   .settings-message.error { color:#b91c1c; }
   .settings-message.good { color:#047857; }
+  .eye-wrap { position:relative; display:flex; align-items:center; }
+  .eye-wrap input { flex:1; padding-right:38px; }
+  .eye-btn { position:absolute; right:8px; top:50%; transform:translateY(-50%);
+             background:none; border:none; cursor:pointer; font-size:14px;
+             color:#7b8794; padding:2px 4px; border-radius:4px; }
+  .eye-btn:hover { background:#e4e7eb; color:#1f2933; }
 """
 
 MASCOT_SVG = r"""<svg id="bean" class="state-idle" viewBox="0 0 64 56">
@@ -1114,30 +1125,14 @@ loadTasks(qsTask);
 
 SETTINGS_JS = r"""
 let screenPreview = null;
-function modelKeyHint(model){
-  const state = model.api_key_state;
-  if(state === 'saved') return 'API Key 已保存在配置文件中，输入框留空表示保留；为安全起见不回显明文。';
-  if(state === 'environment') return '当前进程通过 GLM_API_KEY 提供凭证；输入框留空表示继续使用环境变量。';
-  if(state === 'unavailable') return '配置文件中有加密凭证，但当前 Windows 用户或进程无法解密。请重新输入 API Key 并保存。';
-  return '尚未配置 API Key；输入后保存或直接验证。';
-}
-function voiceKeyHint(voice){
-  const names = {appid:'AppID', api_key:'API Key', api_secret:'API Secret'};
-  const fields = voice.fields || {};
-  return Object.entries(names).map(([key,label]) => {
-    const state=fields[key];
-    const description=state==='saved' ? '已保存' : state==='environment' ? '环境变量'
-      : state==='unavailable' ? '密文无法解密，需重新录入' : '未配置';
-    return `${label}：${description}`;
-  }).join('；') + '。凭证输入框留空表示保留，不回显明文。';
-}
 function settingsPayload(){
   return {
     model: {url:$('#modelUrl').value.trim(), name:$('#modelName').value.trim(),
             api_key:$('#apiKey').value.trim()},
     voice: {appid:$('#voiceAppid').value.trim(),
             api_key:$('#voiceApiKey').value.trim(),
-            api_secret:$('#voiceApiSecret').value.trim()},
+            api_secret:$('#voiceApiSecret').value.trim(),
+            iat_url:$('#voiceIatUrl').value.trim()},
     grid: {mode:$('#gridManual').checked ? 'manual' : 'auto',
            cols:Number($('#gridCols').value), rows:Number($('#gridRows').value)}
   };
@@ -1167,15 +1162,14 @@ async function readSettings(){
     if(!response.ok) throw new Error(data.error || '设置读取失败');
     $('#modelUrl').value = data.model.url;
     $('#modelName').value = data.model.name;
-    $('#apiKey').value = '';
-    $('#keyHint').textContent = modelKeyHint(data.model);
+    $('#apiKey').value = data.model.api_key || '';
     $('#gridManual').checked = data.grid.mode === 'manual';
     $('#gridCols').value = data.grid.cols;
     $('#gridRows').value = data.grid.rows;
-    $('#voiceAppid').value = '';
-    $('#voiceApiKey').value = '';
-    $('#voiceApiSecret').value = '';
-    $('#voiceHint').textContent = voiceKeyHint(data.voice || {});
+    $('#voiceAppid').value = data.voice.appid || '';
+    $('#voiceApiKey').value = data.voice.api_key || '';
+    $('#voiceApiSecret').value = data.voice.api_secret || '';
+    $('#voiceIatUrl').value = data.voice.iat_url || '';
     updateGrid();
   } catch(error){ status('#saveStatus', error.message, false); }
 }
@@ -1198,6 +1192,9 @@ async function postSettings(path, body){
 $('#gridManual').addEventListener('change', updateGrid);
 $('#gridCols').addEventListener('input', updateGrid);
 $('#gridRows').addEventListener('input', updateGrid);
+$('#voiceEnabled').addEventListener('change', () => {
+  $('#voiceFields').style.display = $('#voiceEnabled').checked ? '' : 'none';
+});
 $('#verifyBtn').onclick = async () => {
   const button=$('#verifyBtn'); button.disabled=true;
   status('#verifyStatus', '正在验证模型（会产生一次最小 API 调用）…', true);
@@ -1208,21 +1205,44 @@ $('#verifyBtn').onclick = async () => {
   } catch(error){ status('#verifyStatus', error.message, false); }
   finally { button.disabled=false; }
 };
+$('#asrVerifyBtn').onclick = async () => {
+  const button=$('#asrVerifyBtn'); button.disabled=true;
+  status('#asrVerifyStatus', '正在验证 ASR 连接（会产生一次握手/最小请求）…', true);
+  try {
+    const data=await postSettings('/api/settings/test-asr', {voice:settingsPayload().voice});
+    status('#asrVerifyStatus', data.ok ? `${data.message} · ${data.latency_ms}ms`
+                                       : `${data.error_type||'验证失败'}：${data.message}`, data.ok);
+  } catch(error){ status('#asrVerifyStatus', error.message, false); }
+  finally { button.disabled=false; }
+};
 $('#saveBtn').onclick = async () => {
   const button=$('#saveBtn'); button.disabled=true;
   try {
     const data=await postSettings('/api/settings', settingsPayload());
-    $('#apiKey').value='';
-    $('#keyHint').textContent=modelKeyHint(data.model);
-    $('#voiceAppid').value='';
-    $('#voiceApiKey').value='';
-    $('#voiceApiSecret').value='';
-    $('#voiceHint').textContent=voiceKeyHint(data.voice || {});
+    $('#apiKey').value = data.model.api_key || '';
+    $('#voiceAppid').value = data.voice.appid || '';
+    $('#voiceApiKey').value = data.voice.api_key || '';
+    $('#voiceApiSecret').value = data.voice.api_secret || '';
+    $('#voiceIatUrl').value = data.voice.iat_url || '';
     status('#saveStatus', '设置已保存；新任务会读取新配置。', true);
     updateGrid();
   } catch(error){ status('#saveStatus', error.message, false); }
-  finally { button.disabled=false; }
+  finally { button.disabled=false; };
 };
+// Eye toggle: switch input type between password and text
+document.querySelectorAll('.eye-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const target = document.getElementById(btn.dataset.target);
+    if(!target) return;
+    if(target.type === 'password'){
+      target.type = 'text';
+      btn.textContent = 'hide';
+    } else {
+      target.type = 'password';
+      btn.textContent = 'eye';
+    }
+  });
+});
 readSettings(); readPreview();
 """
 
@@ -1323,18 +1343,31 @@ PAGE_SETTINGS_TPL = r"""<!DOCTYPE html>
     <h2>模型 API</h2>
     <label class="field">URL<input id="modelUrl" type="url" placeholder="https://example.com/v1" required></label>
     <label class="field">模型名称<input id="modelName" type="text" placeholder="模型 ID" required></label>
-    <label class="field">API Key<input id="apiKey" type="password" autocomplete="new-password" placeholder="留空保留原凭证"></label>
-    <p class="settings-hint" id="keyHint">正在读取凭证状态…</p>
+    <label class="field">API Key
+      <div class="eye-wrap">
+        <input id="apiKey" type="password" placeholder="未配置">
+        <button type="button" class="eye-btn" data-target="apiKey" title="显示/隐藏">eye</button>
+      </div>
+    </label>
     <div class="settings-actions"><button id="verifyBtn" type="button">验证连接</button></div>
     <div id="verifyStatus" class="settings-message" role="status" aria-live="polite"></div>
-    <p class="settings-hint">验证使用当前表单中尚未保存的 URL、模型和 Key；会产生一次模型请求，不会运行 ADB 任务或保存设置。</p>
   </section>
-    <section class="settings-card">
-    <h2>讯飞语音（可选）</h2>
-    <label class="field">AppID<input id="voiceAppid" type="password" autocomplete="new-password" placeholder="讯飞 AppID"></label>
-    <label class="field">API Key<input id="voiceApiKey" type="password" autocomplete="new-password" placeholder="讯飞 API Key"></label>
-    <label class="field">API Secret<input id="voiceApiSecret" type="password" autocomplete="new-password" placeholder="讯飞 API Secret"></label>
-    <p class="settings-hint" id="voiceHint">正在读取凭证状态…</p>
+  <section class="settings-card">
+    <h2>ASR API</h2>
+    <label><input id="voiceEnabled" type="checkbox" checked> 开启语音指令</label>
+    <div id="voiceFields">
+      <label class="field">AppID<input id="voiceAppid" type="text" placeholder="讯飞 AppID"></label>
+      <label class="field">API Key<input id="voiceApiKey" type="text" placeholder="讯飞 API Key"></label>
+      <label class="field">API Secret
+        <div class="eye-wrap">
+          <input id="voiceApiSecret" type="password" placeholder="未配置">
+          <button type="button" class="eye-btn" data-target="voiceApiSecret" title="显示/隐藏">eye</button>
+        </div>
+      </label>
+      <label class="field">请求地址<input id="voiceIatUrl" type="text" placeholder="留空 = 讯飞公网 wss://iat-api.xfyun.cn/v2/iat"></label>
+      <div class="settings-actions"><button id="asrVerifyBtn" type="button">验证连接</button></div>
+      <div id="asrVerifyStatus" class="settings-message" role="status" aria-live="polite"></div>
+    </div>
   </section>
   <section class="settings-card">
     <h2>VLM 网格</h2>

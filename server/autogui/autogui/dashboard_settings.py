@@ -48,32 +48,29 @@ def public_settings(config_path: Path) -> dict:
     raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     cfg = Config.load(config_path)
 
-    def credential_state(section: str, field: str, env_name: str) -> str:
-        stored = str((raw.get(section) or {}).get(field) or "")
-        if stored:
-            if not is_encrypted(stored):
-                return "saved"
+    def _plain(val: str) -> str:
+        if not val:
+            return ""
+        if is_encrypted(val):
             try:
-                if resolve_secret(stored):
-                    return "saved"
+                return resolve_secret(val)
             except Exception:
-                pass
-            return "unavailable"
-        return "environment" if os.getenv(env_name) else "missing"
+                return val
+        return val
 
-    model_key_state = credential_state("glm", "api_key", cfg.glm.api_key_env)
-    voice_fields = {
-        "appid": credential_state("voice", "appid", "IFLYTEK_APPID"),
-        "api_key": credential_state("voice", "api_key", "IFLYTEK_API_KEY"),
-        "api_secret": credential_state("voice", "api_secret", "IFLYTEK_API_SECRET"),
-    }
+    glm_raw = raw.get("glm") or {}
+    voice_raw = raw.get("voice") or {}
     return {
         "model": {"url": cfg.glm.base_url, "name": cfg.glm.model,
-                  "api_key_configured": bool(cfg.glm.api_key),
-                  "api_key_state": model_key_state},
+                  "api_key": _plain(str(glm_raw.get("api_key") or "")),
+                  "api_key_configured": bool(cfg.glm.api_key)},
         "grid": {"mode": cfg.grid.mode, "cols": cfg.grid.cols, "rows": cfg.grid.rows},
-        "voice": {"configured": bool(cfg.voice.appid and cfg.voice.api_key and cfg.voice.api_secret),
-                  "fields": voice_fields},
+        "voice": {
+            "appid": str(voice_raw.get("appid") or ""),
+            "api_key": str(voice_raw.get("api_key") or ""),
+            "api_secret": _plain(str(voice_raw.get("api_secret") or "")),
+            "iat_url": str(voice_raw.get("iat_url") or ""),
+        },
     }
 
 
@@ -115,7 +112,7 @@ def _replace_fields(source: str, updates: dict[str, dict[str, object]]) -> str:
 
 
 def save_settings(config_path: Path, payload: dict) -> dict:
-    """校验后原子保存；空 API Key 输入表示保留当前值。"""
+    """校验后原子保存。api_key 和 api_secret 加密存储，其余明文。"""
     current = Config.load(config_path)
     url, name, key = _model_fields(payload, current)
     grid = _grid_fields(payload, current)
@@ -127,10 +124,17 @@ def save_settings(config_path: Path, payload: dict) -> dict:
     voice_updates: dict[str, object] = {}
     if isinstance(voice_raw, dict):
         from autogui.security import encrypt as _enc
-        for field in ("appid", "api_key", "api_secret"):
-            val = str(voice_raw.get(field, "") or "").strip()
-            if val:
-                voice_updates[field] = _enc(val)
+        appid = str(voice_raw.get("appid") or "").strip()
+        api_key = str(voice_raw.get("api_key") or "").strip()
+        api_secret = str(voice_raw.get("api_secret") or "").strip()
+        iat_url = str(voice_raw.get("iat_url") or "").strip()
+        if appid:
+            voice_updates["appid"] = appid
+        if api_key:
+            voice_updates["api_key"] = api_key
+        if api_secret:
+            voice_updates["api_secret"] = _enc(api_secret)
+        voice_updates["iat_url"] = iat_url
     updates = {
         "glm": model_updates,
         "grid": {"mode": grid.mode, "cols": grid.cols, "rows": grid.rows},
@@ -175,6 +179,98 @@ def test_model(config_path: Path, payload: dict, client_factory=None) -> dict:
         return {"ok": True, "message": "模型连接成功", "latency_ms": round((time.perf_counter()-started)*1000)}
     except Exception as exc:
         detail = str(exc).replace(key, "<redacted-api-key>")[:300]
+        return {"ok": False, "message": detail, "error_type": type(exc).__name__,
+                "latency_ms": round((time.perf_counter()-started)*1000)}
+
+
+def test_asr(config_path: Path, payload: dict) -> dict:
+    """用表单里的（未保存）讯飞凭证做一次 WebSocket 握手验证。
+
+    仅做鉴权握手 + 发送首帧（status=0），不录音、不产生识别结果；
+    未安装 websocket-client 时退化为对端 TCP 可达性检查。
+    """
+    import os
+    import socket
+
+    from autogui.voice.asr import DEFAULT_IAT_URL
+
+    current = Config.load(config_path)
+    v = payload.get("voice") or {}
+    if not isinstance(v, dict):
+        raise ValueError("voice 必须是对象")
+
+    def pick(field: str, fallback: str) -> str:
+        val = str(v.get(field) or "").strip()
+        return val or fallback
+
+    appid = pick("appid", current.voice.appid)
+    api_key = pick("api_key", current.voice.api_key)
+    api_secret = pick("api_secret", current.voice.api_secret)
+    iat_url = pick("iat_url", current.voice.iat_url or os.getenv("IFLYTEK_IAT_URL") or DEFAULT_IAT_URL)
+
+    from autogui.security import is_encrypted, resolve_secret
+    if is_encrypted(api_secret):
+        api_secret = resolve_secret(api_secret)
+
+    if not (appid and api_key and api_secret):
+        return {"ok": False, "message": "请先填写 AppID / API Key / API Secret"}
+
+    parsed = urlparse(iat_url)
+    if parsed.scheme not in ("ws", "wss") or not parsed.hostname:
+        return {"ok": False, "message": f"请求地址需为有效的 ws:// 或 wss:// 地址：{iat_url}"}
+
+    started = time.perf_counter()
+    try:
+        from autogui.voice.asr import _sign_url
+        signed = _sign_url(appid, api_key, api_secret, iat_url)
+    except Exception as exc:
+        return {"ok": False, "message": f"签名失败：{exc}", "error_type": type(exc).__name__,
+                "latency_ms": round((time.perf_counter()-started)*1000)}
+
+    # 未装 websocket-client（语音可选依赖）时，退化为 TCP 可达性检查
+    try:
+        import websocket
+    except Exception:
+        host, port = parsed.hostname, (parsed.port or (443 if parsed.scheme == "wss" else 80))
+        try:
+            socket.create_connection((host, port), timeout=6).close()
+            return {"ok": True,
+                    "message": f"未安装 websocket-client，仅完成 {host}:{port} 网络可达性检查",
+                    "latency_ms": round((time.perf_counter()-started)*1000)}
+        except Exception as exc2:
+            return {"ok": False, "message": f"无法连接 {host}:{port}：{exc2}",
+                    "error_type": type(exc2).__name__,
+                    "latency_ms": round((time.perf_counter()-started)*1000)}
+
+    try:
+        # create_connection 即完成 WebSocket 握手（鉴权在握手阶段校验，
+        # 凭证错误会抛 WebSocketBadStatusException）
+        ws = websocket.create_connection(signed, timeout=10)
+        # 按真实识别协议发送 起始帧(status=0) + 结束帧(status=2)；
+        # 讯飞收齐结束帧后才回包，只发空起始帧会 recv 阻塞超时
+        ws.send(json.dumps({
+            "common": {"app_id": appid},
+            "business": {"language": "zh_cn", "domain": "iat", "accent": "mandarin", "dwa": "wpgs"},
+            "data": {"status": 0, "format": "audio/L16;rate=16000", "encoding": "raw", "audio": ""},
+        }))
+        ws.send(json.dumps({
+            "common": {"app_id": appid},
+            "data": {"status": 2, "format": "audio/L16;rate=16000", "encoding": "raw", "audio": ""},
+        }))
+        code, message = 0, ""
+        while True:
+            resp = json.loads(ws.recv())
+            code, message = resp.get("code", 0), resp.get("message", "")
+            if (resp.get("data") or {}).get("status") == 2:
+                break
+        ws.close()
+        if code == 0:
+            return {"ok": True, "message": "ASR 连接成功（鉴权通过）",
+                    "latency_ms": round((time.perf_counter()-started)*1000)}
+        return {"ok": False, "message": f"ASR 返回错误码 {code}：{message}",
+                "latency_ms": round((time.perf_counter()-started)*1000)}
+    except Exception as exc:
+        detail = str(exc).replace(api_secret, "<redacted-api-secret>")[:300]
         return {"ok": False, "message": detail, "error_type": type(exc).__name__,
                 "latency_ms": round((time.perf_counter()-started)*1000)}
 
