@@ -46,6 +46,7 @@ def public_settings(config_path: Path) -> dict:
         "model": {"url": cfg.glm.base_url, "name": cfg.glm.model,
                   "api_key_configured": bool(cfg.glm.api_key)},
         "grid": {"mode": cfg.grid.mode, "cols": cfg.grid.cols, "rows": cfg.grid.rows},
+        "voice": {"configured": bool(cfg.voice.appid and cfg.voice.api_key and cfg.voice.api_secret)},
     }
 
 
@@ -95,10 +96,21 @@ def save_settings(config_path: Path, payload: dict) -> dict:
     if key:
         from autogui.security import encrypt
         model_updates["api_key"] = encrypt(key)
-    updated = _replace_fields(config_path.read_text(encoding="utf-8"), {
+    voice_raw = payload.get("voice") or {}
+    voice_updates: dict[str, object] = {}
+    if isinstance(voice_raw, dict):
+        from autogui.security import encrypt as _enc
+        for field in ("appid", "api_key", "api_secret"):
+            val = str(voice_raw.get(field, "") or "").strip()
+            if val:
+                voice_updates[field] = _enc(val)
+    updates = {
         "glm": model_updates,
         "grid": {"mode": grid.mode, "cols": grid.cols, "rows": grid.rows},
-    })
+    }
+    if voice_updates:
+        updates["voice"] = voice_updates
+    updated = _replace_fields(config_path.read_text(encoding="utf-8"), updates)
     # 再用正式配置解析器验证一次，写盘采用同目录原子替换。
     import yaml
     Config(**(yaml.safe_load(updated) or {}))

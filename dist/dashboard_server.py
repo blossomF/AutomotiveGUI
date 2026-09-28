@@ -1118,8 +1118,12 @@ function settingsPayload(){
   return {
     model: {url:$('#modelUrl').value.trim(), name:$('#modelName').value.trim(),
             api_key:$('#apiKey').value.trim()},
-    grid: {mode:$('#gridManual').checked ? 'manual' : 'auto',
+        voice: {appid:$('#voiceAppid').value.trim(),
+            api_key:$('#voiceApiKey').value.trim(),
+            api_secret:$('#voiceApiSecret').value.trim()},
+        grid: {mode:$('#gridManual').checked ? 'manual' : 'auto',
            cols:Number($('#gridCols').value), rows:Number($('#gridRows').value)}
+
   };
 }
 function status(id, message, good){
@@ -1154,6 +1158,12 @@ async function readSettings(){
     $('#gridManual').checked = data.grid.mode === 'manual';
     $('#gridCols').value = data.grid.cols;
     $('#gridRows').value = data.grid.rows;
+    $('#voiceAppid').value = '';
+    $('#voiceApiKey').value = '';
+    $('#voiceApiSecret').value = '';
+    $('#voiceHint').textContent = data.voice && data.voice.configured
+      ? '已有讯飞凭证；留空表示保留原值。密钥不会回显。'
+      : '尚未配置讯飞凭证；语音功能不可用，文字任务不受影响。';
     updateGrid();
   } catch(error){ status('#saveStatus', error.message, false); }
 }
@@ -1193,6 +1203,11 @@ $('#saveBtn').onclick = async () => {
     $('#apiKey').value='';
     $('#keyHint').textContent=data.model.api_key_configured
       ? '已有可用凭证；留空表示保留原凭证。密钥不会回显。' : '尚未配置 API Key。';
+    $('#voiceAppid').value='';
+    $('#voiceApiKey').value='';
+    $('#voiceApiSecret').value='';
+    $('#voiceHint').textContent=data.voice && data.voice.configured
+      ? '已有讯飞凭证；留空表示保留原值。密钥不会回显。' : '尚未配置讯飞凭证。';
     status('#saveStatus', '设置已保存；新任务会读取新配置。', true);
     updateGrid();
   } catch(error){ status('#saveStatus', error.message, false); }
@@ -1304,6 +1319,13 @@ PAGE_SETTINGS_TPL = r"""<!DOCTYPE html>
     <div id="verifyStatus" class="settings-message" role="status" aria-live="polite"></div>
     <p class="settings-hint">验证使用当前表单中尚未保存的 URL、模型和 Key；会产生一次模型请求，不会运行 ADB 任务或保存设置。</p>
   </section>
+    <section class="settings-card">
+    <h2>讯飞语音（可选）</h2>
+    <label class="field">AppID<input id="voiceAppid" type="password" autocomplete="new-password" placeholder="讯飞 AppID"></label>
+    <label class="field">API Key<input id="voiceApiKey" type="password" autocomplete="new-password" placeholder="讯飞 API Key"></label>
+    <label class="field">API Secret<input id="voiceApiSecret" type="password" autocomplete="new-password" placeholder="讯飞 API Secret"></label>
+    <p class="settings-hint" id="voiceHint">正在读取凭证状态…</p>
+  </section>
   <section class="settings-card">
     <h2>VLM 网格</h2>
     <label><input id="gridManual" type="checkbox"> 手动设置网格（优先于自动计算）</label>
@@ -1314,6 +1336,7 @@ PAGE_SETTINGS_TPL = r"""<!DOCTYPE html>
     <p id="gridPreview" class="settings-hint">正在读取屏幕尺寸…</p>
     <p class="settings-hint">默认按实际截图尺寸自动计算；手动覆盖只对保存后的新任务生效。</p>
   </section>
+
   <div class="settings-actions"><button id="saveBtn" class="primary" type="button">保存设置</button></div>
   <div id="saveStatus" class="settings-message" role="status" aria-live="polite"></div>
 </main>

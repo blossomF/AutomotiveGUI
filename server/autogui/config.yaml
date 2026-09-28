@@ -20,7 +20,7 @@ input_chain: [yadb, adbkeyboard, ascii]
 # 默认按实际截图尺寸自动计算。cols/rows 是勾选手动覆盖后的备用值：
 # 1920x1080 下 20x10 约为 96x108px/格。
 grid:
-  mode: auto              # 默认按实际截图尺寸计算；前端勾选手动设置时改为 manual
+  mode: "auto" # 默认按实际截图尺寸计算；前端勾选手动设置时改为 manual
   cols: 20
   rows: 10
   jpeg_quality: 85
@@ -61,9 +61,9 @@ voice:
   silence_threshold: 120 # 静音判定 RMS 阈值（实测底噪<90，说话200~540）
 
 glm:
-  model: ts-glm-53-flash
-  base_url: https://llm.thundersoft.com/v1
-  api_key: ""                          # 留空 → 回退 GLM_API_KEY 环境变量（我们的 ThunderSoft 官方 key）
+  model: "GLM"
+  base_url: "https://llm-gateway.dev.cn-vwa.volkswagen-cea.com"
+  api_key: "ENC(AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAAUGqbIjO8Fk2fZGdpE2yBUgAAAAACAAAAAAAQZgAAAAEAACAAAAAoJYXVwcIeMmcw6SdSFvqu3cS0NBfJGPf/xWvd6NOiewAAAAAOgAAAAAIAACAAAABriAfH8gHeY4x/zOxIgCGEiYQgHinm7UPEpxYPCh6Z/CAAAADVcA3Q4si9mZdyks0btwiV+2kPYXtU+ZUrIElxrvDBgkAAAADSw5v5potKbtYLYBihFvOBfA3YndOUkTWdA3IsdKQhl/rjWIKeWsbTnT3IbBq1nu6Hhss5rvtzmqZK8n3/tNaJ)" # 留空 → 回退 GLM_API_KEY 环境变量（我们的 ThunderSoft 官方 key）
   api_key_env: GLM_API_KEY
   temperature: 0.1
   max_tokens: 2048    # ts-glm-53-flash 带思维链，思维链也计入 completion_tokens：
