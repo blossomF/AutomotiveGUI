@@ -523,13 +523,21 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json({"ok": False, "error": str(e)}, 400)
             elif path == "/api/settings/apps-device":
                 try:
-                    self._send_json(_settings_api().device_apps(CONFIG_PATH, force=bool(payload.get("force"))))
+                    if "apps" in payload:
+                        with _SETTINGS_LOCK:
+                            result = _settings_api().refresh_app_cache(CONFIG_PATH, payload["apps"])
+                    else:
+                        result = _settings_api().device_apps(CONFIG_PATH, force=bool(payload.get("force")))
+                    self._send_json(result)
                 except Exception as e:
                     self._send_json({"ok": False, "error": f"获取车机应用列表失败：{e}"}, 500)
             elif path == "/api/settings/apps":
                 try:
                     with _SETTINGS_LOCK:
-                        saved = _settings_api().save_apps(CONFIG_PATH, payload.get("apps") or [])
+                        saved = _settings_api().save_apps(
+                            CONFIG_PATH, payload.get("apps") or [],
+                            device_serial=str(payload.get("device_serial") or ""),
+                        )
                     self._send_json({"ok": True, **saved})
                 except Exception as e:
                     self._send_json({"ok": False, "error": str(e)}, 400)
@@ -1152,6 +1160,7 @@ loadTasks(qsTask);
 SETTINGS_JS = r"""
 let screenPreview = null;
 let devicePackages = [];
+let currentDeviceSerial = '';
 function appRows(){
   const rows=[];
   document.querySelectorAll('#appCheckList .app-row').forEach(row=>{
@@ -1194,7 +1203,6 @@ function normToken(s){ return String(s).toLowerCase().replace(/[^a-z0-9]/g,''); 
 function autoFillEmpty(){
   let filled=0;
   document.querySelectorAll('#appCheckList .app-row').forEach(row=>{
-    if(row.dataset.dirty!=='1') return;
     const pkgInput=row.querySelector('.app-pkg');
     if(pkgInput.value.trim()) return;
     const tokens=[row.querySelector('.app-name').value.trim(),
@@ -1228,7 +1236,7 @@ function settingsPayload(){
             silence_threshold:numOrNull('#voiceSilenceThreshold')},
     grid: {mode:$('#gridManual').checked ? 'manual' : 'auto',
            cols:Number($('#gridCols').value), rows:Number($('#gridRows').value)},
-    apps: appRows()
+    apps: appRows(), device_serial: currentDeviceSerial
   };
 }
 function status(id, message, good){
@@ -1272,6 +1280,20 @@ async function readSettings(){
     $('#voiceSilenceSeconds').value = data.voice.silence_seconds;
     $('#voiceSilenceThreshold').value = data.voice.silence_threshold;
     renderAppRows(data.apps || []);
+    $('#appsDeviceStatus').textContent = `配置文件：${data.config_path}；上次验证设备：${data.app_cache_serial || '未验证'}。`;
+    try {
+      const inventory = await postSettings('/api/settings/apps-device', {});
+      currentDeviceSerial = inventory.serial || '';
+      devicePackages = inventory.packages || [];
+      const dl = $('#devicePackages'); dl.replaceChildren();
+      for(const p of devicePackages){ const o=document.createElement('option'); o.value=p; dl.append(o); }
+      if(currentDeviceSerial !== data.app_cache_serial){
+        status('#appsDeviceStatus', `当前设备 ${currentDeviceSerial} 与缓存设备不一致；请点「重新加载」清除旧包名。配置文件：${data.config_path}`, false);
+      }
+    } catch(error){
+      currentDeviceSerial = '';
+      status('#appsDeviceStatus', `暂时无法核对设备：${error.message}。配置文件：${data.config_path}`, false);
+    }
     updateGrid();
   } catch(error){ status('#saveStatus', error.message, false); }
 }
@@ -1330,7 +1352,9 @@ $('#saveBtn').onclick = async () => {
     $('#voiceSilenceSeconds').value = data.voice.silence_seconds;
     $('#voiceSilenceThreshold').value = data.voice.silence_threshold;
     renderAppRows(data.apps || []);
-    status('#saveStatus', '设置已保存；新任务会读取新配置。', true);
+    status('#saveStatus', currentDeviceSerial
+      ? '设置已保存；目标应用包名已针对当前设备核对。'
+      : '设置已保存；应用包名尚未针对当前设备核对，请点「重新加载」后再直启。', true);
     updateGrid();
   } catch(error){ status('#saveStatus', error.message, false); }
   finally { button.disabled=false; };
@@ -1361,16 +1385,26 @@ $('#reloadAppsBtn').onclick = async () => {
   st.className = 'settings-message good';
   st.textContent = '正在从车机获取已安装应用列表…';
   try {
-    const data = await postSettings('/api/settings/apps-device', {});
+    const data = await postSettings('/api/settings/apps-device', {apps: appRows()});
     if(!data.ok) throw new Error(data.error || '获取应用列表失败');
     devicePackages = data.packages || [];
+    currentDeviceSerial = data.serial || '';
     const dl = $('#devicePackages'); dl.replaceChildren();
     for(const p of devicePackages){ const o=document.createElement('option'); o.value=p; dl.append(o); }
+    renderAppRows(data.apps || []);
     const filled = autoFillEmpty();
-    st.textContent = `已获取 ${data.count} 个应用包名${data.cached ? '（短缓存）' : ''}；自动补全 ${filled} 项，正在缓存…`;
-    const saved = await postSettings('/api/settings/apps', {apps: appRows()});
-    renderAppRows(saved.apps || []);
-    st.textContent = `完成：获取 ${data.count} 个应用包名，自动补全 ${filled} 项；应用配置已缓存到 config.yaml，adb 可直接打开。`;
+    let saved = data;
+    if(filled){
+      saved = await postSettings('/api/settings/apps', {apps: appRows(), device_serial: currentDeviceSerial});
+      renderAppRows(saved.apps || []);
+    }
+    const ready = (saved.apps || []).filter(app=>app.package).length;
+    const cleared = data.cleared || [];
+    st.className = 'settings-message ' + (cleared.length ? 'error' : 'good');
+    st.textContent = `当前设备 ${currentDeviceSerial}：获取 ${data.count} 个包名，仅用作候选；`
+      + `配置已保存 ${saved.apps.length} 个目标应用，其中 ${ready} 个包名已在设备上核对。`
+      + (cleared.length ? `已清空当前设备未安装的旧包名：${cleared.join('、')}；请从包名列表选当前设备的包名后点「保存」。` : '')
+      + ` 配置文件：${saved.config_path}`;
   } catch(error){
     st.className = 'settings-message error';
     st.textContent = '重新加载失败：' + error.message;
@@ -1526,7 +1560,7 @@ PAGE_SETTINGS_TPL = r"""<!DOCTYPE html>
 
   <section class="settings-card">
     <h2>应用配置</h2>
-    <p class="settings-hint">此处维护全部目标应用；--check 核对全部已配置包名。模型可选择缓存中的应用并通过 ADB 直启。「重新加载」从设备获取包名用于补全，并将当前应用清单全量保存到 config.yaml。</p>
+    <p class="settings-hint">此处只维护目标应用。点击「重新加载」会以当前设备为准核对并保存目标应用的包名；另一设备上不存在的旧包名会清空，之后请从包名列表选正确包名再保存。获取到的全部包名只作为候选，不会全部写入配置。</p>
     <div id="appCheckList" class="app-check-list">正在读取应用配置…</div>
     <div class="settings-actions">
       <button id="addAppBtn" type="button">+ 添加应用</button>

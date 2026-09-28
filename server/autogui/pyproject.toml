@@ -36,6 +36,9 @@ py-modules = ["main"]
 [tool.setuptools.packages.find]
 include = ["autogui*"]
 
+[tool.setuptools.package-data]
+"autogui.brain" = ["prompt_text.yaml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

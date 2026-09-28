@@ -199,7 +199,9 @@ class GLMClient:
             self.usage.retries += 1
             retry = messages + [
                 {"role": "assistant", "content": text[:1500]},
-                {"role": "user", "content": f"上一回复无法解析为 JSON（{e}）。{prompts.OUTPUT_RULE} 重新输出："},
+                {"role": "user", "content": prompts.render(
+                    "json_retry_user", error=e, output_rule=prompts.OUTPUT_RULE,
+                )},
             ]
             text2, second = self.chat(retry, kind=f"{kind}_json_retry")
             merged = Usage(

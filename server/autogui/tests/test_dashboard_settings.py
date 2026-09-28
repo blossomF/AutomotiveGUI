@@ -10,7 +10,10 @@ from pathlib import Path
 import pytest
 
 from autogui.config import Config
-from autogui.dashboard_settings import device_apps, grid_preview, public_settings, save_apps, save_settings, test_model as verify_model
+from autogui.dashboard_settings import (
+    device_apps, grid_preview, public_settings, refresh_app_cache,
+    save_apps, save_settings, test_model as verify_model,
+)
 from autogui.perception.grid import auto_grid_dimensions, grid_dimensions
 
 
@@ -289,3 +292,33 @@ def test_device_apps_filters_system_and_caches(config_path, monkeypatch):
     assert r2["cached"] is True and len(calls) == 1
     r3 = ds.device_apps(config_path, force=True)
     assert r3["cached"] is False and len(calls) == 2
+
+
+def test_reload_replaces_old_device_packages_and_marks_current_device(config_path, monkeypatch):
+    import autogui.bridge.adb as adb
+    import autogui.dashboard_settings as ds
+
+    class Phone:
+        serial = "redmi-phone"
+
+        def list_packages(self):
+            return ["com.android.systemui", "com.example.music.phone", "com.sankuai.meituan"]
+
+    monkeypatch.setattr(adb, "get_device", lambda *a, **k: Phone())
+    ds._DEVICE_APPS_CACHE.update(ts=0.0, packages=None, all_packages=None, serial="")
+    refreshed = refresh_app_cache(config_path, [
+        {"name": "QQ音乐", "package": "com.example.music", "aliases": []},
+        {"name": "美团", "package": "com.sankuai.meituan", "aliases": []},
+    ])
+    assert refreshed["cleared"] == ["QQ音乐"]
+    assert refreshed["count"] == 2
+    assert refreshed["saved_count"] == 2
+    cfg = Config.load(config_path)
+    assert cfg.app_cache_serial == "redmi-phone"
+    assert [app.package for app in cfg.apps] == ["", "com.sankuai.meituan"]
+    assert "com.example.music" not in config_path.read_text(encoding="utf-8")
+    assert refreshed["config_path"] == str(config_path.resolve())
+
+    with pytest.raises(ValueError, match="未安装"):
+        save_apps(config_path, [{"name": "QQ音乐", "package": "com.example.music", "aliases": []}],
+                  device_serial="redmi-phone")

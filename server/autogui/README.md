@@ -267,7 +267,8 @@ autogui/
 │   │   └── grid.py        横屏网格 + 标注 + 动作标记
 │   ├── brain/
 │   │   ├── glm_client.py  GLM 5.3（OpenAI 兼容）+ JSON 严格 + 用量统计
-│   │   ├── prompts.py     decide(tree/vlm) + reflect(A/B/C)
+│   │   ├── prompts.py     读取模板、填充动态字段、组装消息
+│   │   ├── prompt_text.yaml  通用模型提示词（首次选应用/决策/反思/重试/上下文）
 │   │   └── context.py     四层上下文 + token 预算裁剪
 │   ├── core/
 │   │   ├── graph.py       LangGraph 8 节点 + 条件回边
@@ -277,9 +278,20 @@ autogui/
 │   │   └── executor.py    local / mcp 双通道
 │   └── skills/
 │       └── base.py        模型指南加载 + 显式配方执行器
-├── skills/                配方的实际存放处（<app>/skill.yaml），与同名包分开
+├── skills/                App 指导与页面经验（<app>/skill.yaml、ui_hints.yaml）
 └── tests/                 离线单测，不需要车机与网络
 ```
+
+### 提示词维护
+
+- 通用提示词集中在 [`autogui/brain/prompt_text.yaml`](autogui/brain/prompt_text.yaml)。`$task`、`$context_text`、`$width` 等占位符由代码填入；修改后重启服务生效。
+- 动作名称、动作字段和滚动方向从 `actions.py` 生成，修改动作协议时以该文件为准，不在 YAML 中另维护一份列表。
+- 应用任务指导维护在 `skills/<app>/skill.yaml`；仅在当前 XML 页面标记命中时发送的经验维护在 `skills/<app>/ui_hints.yaml`。
+- 修改模板后运行 `python -m pytest tests -q`，并查看 debug 日志中的 `glm_request` 确认实际发送的文本。
+
+### 应用包名缓存
+
+设置页「重新加载」会从当前连接的设备重新取得安装包列表，只把页面维护的目标应用写入 `config.yaml.apps`，并记录 `app_cache_serial`。当前设备上不存在的旧包名会清空，应用名称和别名保留；包名列表只供选择，不会全量写入配置。中文应用名无法从 `pm list packages` 的英文包 ID 可靠反查，未补全的包名需要在设置页选择后保存。运行任务时，只有缓存序列号与当前设备一致才会用配置包名直接启动应用。
 
 ---
 

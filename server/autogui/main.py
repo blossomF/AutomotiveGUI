@@ -172,6 +172,9 @@ def cmd_check(cfg) -> int:
     # 最后核对设置页维护的全部目标应用；不记录其他 App。
     selected = [app for app in cfg.apps if app.in_scope]
     if selected:
+        cache_serial = getattr(cfg, "app_cache_serial", "")
+        if cache_serial != device.serial:
+            warn("应用直启缓存", f"缓存设备 {cache_serial or '(未验证)'} ≠ 当前设备 {device.serial}；设置页重新加载后才可直启")
         try:
             installed = set(device.list_packages())
             for app in selected:

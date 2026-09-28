@@ -11,7 +11,7 @@ from autogui.core.graph import Runner
 
 
 def _config():
-    return Config(apps=[
+    return Config(app_cache_serial="test-device", apps=[
         AppConfig(name="美团", package="com.example.meituan", aliases=["美团外卖"]),
         AppConfig(name="QQ音乐", package="com.example.music"),
     ])
@@ -52,7 +52,11 @@ def _runner(monkeypatch, task, answer, events, launch_result="OK launch"):
 
     runner = Runner(cfg=_config(), task=task, glm=FakeGLM(answer, events), executor=Executor())
     runner.log = FakeLog()
-    monkeypatch.setattr(runner, "prepare", lambda: setattr(runner, "started", time.time()))
+    def prepare():
+        runner.started = time.time()
+        runner.device_serial = "test-device"
+
+    monkeypatch.setattr(runner, "prepare", prepare)
     return runner
 
 
@@ -127,6 +131,23 @@ def test_empty_cache_skips_initial_model_call(monkeypatch):
     runner.execute()
     assert events == ["perceive"]
     assert "initial_model" not in runner.route_counts
+
+
+def test_old_device_cache_never_direct_launches_on_new_device(monkeypatch):
+    events = []
+    runner = _runner(monkeypatch, "打开美团", {"decision": "OPEN_ONLY", "app_id": 1}, events)
+    runner.device_serial = "phone"
+    runner.cfg.app_cache_serial = "old-car"
+
+    class Graph:
+        def invoke(self, state, *, config):
+            events.append("perceive")
+            return {"success": False, "status": "stopped", "step": 1}
+
+    monkeypatch.setattr(runner, "prepare", lambda: setattr(runner, "started", time.time()))
+    monkeypatch.setattr(runner, "graph", lambda: Graph())
+    runner.execute()
+    assert events == ["perceive"]
 
 
 def test_cmd_run_always_constructs_model_for_initial_decision(monkeypatch):

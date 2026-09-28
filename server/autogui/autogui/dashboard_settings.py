@@ -91,6 +91,8 @@ def public_settings(config_path: Path) -> dict:
         },
         "apps": [{"name": app.name, "package": app.package,
                   "aliases": list(app.aliases or [])} for app in cfg.apps if app.in_scope],
+        "app_cache_serial": cfg.app_cache_serial,
+        "config_path": str(config_path.resolve()),
     }
 
 
@@ -208,6 +210,20 @@ def _replace_apps_section(source: str, apps: list) -> str:
     return "".join(lines)
 
 
+def _replace_cache_serial(source: str, serial: str) -> str:
+    """记录目标应用包名所属设备；无设备验证时清空标记。"""
+    lines = source.splitlines(keepends=True)
+    newline = "\r\n" if "\r\n" in source else "\n"
+    entry = f"app_cache_serial: {json.dumps(serial)}{newline}"
+    head = next((i for i, line in enumerate(lines) if line.startswith("app_cache_serial:")), None)
+    if head is not None:
+        lines[head] = entry
+    else:
+        pos = next((i for i, line in enumerate(lines) if line.startswith("apps:")), len(lines))
+        lines.insert(pos, entry)
+    return "".join(lines)
+
+
 def _atomic_write(config_path: Path, updated: str) -> None:
     """先用正式配置解析器验证一次，再同目录原子替换写盘。"""
     import yaml
@@ -225,39 +241,74 @@ def _atomic_write(config_path: Path, updated: str) -> None:
             os.unlink(temp_name)
 
 
-def save_apps(config_path: Path, apps: list) -> dict:
+def _verified_serial(serial: str, apps: list) -> str:
+    if not serial:
+        return ""
+    cached = _DEVICE_APPS_CACHE
+    if cached.get("serial") != serial or cached.get("all_packages") is None:
+        raise ValueError("设备应用列表已变化，请先重新加载")
+    missing = [app["name"] for app in apps
+               if app["package"] and app["package"] not in cached["all_packages"]]
+    if missing:
+        raise ValueError(f"当前设备未安装这些应用的配置包名：{'、'.join(missing)}；请重新加载并修正")
+    return serial
+
+
+def save_apps(config_path: Path, apps: list, device_serial: str | None = None) -> dict:
     """只保存完整应用清单；不动模型、ASR 和网格字段。"""
     parsed = _apps_fields({"apps": apps})
     if parsed is None:
         raise ValueError("apps 必须是列表")
     updated = _replace_apps_section(config_path.read_text(encoding="utf-8"), parsed)
+    if device_serial is not None:
+        updated = _replace_cache_serial(updated, _verified_serial(device_serial, parsed))
     _atomic_write(config_path, updated)
     return public_settings(config_path)
 
 
 _DEVICE_APPS_TTL = 120.0
-_DEVICE_APPS_CACHE: dict = {"ts": 0.0, "packages": None}
+_DEVICE_APPS_CACHE: dict = {"ts": 0.0, "packages": None, "all_packages": None, "serial": ""}
 
 
 def device_apps(config_path: Path, force: bool = False) -> dict:
-    """从车机拉取已安装应用包名（短缓存；与 main.py --packages 同口径过滤系统前缀）。
+    """从当前设备拉取已安装应用包名（短缓存；与 main.py --packages 同口径过滤系统前缀）。
 
     供设置页「重新加载」做包名补全与核对。
     """
-    now = time.time()
-    cached = _DEVICE_APPS_CACHE["packages"]
-    if not force and cached is not None and now - _DEVICE_APPS_CACHE["ts"] < _DEVICE_APPS_TTL:
-        return {"ok": True, "packages": cached, "cached": True, "count": len(cached)}
     cfg = Config.load(config_path)
     from autogui.bridge.adb import get_device
 
     device = get_device(cfg.device_serial, display=cfg.display_id)
+    now = time.time()
+    cached = _DEVICE_APPS_CACHE["packages"]
+    if (not force and cached is not None and _DEVICE_APPS_CACHE["serial"] == device.serial
+            and now - _DEVICE_APPS_CACHE["ts"] < _DEVICE_APPS_TTL):
+        return {"ok": True, "packages": cached, "cached": True,
+                "count": len(cached), "serial": device.serial}
     packages = device.list_packages()
     interesting = [p for p in packages
                    if not p.startswith(("com.android.", "android.", "com.google."))]
     _DEVICE_APPS_CACHE["ts"] = now
     _DEVICE_APPS_CACHE["packages"] = interesting
-    return {"ok": True, "packages": interesting, "cached": False, "count": len(interesting)}
+    _DEVICE_APPS_CACHE["all_packages"] = set(packages)
+    _DEVICE_APPS_CACHE["serial"] = device.serial
+    return {"ok": True, "packages": interesting, "cached": False,
+            "count": len(interesting), "serial": device.serial}
+
+
+def refresh_app_cache(config_path: Path, apps: list) -> dict:
+    """以当前设备为准全量覆盖目标包名；旧设备的缺失包名清空。"""
+    inventory = device_apps(config_path, force=True)
+    parsed = _apps_fields({"apps": apps})
+    installed = _DEVICE_APPS_CACHE["all_packages"]
+    cleared = []
+    for app in parsed:
+        if app["package"] and app["package"] not in installed:
+            cleared.append(app["name"])
+            app["package"] = ""
+    saved = save_apps(config_path, parsed, device_serial=inventory["serial"])
+    return {**inventory, **saved, "ok": True, "cleared": cleared,
+            "saved_count": len(saved["apps"])}
 
 
 def save_settings(config_path: Path, payload: dict) -> dict:
@@ -304,6 +355,7 @@ def save_settings(config_path: Path, payload: dict) -> dict:
     updated = _replace_fields(config_path.read_text(encoding="utf-8"), updates)
     if apps is not None:
         updated = _replace_apps_section(updated, apps)
+        updated = _replace_cache_serial(updated, _verified_serial(str(payload.get("device_serial") or ""), apps))
     _atomic_write(config_path, updated)
     return public_settings(config_path)
 

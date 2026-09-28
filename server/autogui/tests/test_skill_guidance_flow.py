@@ -5,12 +5,13 @@ from types import SimpleNamespace
 import pytest
 
 from autogui.brain.glm_client import Usage
-from autogui.config import Config
+from autogui.config import AppConfig, Config, PROJECT_ROOT
 from autogui.core.decision_log import DecisionLog
 from autogui.core.graph import Runner
 from autogui.perception.grid import Grid
 from autogui.perception.tree import Candidate
 from autogui.skills.base import SkillBook
+from autogui.skills.ui_hints import PageHintBook
 
 
 def _runner(tmp_path, responses):
@@ -94,4 +95,28 @@ def test_skill_requires_all_params_and_cannot_be_reactivated(tmp_path):
     assert runner._resolve_skill_choice({"skill": "music.play_song", "params": {}})[0] is None
     runner.activated_skills.add("music.play_song")
     assert runner._resolve_skill_choice({"skill": "music.play_song", "params": {"song": "七里香"}})[0] is None
+    runner.log.close()
+
+
+def test_runner_sends_only_hints_matched_to_current_page(tmp_path):
+    runner, seen = _runner(tmp_path, [
+        {"type": "CLICK", "node_ref": 1},
+        {"type": "CLICK", "node_ref": 1},
+    ])
+    package = "com.mosi.mosc.onlinemedia.qqmusic"
+    runner.cfg.apps = [AppConfig(name="QQ音乐", package=package)]
+    runner.cfg.app_cache_serial = "test-device"
+    runner.device_serial = "test-device"
+    runner.page_hint_book = PageHintBook(PROJECT_ROOT / "skills")
+    runner.obs.xml = (
+        f'<hierarchy><node resource-id="{package}:id/iv_bottomCtrl1" />'
+        f'<node resource-id="{package}:id/iv_bottomCtrl2" /></hierarchy>'
+    )
+    runner.decide({"step": 1, "route": "tree"})
+    assert "收藏红心" in seen[0]
+
+    runner.obs.xml = '<hierarchy><node resource-id="com.other.app:id/search" /></hierarchy>'
+    runner.decide_attempts = 0
+    runner.decide({"step": 2, "route": "tree"})
+    assert "收藏红心" not in seen[1]
     runner.log.close()

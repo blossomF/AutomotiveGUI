@@ -4,8 +4,13 @@ import pytest
 
 from autogui.actions import ACTION_NAMES, parse_action
 from autogui.brain.context import Context, estimate_tokens
-from autogui.brain.prompts import first_json_object, parse_reflection
+from autogui.brain.prompts import (
+    DECIDE_SYSTEM, build_decide_messages, build_reflect_messages,
+    decide_user_text, first_json_object, parse_reflection, render,
+)
+from autogui.config import AppConfig, PROJECT_ROOT
 from autogui.perception import tree as tree_mod
+from autogui.skills.ui_hints import PageHintBook
 from tests.conftest import SAMPLE_XML
 
 
@@ -167,3 +172,57 @@ def test_token_estimator_orders_cjk_and_ascii_correctly():
     assert estimate_tokens("播放七里香") == 5            # CJK 约 1/字
     assert estimate_tokens("a" * 400) == 100             # ascii 约 1/4 字符
     assert estimate_tokens("播放" * 50) < estimate_tokens("a" * 400) + 200
+
+
+def _ids_xml(package: str, *markers: str) -> str:
+    return "<hierarchy>" + "".join(
+        f'<node resource-id="{package}:id/{marker}" bounds="[100,200][300,220]" />'
+        for marker in markers
+    ) + "</hierarchy>"
+
+
+def test_app_page_hints_require_current_package_and_page_markers():
+    book = PageHintBook(PROJECT_ROOT / "skills")
+    music_package = "com.mosi.mosc.onlinemedia.qqmusic"
+    apps = [AppConfig(name="QQ音乐", package=music_package)]
+    player = _ids_xml(music_package, "iv_bottomCtrl1", "iv_bottomCtrl2", "sb_seekBar")
+    hints = book.match(player, apps)
+    assert any("收藏红心" in hint for hint in hints)
+    assert any("sb_seekBar" in hint and "bounds=[100,200][300,220]" in hint for hint in hints)
+    assert not any("地图视角" in hint for hint in hints)
+    assert book.match(_ids_xml(music_package, "iv_bottomCtrl1"), apps) == []
+    assert book.match(_ids_xml("com.other.app", "iv_bottomCtrl1", "iv_bottomCtrl2"), apps) == []
+    assert book.match(player, [AppConfig(name="QQ音乐", package="com.changed.music")]) == []
+
+    nav = _ids_xml("com.fawvw.vehicle.navi.ceaapp",
+                   "main_button_car_angle_layout", "main_button_scale_gps_layout")
+    assert any("地图视角" in hint for hint in book.match(nav, apps))
+
+
+def test_global_prompt_has_no_app_layout_or_slider_experiment():
+    assert "iv_bottomCtrl1" not in DECIDE_SYSTEM
+    assert "main_button_car_angle_layout" not in DECIDE_SYSTEM
+    assert "实测不响应" not in DECIDE_SYSTEM
+    assert "sb_seekBar" not in decide_user_text("任务", (1920, 1080))
+
+
+def test_only_current_page_hints_enter_context():
+    c = _ctx(page_hints=["QQ音乐 / 主页：iv_mine 是「我的」入口"])
+    text, _, _ = c.trim([])
+    assert "当前页面提示" in text and "iv_mine" in text
+    c.page_hints = []
+    text, _, _ = c.trim([])
+    assert "当前页面提示" not in text and "iv_mine" not in text
+
+
+def test_external_prompt_templates_render_all_routes():
+    tree = build_decide_messages("任务：播放歌曲", None, "20x10", screen=(1920, 1080))
+    assert "CLICK(node_ref | grid)" in tree[0]["content"]
+    assert "1920×1080" in tree[1]["content"]
+    vlm = build_decide_messages("任务：播放歌曲", "abc", "20x10")
+    assert vlm[1]["content"][1]["text"].startswith("当前屏幕截图已叠加 20x10")
+    assert '"grid":"J5"' in vlm[1]["content"][3]["text"]
+    reflect = build_reflect_messages("CLICK", "播放歌曲", "before", "after")
+    assert "A = 动作生效" in reflect[0]["content"]
+    assert "刚执行的动作：CLICK" in reflect[1]["content"][0]["text"]
+    assert "打开美团" in render("initial_route_user", task="打开美团", catalog="1: 美团")

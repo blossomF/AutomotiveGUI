@@ -1,0 +1,23 @@
+app: QQ音乐
+package: com.mosi.mosc.onlinemedia.qqmusic
+configured_app: QQ音乐
+pages:
+  - name: 全屏播放页
+    markers: [iv_bottomCtrl1, iv_bottomCtrl2]
+    hint: >-
+      底部控制栏从左到右：收藏红心(iv_bottomCtrl1，selected=true 表示已收藏)、播放模式(iv_bottomCtrl2)、
+      上一首、播放/暂停、下一首、播放队列(iv_bottomCtrl3)、音效(iv_bottomCtrl4)。
+      播放页顶部 iv_topCtrl1~3 不是设置；要找设置，返回主页从「我的」进入。
+  - name: 播放进度条
+    markers: [sb_seekBar]
+    bounds_marker: sb_seekBar
+    hint: >-
+      此页 sb_seekBar 的轨道点击曾无响应；从 thumb 当前位置拖动并观察时间变化。
+      跳到目标比例时，结合当前时间/总时长和轨道 bounds 估算起点与终点像素坐标；
+      大跨度拖动可适当增加 duration，若时间未变则检查试听限制，不要重复盲拖。
+  - name: 主页
+    markers: [iv_mine]
+    hint: 主页右上角 iv_mine 是「我的」入口；需要设置时先进入「我的」。
+  - name: 我的页
+    markers: [iv_setting]
+    hint: 顶部 iv_setting 是「设置」入口。

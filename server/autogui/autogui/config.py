@@ -159,6 +159,7 @@ class Config(BaseModel):
     skills: SkillConfig = Field(default_factory=SkillConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
     apps: list[AppConfig] = Field(default_factory=list)
+    app_cache_serial: str = ""  # apps.package 仅对最近重新加载的设备有效
     log_dir: str = "test/log"
     verbose: bool = True
     debug: bool = False  # 细粒度日志开关（截图/XML/GLM交互落盘），生产环境保持False

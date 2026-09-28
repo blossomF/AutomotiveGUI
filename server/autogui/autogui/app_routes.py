@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from autogui.brain import prompts
 from autogui.config import AppConfig
 
 
@@ -25,17 +26,8 @@ def choose_initial_route(task: str, apps: list[AppConfig], glm) -> InitialRoute:
         for i, app in enumerate(available, 1)
     )
     messages = [
-        {"role": "system", "content": (
-            "你负责车机任务开始前的应用选择，只看用户指令和已配置应用清单，不看屏幕。"
-            "若任务明确要求打开或使用清单中的应用，选择该应用 ID；若应用不在清单、"
-            "只是提及应用而非要求操作、目标不明确或有歧义，选择 OBSERVE。"
-            "纯粹只要求打开应用时选 OPEN_ONLY；打开后还需搜索、播放、加购等操作时选 OPEN_CONTINUE。"
-            "若美团在清单中，「打开美团」是 OPEN_ONLY；"
-            "「打开美团外卖 App，搜索兰州拉面并加入购物车」是 OPEN_CONTINUE。"
-            "只输出 JSON：{\"decision\":\"OPEN_ONLY|OPEN_CONTINUE|OBSERVE\",\"app_id\":整数或null}。"
-            "不得编造 ID 或包名。"
-        )},
-        {"role": "user", "content": f"指令：{task}\n已配置应用：\n{catalog}"},
+        {"role": "system", "content": prompts.render("initial_route_system")},
+        {"role": "user", "content": prompts.render("initial_route_user", task=task, catalog=catalog)},
     ]
     raw = glm.chat_json(messages, kind="initial_app_route")
     if not isinstance(raw, dict):

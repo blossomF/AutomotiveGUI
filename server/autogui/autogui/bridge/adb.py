@@ -46,7 +46,8 @@ class ADBError(RuntimeError):
         self.returncode = returncode
         self.stderr = stderr or ""
         self.stdout = stdout or ""
-        detail = self.stderr.strip() or self.stdout.strip() or "no output"
+        parts = [part.strip() for part in (self.stderr, self.stdout) if part.strip()]
+        detail = "\n".join(dict.fromkeys(parts)) or "no output"
         cmd = "adb " + " ".join(str(a) for a in args)
         super().__init__(f"{cmd} failed (exit {returncode}): {detail}")
 

@@ -27,6 +27,14 @@ from autogui.bridge.adb import (
 from tests.conftest import SAMPLE_XML
 
 
+def test_adb_error_keeps_stdout_when_stderr_only_lists_arguments():
+    error = ADBError(("shell", "monkey", "-p", "com.example.app"), 252,
+                     stderr="args: [-p, com.example.app]",
+                     stdout="No activities found to run")
+    assert "args: [-p, com.example.app]" in str(error)
+    assert "No activities found to run" in str(error)
+
+
 def _png(w: int, h: int) -> bytes:
     """结构合法的 PNG 头；对 png_size() 足够。"""
     return b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + struct.pack(">II", w, h) + b"\x00" * 4

@@ -16,6 +16,7 @@ import yaml
 
 from autogui.bridge.adb import Device, find_node, node_center
 from autogui.bridge.input import TextInput
+from autogui.brain import prompts
 
 # 中文车机弹窗。android-agent 原版是英文/TikTok 专属的
 # （{"not now","skip","cancel",...}），在这里什么都匹配不到——
@@ -113,10 +114,10 @@ class SkillBook:
         if missing:
             raise SkillMiss(f"{key} missing guide params: {', '.join(missing)}")
         guide = self._sub(skill, skill.guide, args)
-        return (f"技能 {skill.app}.{skill.name}；参数：{args}\n"
-                f"{guide}\n"
-                "这只是操作指导。必须根据当前屏幕逐步选择动作；不匹配时放弃此指导。"
-                "只有看到目标已达成的证据才回答 COMPLETE。")
+        return prompts.render(
+            "skill_guide_wrapper", skill_id=f"{skill.app}.{skill.name}",
+            params=args, guide=guide,
+        )
 
     def get(self, key: str) -> Skill | None:
         if key in self.by_id:

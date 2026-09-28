@@ -35,7 +35,7 @@ from autogui.bridge import tools
 from autogui.bridge.adb import ADBError
 from autogui.brain.context import Context
 from autogui.brain.glm_client import GLMClient, GLMError
-from autogui.app_routes import choose_initial_route
+from autogui.app_routes import InitialRoute, choose_initial_route
 from autogui.config import AppConfig, Config, PROJECT_ROOT
 from autogui.core import guard
 from autogui.core.decision_log import DecisionLog
@@ -45,6 +45,7 @@ from autogui.perception import grid as grid_mod
 from autogui.perception import tree as tree_mod
 from autogui.perception.capture import Observation, observe
 from autogui.skills.base import SkillBook, SkillMiss
+from autogui.skills.ui_hints import PageHintBook
 
 
 @dataclass
@@ -73,6 +74,8 @@ class Runner:
     context: Context = field(init=False, default=None)  # type: ignore[assignment]
     # 技能库：普通流程提供模型指南；显式 --skill-only 才执行 YAML 配方
     book: SkillBook | None = None
+    page_hint_book: PageHintBook | None = None
+    device_serial: str = ""
 
     # 运行开始时刻（time.time()），用于墙钟耗时与 guard 超时判定
     started: float = 0.0
@@ -106,6 +109,7 @@ class Runner:
         if self.glm is not None:
             self.glm._log = self.log
         tools.dev().trace_log = self.log
+        self.device_serial = tools.dev().serial
         if self.executor is None:
             self.executor, note = make_executor(self.cfg.exec_mode)
             if note:
@@ -113,10 +117,13 @@ class Runner:
         if self.cfg.skills.enabled and self.book is None:
             self.book = SkillBook(PROJECT_ROOT / self.cfg.skills.directory, tools.dev(), tools.text_input())
             self.context.skill_index = self.book.index()
+        self.page_hint_book = PageHintBook(PROJECT_ROOT / self.cfg.skills.directory)
         # 把 config.yaml 的 apps 段接进提示词。此前这个初始化配置只被
         # main.py --dump-report 读过，模型完全不知道包名，LAUNCH 时只能瞎猜
         # （实测写出 app='哔哩哔哩'，被 bridge/adb.py 的包名校验拒掉）。
-        apps = [a for a in (self.cfg.apps or []) if getattr(a, "package", "")]
+        apps = [a for a in (self.cfg.apps or []) if a.package]
+        if not self.cfg.app_cache_serial or self.cfg.app_cache_serial != self.device_serial:
+            apps = []
         self.context.app_index = "\n".join(f"{a.name}={a.package}" for a in apps)
         self.log.banner(f"Automotive GUI Agent  |  tree→vlm  |  exec={self.executor.name}")
         self.log.kv("任务", self.task)
@@ -246,6 +253,14 @@ class Runner:
             self.log.phase("decide", "本步已重试 2 次仍无可用决策，放弃本步")
             return {"action": {}, "retry_decision": False, "no_progress": state.get("no_progress", 0) + 1}
         self.context.progress = self.context.progress or ""
+        active_apps = (self.cfg.apps if self.cfg.app_cache_serial == self.device_serial
+                       and self.device_serial else [])
+        self.context.page_hints = (
+            self.page_hint_book.match(self.obs.xml, active_apps)
+            if self.page_hint_book and self.obs else []
+        )
+        if self.log.debug and self.context.page_hints:
+            self.log.detail("decide", f"页面提示命中: {len(self.context.page_hints)}")
         text, kept, counts = self.context.trim(self.obs.candidates if route == "tree" else [])
 
         # 细粒度日志：候选裁剪
@@ -758,11 +773,14 @@ class Runner:
         生成决策链汇总，返回 success/status/steps/耗时/日志路径等结果 dict。"""
         self.prepare()
         if self.glm is not None:
-            has_cached_app = any(app.in_scope and app.package for app in self.cfg.apps)
+            cache_matches = bool(self.cfg.app_cache_serial) and self.cfg.app_cache_serial == self.device_serial
+            available_apps = self.cfg.apps if cache_matches else []
+            has_cached_app = any(app.in_scope and app.package for app in available_apps)
             if has_cached_app:
                 self.route_counts["initial_model"] = self.route_counts.get("initial_model", 0) + 1
             try:
-                initial = choose_initial_route(self.task, self.cfg.apps, self.glm)
+                initial = (choose_initial_route(self.task, available_apps, self.glm)
+                           if cache_matches else InitialRoute(reason="应用包名未针对当前设备重新加载，跳过直启"))
                 self.log.phase("route", f"首次文本判断：{initial.reason}",
                                app=initial.app.name if initial.app else "",
                                finish_after_launch=initial.finish_after_launch,

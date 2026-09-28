@@ -22,6 +22,7 @@ import re
 from dataclasses import dataclass, field
 
 from autogui.actions import ACTION_NAMES
+from autogui.brain import prompts
 from autogui.perception import tree as tree_mod
 
 _CJK = re.compile(r"[㐀-䶿一-鿿豈-﫿぀-ヿ]")
@@ -47,6 +48,7 @@ class Context:
     skill_index: str = ""
     active_skill_guide: str = ""
     app_index: str = ""
+    page_hints: list[str] = field(default_factory=list)
 
     history_window: int = 5
     token_budget: int = 8000
@@ -56,15 +58,15 @@ class Context:
 
     def permanent_block(self) -> str:
         lines = [
-            f"任务：{self.task}",
-            f"动作类型：{', '.join(ACTION_NAMES)}",
+            prompts.render("context_task", task=self.task),
+            prompts.render("context_action_types", action_names=", ".join(ACTION_NAMES)),
         ]
         if self.app_index:
-            lines.append("可用应用（LAUNCH 的 app 字段填这里的包名）：\n" + self.app_index)
+            lines.append(prompts.render("context_app_index", app_index=self.app_index))
         if self.skill_index:
-            lines.append("可用技能：\n" + self.skill_index)
+            lines.append(prompts.render("context_skill_index", skill_index=self.skill_index))
         if self.active_skill_guide:
-            lines.append("当前已加载的技能指导（不要再次选择同一 SKILL）：\n" + self.active_skill_guide)
+            lines.append(prompts.render("context_active_skill", guide=self.active_skill_guide))
         return "\n".join(lines)
 
     # ── 滑动块 ───────────────────────────────────────────────────────────────
@@ -79,7 +81,7 @@ class Context:
         """
         recent = self.history[-self.history_window:] if self.history else []
         if not recent:
-            return "（第一步，尚无历史）"
+            return prompts.render("context_empty_history")
         out = []
         for h in recent:
             flag = "✗" if h.get("failed") else "✓"
@@ -92,7 +94,7 @@ class Context:
             return ""
         # 排序使序列化稳定，对 prompt 前缀缓存友好。
         body = "\n".join(f"{k}={self.entities[k]}" for k in sorted(self.entities))
-        return "已确认的关键信息（后续步骤直接使用，不要重新推断）：\n" + body
+        return prompts.render("context_entities", entities=body)
 
     def observation_text(self, cands: list[tree_mod.Candidate]) -> str:
         return tree_mod.render_candidates(cands) if cands else "TREE_EMPTY"
@@ -105,6 +107,7 @@ class Context:
             "history": self.history_block(),
             "entities": self.entities_block(),
             "observation": self.observation_text(cands or []),
+            "page_hints": "\n".join(self.page_hints),
         }
         counts = {k: estimate_tokens(v) for k, v in parts.items()}
         counts["total"] = sum(counts.values())
@@ -125,15 +128,17 @@ class Context:
                 task=self.task, history=self.history,
                 entities=self.entities, skill_index=self.skill_index,
                 active_skill_guide=self.active_skill_guide, app_index=self.app_index,
+                page_hints=self.page_hints,
                 history_window=w, candidate_limit=k,
             )
             body = kept[:k]
             text = "\n\n".join(p for p in (
                 c.permanent_block(),
                 (c.entities_block() + "\n\n") if c.entities else "",
-                "历史：\n" + c.history_block(),
-                f"进度：{self.progress}" if self.progress else "",
-                "当前屏幕可点击候选（#编号 = node_ref，回复时用 node_ref，不要复制坐标）：\n" + c.observation_text(body),
+                prompts.render("context_history", history=c.history_block()),
+                prompts.render("context_progress", progress=self.progress) if self.progress else "",
+                prompts.render("context_candidates", candidates=c.observation_text(body)),
+                prompts.render("context_page_hints", page_hints="\n".join(c.page_hints)) if c.page_hints else "",
             ) if p)
             return text, estimate_tokens(text)
 
@@ -148,7 +153,9 @@ class Context:
             text, tokens = build(window, len(kept))
 
         if dropped_any:
-            text += "\n\n（上下文因预算已裁剪：保留最近 %d 步、%d 个候选）" % (window, len(kept))
+            text += "\n\n" + prompts.render(
+                "context_trimmed", history_window=window, candidate_count=len(kept),
+            )
         return text, kept, {"approx_input": tokens, "trimmed": dropped_any}
 
     # ── 更新 ─────────────────────────────────────────────────────────────────

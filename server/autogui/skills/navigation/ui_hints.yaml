@@ -1,0 +1,9 @@
+app: 车机导航
+package: com.fawvw.vehicle.navi.ceaapp
+pages:
+  - name: 地图首页
+    markers: [main_button_car_angle_layout, main_button_scale_gps_layout]
+    hint: >-
+      首页左下工具栏的 main_button_car_angle_layout 是地图视角切换，
+      文本在「车头向上/正北向上」间变化；右下 main_button_scale_gps_layout 是定位锁定，
+      不是视角切换。充电图层、详细播报、更多也在左下工具栏。
