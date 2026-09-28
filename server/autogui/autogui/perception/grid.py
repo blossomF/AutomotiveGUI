@@ -1,17 +1,17 @@
-"""横屏网格叠加与 标签<->像素 映射（A 路径的兜底面）。
+"""自适应网格叠加与 标签<->像素 映射（VLM 路径的兜底面）。
 
 借鉴 ``LightGUIAgent/lightguiagent/grid_converter.py`` 的*思路*（单字母
 列 + 从 1 开始的行，让模型回答 "E5" 而不是一对像素坐标，这被证实能
 减少坐标幻觉），但重新实现，原因有二，记录于 技术方案评估.md §2 C-11：
 
   * 那个项目的自动密度把行数钳制到 ``max(15, ...)``
-    （``settings.py:159-171``），是按竖屏手机调优的；在 1920x1080
-    横屏车机上会得到 ~128x72px 的格子。我们原样从配置取 cols/rows。
+    （``settings.py:159-171``），是按竖屏手机调优的；这里按实际截图宽高
+    分别计算行列，并允许显式手动覆盖。
   * 它的 ``GridStyle`` schema 禁止 ``rows < 10``，导致横屏网格几乎
     无法表达。
 
-20x10 的横屏网格在 1920x1080 下得到 ~96x108px 的格子——大约每格
-一个触摸目标，这正是标签对 VLM 无歧义的原因。
+旧的 20x10 横屏网格仍可作为手动覆盖；自动模式以约 100x110px 的
+单格尺寸为初始目标。
 """
 
 from __future__ import annotations
@@ -22,6 +22,27 @@ from dataclasses import dataclass
 from PIL import Image, ImageDraw, ImageFont
 
 _ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def auto_grid_dimensions(width: int, height: int) -> tuple[int, int]:
+    """按实际截图尺寸选择约 100x110px 的格子，并遵守标签/配置上限。"""
+    if width <= 0 or height <= 0:
+        raise ValueError("screen dimensions must be positive")
+    cols = min(26, max(5, round(width / 100)))
+    rows = min(40, max(3, round(height / 110)))
+    return cols, rows
+
+
+def grid_dimensions(width: int, height: int, *, mode: str = "auto",
+                    cols: int = 20, rows: int = 10) -> tuple[int, int]:
+    """auto 使用截图尺寸；manual 的输入优先于算法。"""
+    if mode == "auto":
+        return auto_grid_dimensions(width, height)
+    if mode == "manual":
+        if not 5 <= cols <= 26 or not 3 <= rows <= 40:
+            raise ValueError("manual grid exceeds 5..26 columns or 3..40 rows")
+        return cols, rows
+    raise ValueError(f"unknown grid mode: {mode}")
 
 
 @dataclass

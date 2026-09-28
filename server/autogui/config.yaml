@@ -17,10 +17,10 @@ display_id: null           # 保持 null；仅当 `--check` 报告多屏且
                             # 捕获到的不是中控屏时才设置
 input_chain: [yadb, adbkeyboard, ascii]
 
-# 横屏车机。1920x1080 下 20x10 得到约 96x108px 的格子，
-# 每格大约一个触摸目标。不要照搬 LightGUIAgent 的自动密度——它的
-# max(15, ...) 行数钳制是竖屏假设（技术方案评估.md §2 C-11）。
+# 默认按实际截图尺寸自动计算。cols/rows 是勾选手动覆盖后的备用值：
+# 1920x1080 下 20x10 约为 96x108px/格。
 grid:
+  mode: auto              # 默认按实际截图尺寸计算；前端勾选手动设置时改为 manual
   cols: 20
   rows: 10
   jpeg_quality: 85

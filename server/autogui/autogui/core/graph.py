@@ -143,6 +143,7 @@ class Runner:
                 tools.dev(),
                 grid_cols=self.cfg.grid.cols,
                 grid_rows=self.cfg.grid.rows,
+                grid_mode=self.cfg.grid.mode,
                 candidate_limit=self.cfg.agent.tree_candidate_limit,
                 last_size=(self.grid.width, self.grid.height) if self.grid else None,
             )
@@ -571,6 +572,7 @@ class Runner:
                     tools.dev(),
                     grid_cols=self.cfg.grid.cols,
                     grid_rows=self.cfg.grid.rows,
+                    grid_mode=self.cfg.grid.mode,
                     candidate_limit=self.cfg.agent.tree_candidate_limit,
                     last_size=(self.grid.width, self.grid.height) if self.grid else None,
                 )

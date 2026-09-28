@@ -24,7 +24,7 @@ from PIL import Image
 
 from autogui.bridge.adb import Device
 from autogui.perception import tree as tree_mod
-from autogui.perception.grid import Grid
+from autogui.perception.grid import Grid, grid_dimensions
 
 
 @dataclass
@@ -75,6 +75,7 @@ def observe(
     *,
     grid_cols: int = 20,
     grid_rows: int = 10,
+    grid_mode: str = "manual",
     candidate_limit: int = 40,
     last_size: tuple[int, int] | None = None,
 ) -> tuple[Observation, Grid]:
@@ -101,7 +102,8 @@ def observe(
 
     width, height = _resolve_size(png, last_size or device.screen_size())
     cands = tree_mod.candidates_from_xml(xml, limit=candidate_limit, screen=(width, height))
-    grid = Grid(width=width, height=height, cols=grid_cols, rows=grid_rows)
+    cols, rows = grid_dimensions(width, height, mode=grid_mode, cols=grid_cols, rows=grid_rows)
+    grid = Grid(width=width, height=height, cols=cols, rows=rows)
 
     return (
         Observation(

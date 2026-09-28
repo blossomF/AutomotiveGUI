@@ -54,6 +54,8 @@ def _resolve_autogui() -> Path:
 AUTOGUI_DIR = _resolve_autogui()
 PROJECT_ROOT = AUTOGUI_DIR          # 启动 main.py 时的 CWD（= server/autogui）
 LOGS_ROOT = AUTOGUI_DIR / "artifacts" / "logs"   # 决策链日志（扁平 *.jsonl）
+CONFIG_PATH = AUTOGUI_DIR / "config.yaml"
+_SETTINGS_LOCK = threading.Lock()
 
 # 当前由面板拉起的运行进程（同一时刻最多一个）
 _RUN_LOCK = threading.Lock()
@@ -277,6 +279,13 @@ def _load_cfg():
     return _CFG
 
 
+def _settings_api():
+    if str(AUTOGUI_DIR) not in sys.path:
+        sys.path.insert(0, str(AUTOGUI_DIR))
+    from autogui import dashboard_settings
+    return dashboard_settings
+
+
 def launch_voice():
     """录音 + 讯飞 ASR，返回 (text, error)。阻塞约 3~20s（录音+识别）。"""
     cfg = _load_cfg()
@@ -372,6 +381,13 @@ def stop_task():
 # HTTP Handler
 # ============================================================================
 class Handler(BaseHTTPRequestHandler):
+    def _settings_allowed(self) -> bool:
+        # 设置页可修改模型目标和凭证；即使面板以 0.0.0.0 启动，也只允许本机。
+        if self.client_address[0] not in ("127.0.0.1", "::1"):
+            return False
+        origin = self.headers.get("Origin")
+        return not origin or urllib.parse.urlparse(origin).netloc == self.headers.get("Host")
+
     def _send(self, code: int, body: bytes, content_type: str):
         self.send_response(code)
         self.send_header("Content-Type", content_type)
@@ -392,6 +408,24 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, HTML_RUN.encode("utf-8"), "text/html; charset=utf-8")
             elif path in ("/logs", "/logs.html"):
                 self._send(200, HTML_LOGS.encode("utf-8"), "text/html; charset=utf-8")
+            elif path == "/settings":
+                if not self._settings_allowed():
+                    self._send_json({"error": "设置页仅允许本机访问"}, 403)
+                else:
+                    self._send(200, HTML_SETTINGS.encode("utf-8"), "text/html; charset=utf-8")
+            elif path == "/api/settings":
+                if not self._settings_allowed():
+                    self._send_json({"error": "设置仅允许本机访问"}, 403)
+                else:
+                    self._send_json(_settings_api().public_settings(CONFIG_PATH))
+            elif path == "/api/settings/grid-preview":
+                if not self._settings_allowed():
+                    self._send_json({"error": "设置仅允许本机访问"}, 403)
+                else:
+                    try:
+                        self._send_json({"ok": True, **_settings_api().grid_preview(CONFIG_PATH)})
+                    except Exception as e:
+                        self._send_json({"ok": False, "error": str(e)})
             elif path == "/api/tasks":
                 self._send_json(list_tasks())
             elif path.startswith("/api/task/"):
@@ -427,7 +461,17 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         _touch()                     # 有请求 = 页面还在
         try:
+            if path in ("/api/settings", "/api/settings/test-model"):
+                if not self._settings_allowed():
+                    self._send_json({"ok": False, "error": "设置仅允许本机访问"}, 403)
+                    return
+                if not self.headers.get("Content-Type", "").startswith("application/json"):
+                    self._send_json({"ok": False, "error": "需要 application/json"}, 415)
+                    return
             length = int(self.headers.get("Content-Length", 0) or 0)
+            if length > 16384:
+                self._send_json({"ok": False, "error": "设置请求过大"}, 413)
+                return
             raw = self.rfile.read(length) if length else b"{}"
             try:
                 payload = json.loads(raw.decode("utf-8") or "{}")
@@ -459,6 +503,18 @@ class Handler(BaseHTTPRequestHandler):
                         self._send_json({"ok": True, "text": text or ""})
                 finally:
                     _VOICE_LOCK.release()
+            elif path == "/api/settings":
+                try:
+                    with _SETTINGS_LOCK:
+                        saved = _settings_api().save_settings(CONFIG_PATH, payload)
+                    self._send_json({"ok": True, **saved})
+                except Exception as e:
+                    self._send_json({"ok": False, "error": str(e)}, 400)
+            elif path == "/api/settings/test-model":
+                try:
+                    self._send_json(_settings_api().test_model(CONFIG_PATH, payload))
+                except Exception as e:
+                    self._send_json({"ok": False, "error": str(e)}, 400)
             else:
                 self._send_json({"error": "not found"}, 404)
         except Exception as e:  # noqa: BLE001
@@ -473,7 +529,7 @@ class Handler(BaseHTTPRequestHandler):
 # 前端页面（内嵌，无外部 CDN 依赖）
 # ============================================================================
 # ============================================================================
-# 前端页面（内嵌，无外部 CDN 依赖；两个页面共用同一套 CSS / 大圣喵 / 状态机）
+# 前端页面（内嵌，无外部 CDN 依赖；下指令、日志、设置共用 CSS）
 #   /      下指令 —— 只留大圣喵 + 输入框，保持简洁
 #   /logs  任务日志 —— 任务选择 + 统计卡 + 决策链回放
 # ============================================================================
@@ -631,6 +687,28 @@ BASE_CSS = r"""
   .evidence { background:#ecfdf5; border-left:3px solid #059669; padding:6px 10px;
               font-size:12px; color:#065f46; margin-top:6px; border-radius:4px; }
   .empty { color:#9aa5b1; text-align:center; padding:40px; }
+  /* ---- 设置页 ---- */
+  .settings-main { width:100%; max-width:760px; margin:0 auto; padding:24px 16px 48px; overflow-y:auto; }
+  .settings-card { background:#fff; border:1px solid #e4e7eb; border-radius:14px;
+                   padding:20px; margin-bottom:16px; box-shadow:0 5px 18px rgba(16,24,40,.04); }
+  .settings-card h2 { font-size:17px; margin:0 0 14px; }
+  .settings-card label.field { display:block; font-size:13px; font-weight:600; margin:12px 0; }
+  .settings-card input[type=text], .settings-card input[type=url],
+  .settings-card input[type=password], .settings-card input[type=number] {
+    display:block; width:100%; margin-top:6px; padding:10px 12px; font:inherit; font-weight:400;
+    border:1px solid #cbd2d9; border-radius:9px; background:#fff; }
+  .settings-card input:disabled { background:#eef1f4; color:#7b8794; }
+  .settings-hint { font-size:12px; line-height:1.6; color:#52606d; margin:8px 0; }
+  .settings-row { display:flex; gap:12px; flex-wrap:wrap; align-items:end; }
+  .settings-row .field { flex:1 1 140px; }
+  .settings-actions { display:flex; gap:10px; flex-wrap:wrap; margin-top:18px; }
+  .settings-actions button { border:1px solid #cbd2d9; border-radius:9px; background:#fff;
+                             padding:9px 14px; cursor:pointer; font-size:14px; }
+  .settings-actions button.primary { background:#2563eb; color:#fff; border-color:#2563eb; }
+  .settings-actions button:disabled { opacity:.6; cursor:default; }
+  .settings-message { min-height:22px; font-size:13px; margin-top:10px; white-space:pre-wrap; }
+  .settings-message.error { color:#b91c1c; }
+  .settings-message.good { color:#047857; }
 """
 
 MASCOT_SVG = r"""<svg id="bean" class="state-idle" viewBox="0 0 64 56">
@@ -1034,6 +1112,95 @@ const qsTask = new URLSearchParams(location.search).get('task');
 loadTasks(qsTask);
 """
 
+SETTINGS_JS = r"""
+let screenPreview = null;
+function settingsPayload(){
+  return {
+    model: {url:$('#modelUrl').value.trim(), name:$('#modelName').value.trim(),
+            api_key:$('#apiKey').value.trim()},
+    grid: {mode:$('#gridManual').checked ? 'manual' : 'auto',
+           cols:Number($('#gridCols').value), rows:Number($('#gridRows').value)}
+  };
+}
+function status(id, message, good){
+  const node = $(id); node.textContent = message;
+  node.className = 'settings-message ' + (good ? 'good' : 'error');
+}
+function updateGrid(){
+  const manual = $('#gridManual').checked;
+  $('#gridCols').disabled = !manual;
+  $('#gridRows').disabled = !manual;
+  if(!screenPreview){
+    $('#gridPreview').textContent = '设备未连接或截图不可用；自动网格将在运行时按实际截图计算。';
+    return;
+  }
+  const w=screenPreview.width, h=screenPreview.height;
+  const c=manual ? Number($('#gridCols').value) : screenPreview.auto.cols;
+  const r=manual ? Number($('#gridRows').value) : screenPreview.auto.rows;
+  $('#gridPreview').textContent = `${w}×${h} 截图；自动建议 ${screenPreview.auto.cols}×${screenPreview.auto.rows}；`
+    + `当前表单将使用 ${c}×${r}（单格约 ${Math.round(w/c)}×${Math.round(h/r)}px）。保存后对新任务生效。`;
+}
+async function readSettings(){
+  try {
+    const response = await fetch('/api/settings', {cache:'no-store'});
+    const data = await response.json();
+    if(!response.ok) throw new Error(data.error || '设置读取失败');
+    $('#modelUrl').value = data.model.url;
+    $('#modelName').value = data.model.name;
+    $('#apiKey').value = '';
+    $('#keyHint').textContent = data.model.api_key_configured
+      ? '已有可用凭证；留空表示保留原凭证。密钥不会回显。'
+      : '尚未配置 API Key；输入后保存或直接验证。';
+    $('#gridManual').checked = data.grid.mode === 'manual';
+    $('#gridCols').value = data.grid.cols;
+    $('#gridRows').value = data.grid.rows;
+    updateGrid();
+  } catch(error){ status('#saveStatus', error.message, false); }
+}
+async function readPreview(){
+  try {
+    const response = await fetch('/api/settings/grid-preview', {cache:'no-store'});
+    const data = await response.json();
+    screenPreview = data.ok ? data : null;
+    if(!data.ok) $('#gridPreview').textContent = '无法预览设备：' + (data.error || '未知错误');
+    else updateGrid();
+  } catch(error){ screenPreview=null; updateGrid(); }
+}
+async function postSettings(path, body){
+  const response = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'},
+                                     body:JSON.stringify(body)});
+  const data = await response.json();
+  if(!response.ok) throw new Error(data.error || data.message || '请求失败');
+  return data;
+}
+$('#gridManual').addEventListener('change', updateGrid);
+$('#gridCols').addEventListener('input', updateGrid);
+$('#gridRows').addEventListener('input', updateGrid);
+$('#verifyBtn').onclick = async () => {
+  const button=$('#verifyBtn'); button.disabled=true;
+  status('#verifyStatus', '正在验证模型（会产生一次最小 API 调用）…', true);
+  try {
+    const data=await postSettings('/api/settings/test-model', {model:settingsPayload().model});
+    status('#verifyStatus', data.ok ? `${data.message} · ${data.latency_ms}ms`
+                                   : `${data.error_type||'验证失败'}：${data.message}`, data.ok);
+  } catch(error){ status('#verifyStatus', error.message, false); }
+  finally { button.disabled=false; }
+};
+$('#saveBtn').onclick = async () => {
+  const button=$('#saveBtn'); button.disabled=true;
+  try {
+    const data=await postSettings('/api/settings', settingsPayload());
+    $('#apiKey').value='';
+    $('#keyHint').textContent=data.model.api_key_configured
+      ? '已有可用凭证；留空表示保留原凭证。密钥不会回显。' : '尚未配置 API Key。';
+    status('#saveStatus', '设置已保存；新任务会读取新配置。', true);
+    updateGrid();
+  } catch(error){ status('#saveStatus', error.message, false); }
+  finally { button.disabled=false; }
+};
+readSettings(); readPreview();
+"""
+
 # 下指令页：只有大圣喵 + 输入坞 + 一行状态，日志入口丢到新标签
 PAGE_RUN_TPL = r"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1047,6 +1214,7 @@ PAGE_RUN_TPL = r"""<!DOCTYPE html>
 <header>
   <h1>🐱 AutomotiveGUI</h1><span class="sub">下指令</span>
   <div class="spacer"></div>
+  <a class="mini" href="/settings">⚙ 设置</a>
   <a class="mini" id="logLink" href="/logs" target="lg_logs">📋 任务日志 →</a>
 </header>
 <div class="run-wrap">
@@ -1098,6 +1266,7 @@ PAGE_LOGS_TPL = r"""<!DOCTYPE html>
   <select id="taskSel"></select>
   <button id="loadBtn" class="mini">加载</button>
   <button id="autoBtn" class="mini" data-on="0">自动刷新：关</button>
+  <a class="mini" href="/settings">⚙ 设置</a>
   <a class="mini" href="/" target="lg_run">← 去下指令</a>
 </header>
 <div class="main">
@@ -1109,6 +1278,50 @@ PAGE_LOGS_TPL = r"""<!DOCTYPE html>
 </html>
 """
 
+PAGE_SETTINGS_TPL = r"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AutomotiveGUI · 设置</title>
+<style>/*__BASE_CSS__*/</style>
+</head>
+<body>
+<header>
+  <h1>🐱 AutomotiveGUI</h1><span class="sub">设置</span>
+  <div class="spacer"></div>
+  <a class="mini" href="/">下指令</a>
+  <a class="mini" href="/logs">任务日志</a>
+</header>
+<main class="settings-main">
+  <section class="settings-card">
+    <h2>模型 API</h2>
+    <label class="field">URL<input id="modelUrl" type="url" placeholder="https://example.com/v1" required></label>
+    <label class="field">模型名称<input id="modelName" type="text" placeholder="模型 ID" required></label>
+    <label class="field">API Key<input id="apiKey" type="password" autocomplete="new-password" placeholder="留空保留原凭证"></label>
+    <p class="settings-hint" id="keyHint">正在读取凭证状态…</p>
+    <div class="settings-actions"><button id="verifyBtn" type="button">验证连接</button></div>
+    <div id="verifyStatus" class="settings-message" role="status" aria-live="polite"></div>
+    <p class="settings-hint">验证使用当前表单中尚未保存的 URL、模型和 Key；会产生一次模型请求，不会运行 ADB 任务或保存设置。</p>
+  </section>
+  <section class="settings-card">
+    <h2>VLM 网格</h2>
+    <label><input id="gridManual" type="checkbox"> 手动设置网格（优先于自动计算）</label>
+    <div class="settings-row">
+      <label class="field">列数<input id="gridCols" type="number" min="5" max="26" value="20" disabled></label>
+      <label class="field">行数<input id="gridRows" type="number" min="3" max="40" value="10" disabled></label>
+    </div>
+    <p id="gridPreview" class="settings-hint">正在读取屏幕尺寸…</p>
+    <p class="settings-hint">默认按实际截图尺寸自动计算；手动覆盖只对保存后的新任务生效。</p>
+  </section>
+  <div class="settings-actions"><button id="saveBtn" class="primary" type="button">保存设置</button></div>
+  <div id="saveStatus" class="settings-message" role="status" aria-live="polite"></div>
+</main>
+<script>/*__COMMON_JS__*//*__SETTINGS_JS__*/</script>
+</body>
+</html>
+"""
+
 
 def _render(tpl: str) -> str:
     return (
@@ -1116,12 +1329,14 @@ def _render(tpl: str) -> str:
         .replace("/*__COMMON_JS__*/", COMMON_JS)
         .replace("/*__RUN_JS__*/", RUN_JS)
         .replace("/*__LOGS_JS__*/", LOGS_JS)
+        .replace("/*__SETTINGS_JS__*/", SETTINGS_JS)
         .replace("/*__MASCOT__*/", MASCOT_SVG)
     )
 
 
 HTML_RUN = _render(PAGE_RUN_TPL)
 HTML_LOGS = _render(PAGE_LOGS_TPL)
+HTML_SETTINGS = _render(PAGE_SETTINGS_TPL)
 
 
 def main():

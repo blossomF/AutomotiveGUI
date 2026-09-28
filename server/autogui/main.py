@@ -95,8 +95,9 @@ def cmd_packages(cfg) -> int:
 
 
 def cmd_check(cfg) -> int:
-    """快速点亮自检。每项能力打印一行通过/未通过。"""
+    """设备自检：硬故障记失败，定位质量和耗时问题记警告；不请求模型 API。"""
     from autogui.bridge.adb import ADBError, png_size
+    from autogui.perception.grid import auto_grid_dimensions, grid_dimensions
     from autogui.perception.tree import candidates_from_xml
 
     tools = _bootstrap(cfg)
@@ -107,6 +108,9 @@ def cmd_check(cfg) -> int:
         nonlocal ok
         ok = ok and passed
         print(f"  [{'✓' if passed else '✗'}] {label:<28} {detail}")
+
+    def warn(label: str, detail: str) -> None:
+        print(f"  [!] {label:<28} {detail}")
 
     print("=" * 72)
     print("环境自检")
@@ -119,30 +123,41 @@ def cmd_check(cfg) -> int:
     png = device.screenshot()
     shot_ms = (time.perf_counter() - t) * 1000
     size = png_size(png)
-    report("exec-out 抓帧", bool(size) and shot_ms < 2500, f"{size} {shot_ms:.0f}ms  (阈值 1500ms)")
+    report("exec-out 抓帧", bool(size), f"{size} {shot_ms:.0f}ms")
+    if shot_ms >= 2500:
+        warn("抓帧速度", f"{shot_ms:.0f}ms ≥ 2500ms，任务响应可能变慢")
     displays = device.list_displays()
     if len(displays) > 1:
         # 规则 4.2 把范围限定在中控屏；多屏车机可能抓到的是仪表屏，
         # 那会悄悄把错误的屏幕喂给模型。
-        report("多屏提示", cfg.display_id is not None,
-               f"发现 {len(displays)} 块屏 {displays}；确认捕获的是中控，必要时设 display_id")
-    if size and cfg.grid.cols * cfg.grid.rows:
-        cw, ch = size[0] / cfg.grid.cols, size[1] / cfg.grid.rows
-        report("网格密度", 60 <= cw <= 220 and 60 <= ch <= 220,
-               f"{cfg.grid.cols}×{cfg.grid.rows} → cell {cw:.0f}×{ch:.0f}px")
+        warn("多屏提示", f"发现 {len(displays)} 块屏 {displays}；确认截图是中控，必要时设 display_id")
+    if size:
+        cols, rows = grid_dimensions(*size, mode=cfg.grid.mode,
+                                     cols=cfg.grid.cols, rows=cfg.grid.rows)
+        recommended = auto_grid_dimensions(*size)
+        cw, ch = size[0] / cols, size[1] / rows
+        report("网格", True, f"{cfg.grid.mode} {cols}×{rows} → cell {cw:.0f}×{ch:.0f}px")
+        if not (60 <= cw <= 220 and 60 <= ch <= 220):
+            warn("网格密度", f"当前单格超出建议 60–220px；自动建议 {recommended[0]}×{recommended[1]}")
 
     t = time.perf_counter()
     xml = device.dump_xml()
     dump_ms = (time.perf_counter() - t) * 1000
     cands = candidates_from_xml(xml, limit=200, screen=size)
-    report("uiautomator dump", bool(xml), f"{len(xml)} bytes {dump_ms:.0f}ms (阈值 3000ms)")
-    report("可寻址候选", len(cands) >= 3, f"{len(cands)} 个（决定 tree 是否可用）")
+    report("uiautomator dump", bool(xml), f"{len(xml)} bytes {dump_ms:.0f}ms")
+    if dump_ms >= 3000:
+        warn("控件树速度", f"{dump_ms:.0f}ms ≥ 3000ms，任务响应可能变慢")
+    report("可寻址候选", True, f"{len(cands)} 个（≥3 可走 tree，否则走 VLM）")
+    if len(cands) < 3:
+        warn("tree 不可用", "当前屏幕候选不足；主流程会使用 VLM 网格")
 
     # P0：IME 必须在一轮 Unicode 输入尝试后保持完好。
     try:
         before = device.adb_soft("shell", "settings", "get", "secure", "default_input_method").stdout
         result = tools.text_input().probe()
         report("输入策略", True, f"{result}（链：{'>'.join(cfg.input_chain)}）")
+        if str(result).strip().lower() == "ascii":
+            warn("中文输入能力", "当前仅确认 ASCII 回退；尚未证明中文输入可用")
         after = device.adb_soft("shell", "settings", "get", "secure", "default_input_method").stdout
         # yadb/ascii 不会碰 IME；adbkeyboard 必须精确还原。
         same = (before or "").strip() == (after or "").strip()
@@ -152,9 +167,11 @@ def cmd_check(cfg) -> int:
         report("输入探测", False, str(e))
 
     total = shot_ms + dump_ms
-    report("单轮观测耗时", total < 4500, f"≈{total:.0f}ms（并行后应为 max 而非 sum）")
+    report("自检串行采集耗时", True, f"≈{total:.0f}ms（截图 + XML；主流程另行并行采集）")
+    if total >= 4500:
+        warn("采集速度", f"串行合计 {total:.0f}ms ≥ 4500ms")
     print("=" * 72)
-    print("全部通过" if ok else "存在未通过项 — 先看 技术方案评估.md §2 与 §7 风险表")
+    print("设备硬检查通过；请核对上方警告" if ok else "存在设备硬故障，请先处理 ✗ 项")
     return 0 if ok else 1
 
 

@@ -201,10 +201,11 @@ Automotive GUI Agent  |  路径 C  |  exec=local
 |---|---|---|
 | `declared_path` | `C` | **只**按 `--dump-report` 结果改 |
 | `exec_mode` | `local` | MCP 不通时留 `local`；要演示 MCP 时改 `mcp` |
-| `grid.cols/rows` | `20/10` | 车机分辨率差异大时按 `--check` 里 cell 尺寸调 |
+| `grid.mode` | `auto` | 默认按截图计算；面板勾选“手动设置网格”后为 `manual`，使用 `cols/rows` |
 | `agent.reflection` | `cheap` | `always` 更准但每步多 1 次调用；`off` 最快但丢掉恢复 |
 
 `glm.model` 需要换成组委会实际发的型号 id。
+面板设置页 `http://127.0.0.1:8777/settings` 可填写模型 URL、名称和 API Key，单独验证连接；`--check` 不发模型请求。逐项自检说明见[环境自检说明与优化方案](../../doc/环境自检说明与优化方案.md)。
 
 ---
 
@@ -214,7 +215,7 @@ Automotive GUI Agent  |  路径 C  |  exec=local
 |---|---|
 | `no ADB device connected` | `adb devices`；无线则 `adb connect IP:5555`；车机上确认已允许调试 |
 | `multiple devices connected` | `config.yaml` 里 `device_serial` 写死具体 serial |
-| `GLM_API_KEY is not set` | 只认环境变量，见 §1 ②。注意设完要**重开**终端 |
+| `GLM_API_KEY is not set` | 在面板设置页录入 API Key，或为启动任务的进程设置 `GLM_API_KEY`；新任务会重新读取配置 |
 | `--check` 里「IME 未被改坏」✗ | **不要继续**。说明输入法被换走了，中文输入会静默失败。见 `autogui/bridge/input.py` 的 `_via_adbkeyboard` |
 | 截图拿到的不是中控屏 | 车机多屏，`screencap` 默认屏不对。已在 `bridge/adb.py` 用 `--display` 前的 PNG 签名裁剪兜底；仍错则设 `display_id` |
 | 中文输入变成字母 | 正常——车机可能禁装 yadb/ADBKeyboard，自动降级到 ASCII。确认方式：`--check` 的「输入策略」 |
@@ -233,7 +234,7 @@ Automotive GUI Agent  |  路径 C  |  exec=local
 - **中文输入依赖车机是否允许 yadb/ADBKeyboard**。都禁则只剩 ASCII + 拼音，长中文搜索会退化。
 - **无长期记忆**。上下文只在单次任务内有效，不做跨任务持久化。
 - **不处理登录、支付、验证码**。规则不允许，也没做。
-- **网格模式列标签单字母**，所以 `grid.cols ≤ 26`。横屏 20 列够用。
+- **网格模式列标签单字母**，所以最多 26 列；默认按截图尺寸自动计算，手动列数上限也是 26。
 - **`estimate_tokens` 是启发式**，不是真 tokenizer，只用于决定裁剪多少；对外报告的是 GLM 返回的真实用量。
 - **显式 `--skill-only` 配方的 hint 文本需在真机上实测填写**。仓库里现带的 `music`/`bilibili` 配方含占位文本；普通指令只读取 `guide`，不执行这些步骤。
 

@@ -49,7 +49,8 @@ class GridConfig(BaseModel):
     见 技术方案评估.md §2 C-11。
     """
 
-    cols: int = Field(default=20, ge=5, le=26)  # 26 -> 列字母 A..Z
+    mode: Literal["auto", "manual"] = "auto"
+    cols: int = Field(default=20, ge=5, le=26)  # 只在 manual 时使用；26 -> 列字母 A..Z
     rows: int = Field(default=10, ge=3, le=40)
     line_color: tuple = (255, 0, 0)
     line_width: int = 3

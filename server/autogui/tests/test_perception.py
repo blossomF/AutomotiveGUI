@@ -5,7 +5,7 @@ import io
 from PIL import Image
 
 from autogui.perception import tree as tree_mod
-from autogui.perception.capture import compute_signature
+from autogui.perception.capture import compute_signature, observe
 from autogui.perception.grid import Grid, encode_jpeg
 from tests.conftest import EMPTY_TREE_XML, SAMPLE_XML
 
@@ -79,6 +79,25 @@ def test_grid_label_and_pixel_roundtrip():
         x, y = g.to_pixel(label)
         assert 0 <= x < 1920 and 0 <= y < 1080
         assert g.to_label(x, y) == label
+
+
+def test_observe_auto_grid_follows_current_frame():
+    buf = io.BytesIO()
+    Image.new("RGB", (1080, 2400), "navy").save(buf, format="PNG")
+
+    class Device:
+        def screenshot(self):
+            return buf.getvalue()
+
+        def dump_xml(self):
+            return EMPTY_TREE_XML
+
+        def screen_size(self):
+            return 1920, 1080  # 过期缓存不能影响实际截图网格
+
+    observation, grid = observe(Device(), grid_mode="auto")
+    assert (observation.width, observation.height) == (1080, 2400)
+    assert (grid.cols, grid.rows) == (11, 22)
 
 
 def test_landscape_cells_are_squareish():
