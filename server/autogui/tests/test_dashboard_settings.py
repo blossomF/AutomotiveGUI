@@ -21,6 +21,7 @@ def config_path(tmp_path, monkeypatch):
     path.write_text(
         "grid:\n  cols: 20 # manual fallback\n  rows: 10\n"
         "glm:\n  model: old-model\n  base_url: https://old.example/v1\n  api_key: ''\n"
+        "voice:\n  appid: ''\n  api_key: ''\n  api_secret: ''\n"
         "debug: true\n", encoding="utf-8",
     )
     return path
@@ -56,7 +57,43 @@ def test_key_is_encrypted_and_never_returned(config_path, monkeypatch):
     assert "secret-value" not in config_path.read_text(encoding="utf-8")
     assert "secret-value" not in str(saved)
     assert saved["model"]["api_key_configured"] is True
+    assert saved["model"]["api_key_state"] == "saved"
     assert "api_key" not in public_settings(config_path)["model"]
+
+
+def test_saved_settings_reappear_after_reload_without_revealing_secrets(config_path, monkeypatch):
+    import autogui.security as security
+
+    monkeypatch.setattr(security, "encrypt", lambda value: f"ENC({value[::-1]})")
+    monkeypatch.setattr(security, "resolve_secret", lambda value: value[4:-1][::-1])
+    save_settings(config_path, {
+        "model": {"url": "https://saved.example/v1", "name": "saved-model", "api_key": "model-secret"},
+        "voice": {"appid": "app-id", "api_key": "voice-key", "api_secret": "voice-secret"},
+        "grid": {"mode": "manual", "cols": 12, "rows": 24},
+    })
+    reloaded = public_settings(config_path)
+    assert reloaded["model"] == {
+        "url": "https://saved.example/v1", "name": "saved-model",
+        "api_key_configured": True, "api_key_state": "saved",
+    }
+    assert reloaded["grid"] == {"mode": "manual", "cols": 12, "rows": 24}
+    assert reloaded["voice"]["configured"] is True
+    assert reloaded["voice"]["fields"] == {
+        "appid": "saved", "api_key": "saved", "api_secret": "saved",
+    }
+    assert "model-secret" not in str(reloaded)
+    assert "voice-secret" not in str(reloaded)
+
+
+def test_unreadable_ciphertext_is_reported_explicitly(config_path, monkeypatch):
+    import autogui.security as security
+
+    monkeypatch.setattr(security, "resolve_secret", lambda _: (_ for _ in ()).throw(OSError("unavailable")))
+    source = config_path.read_text(encoding="utf-8")
+    config_path.write_text(source.replace("api_key: ''", "api_key: ENC(other-user)"), encoding="utf-8")
+    status = public_settings(config_path)["model"]
+    assert status["api_key_configured"] is False
+    assert status["api_key_state"] == "unavailable"
 
 
 def test_model_verification_uses_unsaved_form_and_does_not_modify_config(config_path):

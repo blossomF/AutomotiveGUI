@@ -1114,16 +1114,32 @@ loadTasks(qsTask);
 
 SETTINGS_JS = r"""
 let screenPreview = null;
+function modelKeyHint(model){
+  const state = model.api_key_state;
+  if(state === 'saved') return 'API Key 已保存在配置文件中，输入框留空表示保留；为安全起见不回显明文。';
+  if(state === 'environment') return '当前进程通过 GLM_API_KEY 提供凭证；输入框留空表示继续使用环境变量。';
+  if(state === 'unavailable') return '配置文件中有加密凭证，但当前 Windows 用户或进程无法解密。请重新输入 API Key 并保存。';
+  return '尚未配置 API Key；输入后保存或直接验证。';
+}
+function voiceKeyHint(voice){
+  const names = {appid:'AppID', api_key:'API Key', api_secret:'API Secret'};
+  const fields = voice.fields || {};
+  return Object.entries(names).map(([key,label]) => {
+    const state=fields[key];
+    const description=state==='saved' ? '已保存' : state==='environment' ? '环境变量'
+      : state==='unavailable' ? '密文无法解密，需重新录入' : '未配置';
+    return `${label}：${description}`;
+  }).join('；') + '。凭证输入框留空表示保留，不回显明文。';
+}
 function settingsPayload(){
   return {
     model: {url:$('#modelUrl').value.trim(), name:$('#modelName').value.trim(),
             api_key:$('#apiKey').value.trim()},
-        voice: {appid:$('#voiceAppid').value.trim(),
+    voice: {appid:$('#voiceAppid').value.trim(),
             api_key:$('#voiceApiKey').value.trim(),
             api_secret:$('#voiceApiSecret').value.trim()},
-        grid: {mode:$('#gridManual').checked ? 'manual' : 'auto',
+    grid: {mode:$('#gridManual').checked ? 'manual' : 'auto',
            cols:Number($('#gridCols').value), rows:Number($('#gridRows').value)}
-
   };
 }
 function status(id, message, good){
@@ -1152,18 +1168,14 @@ async function readSettings(){
     $('#modelUrl').value = data.model.url;
     $('#modelName').value = data.model.name;
     $('#apiKey').value = '';
-    $('#keyHint').textContent = data.model.api_key_configured
-      ? '已有可用凭证；留空表示保留原凭证。密钥不会回显。'
-      : '尚未配置 API Key；输入后保存或直接验证。';
+    $('#keyHint').textContent = modelKeyHint(data.model);
     $('#gridManual').checked = data.grid.mode === 'manual';
     $('#gridCols').value = data.grid.cols;
     $('#gridRows').value = data.grid.rows;
     $('#voiceAppid').value = '';
     $('#voiceApiKey').value = '';
     $('#voiceApiSecret').value = '';
-    $('#voiceHint').textContent = data.voice && data.voice.configured
-      ? '已有讯飞凭证；留空表示保留原值。密钥不会回显。'
-      : '尚未配置讯飞凭证；语音功能不可用，文字任务不受影响。';
+    $('#voiceHint').textContent = voiceKeyHint(data.voice || {});
     updateGrid();
   } catch(error){ status('#saveStatus', error.message, false); }
 }
@@ -1201,13 +1213,11 @@ $('#saveBtn').onclick = async () => {
   try {
     const data=await postSettings('/api/settings', settingsPayload());
     $('#apiKey').value='';
-    $('#keyHint').textContent=data.model.api_key_configured
-      ? '已有可用凭证；留空表示保留原凭证。密钥不会回显。' : '尚未配置 API Key。';
+    $('#keyHint').textContent=modelKeyHint(data.model);
     $('#voiceAppid').value='';
     $('#voiceApiKey').value='';
     $('#voiceApiSecret').value='';
-    $('#voiceHint').textContent=data.voice && data.voice.configured
-      ? '已有讯飞凭证；留空表示保留原值。密钥不会回显。' : '尚未配置讯飞凭证。';
+    $('#voiceHint').textContent=voiceKeyHint(data.voice || {});
     status('#saveStatus', '设置已保存；新任务会读取新配置。', true);
     updateGrid();
   } catch(error){ status('#saveStatus', error.message, false); }

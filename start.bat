@@ -1,64 +1,60 @@
 @echo off
-setlocal enabledelayedexpansion
-REM Start AutomotiveGUI dashboard
+setlocal EnableExtensions DisableDelayedExpansion
 
-set "SCRIPT_DIR=%~dp0"
-set "PY=%SCRIPT_DIR%server\autogui\.venv\Scripts\python.exe"
-set "DASHBOARD=%SCRIPT_DIR%dist\dashboard_server.py"
-set "PID_FILE=%SCRIPT_DIR%.dashboard.pid"
-set "LOG_FILE=%SCRIPT_DIR%.dashboard.log"
-
-if exist "%PID_FILE%" (
-    set /p OLD_PID=<"%PID_FILE%"
-    tasklist /FI "PID eq !OLD_PID!" 2>nul | find "!OLD_PID!" >nul 2>&1
-    if !errorlevel! equ 0 (
-        echo [FAIL] Dashboard already running PID: !OLD_PID!
-        echo   Run stop.bat first to restart
-        exit /b 1
-    )
-    del "%PID_FILE%" 2>nul
-)
+set "ROOT=%~dp0"
+set "PY=%ROOT%server\autogui\.venv\Scripts\python.exe"
+set "DASHBOARD=%ROOT%dist\dashboard_server.py"
+set "PROCESS_SCRIPT=%ROOT%dist\dashboard_process.ps1"
 
 if not exist "%PY%" (
     echo [FAIL] Python not found: %PY%
-    echo   Create .venv in server\autogui first
+    echo Create the virtual environment in server\autogui first.
+    exit /b 1
+)
+if not exist "%DASHBOARD%" (
+    echo [FAIL] Dashboard not found: %DASHBOARD%
     exit /b 1
 )
 
-if exist "%SCRIPT_DIR%.env" (
-    for /f "usebackq eol=# tokens=1,* delims==" %%A in ("%SCRIPT_DIR%.env") do (
-        set "%%A=%%B"
-    )
+if exist "%ROOT%.env" (
+    for /f "usebackq eol=# tokens=1,* delims==" %%A in ("%ROOT%.env") do set "%%A=%%B"
 )
-
 set "PYTHONIOENCODING=utf-8"
+set "PYTHONUNBUFFERED=1"
 chcp 65001 >nul 2>&1
 
-REM Start via PowerShell to capture the real python.exe PID
-powershell -Command "$p = Start-Process -FilePath '%PY%' -ArgumentList '\"%DASHBOARD%\"' -WindowStyle Hidden -PassThru -RedirectStandardOutput '%LOG_FILE%' -RedirectStandardError '%LOG_FILE%.err'; $p.Id | Out-File -Encoding ascii -NoNewline '%PID_FILE%'"
+set "MODE="
+if /I "%~1"=="foreground" set "MODE=foreground"
+if /I "%~1"=="background" set "MODE=background"
+if /I "%~1"=="front" set "MODE=foreground"
+if /I "%~1"=="back" set "MODE=background"
+if not "%~1"=="" if not defined MODE (
+    echo Usage: start.bat [foreground^|background]
+    exit /b 2
+)
+if not defined MODE (
+    echo 请选择启动方式：[F] 前台（实时日志，Ctrl+C 停止）
+    echo                 [B] 后台（启动后退出，stop.bat 停止）
+    choice /C FB /N /M "请选择 F 或 B："
+    if errorlevel 2 (set "MODE=background") else (set "MODE=foreground")
+)
 
-ping -n 3 127.0.0.1 >nul
-
-if not exist "%PID_FILE%" (
-    echo [FAIL] Startup failed, log:
-    type "%LOG_FILE%" 2>nul
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PROCESS_SCRIPT%" -Action status >nul 2>&1
+if not errorlevel 1 (
+    echo [FAIL] A background dashboard is already running. Use stop.bat first.
     exit /b 1
 )
 
-set /p PID=<"%PID_FILE%"
+if /I "%MODE%"=="foreground" goto :foreground
 
-tasklist /FI "PID eq !PID!" 2>nul | find "!PID!" >nul 2>&1
-if !errorlevel! equ 0 (
-    echo [OK] Dashboard started PID: !PID!
-    echo   URL: http://localhost:8777
-    echo   Log: %LOG_FILE%
-    echo   Stop: stop.bat
-    start "" "http://localhost:8777"
-) else (
-    echo [FAIL] Startup failed, log:
-    type "%LOG_FILE%" 2>nul
-    del "%PID_FILE%" 2>nul
-    exit /b 1
-)
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PROCESS_SCRIPT%" -Action start
+if errorlevel 1 exit /b 1
+echo [OK] Background dashboard: http://127.0.0.1:8777
+echo [INFO] Run stop.bat to stop it. Logs: %ROOT%.dashboard.log
+exit /b 0
 
-endlocal
+:foreground
+echo [INFO] Foreground dashboard: http://127.0.0.1:8777
+echo [INFO] Logs appear here. Press Ctrl+C to stop.
+"%PY%" -u "%DASHBOARD%"
+exit /b %errorlevel%

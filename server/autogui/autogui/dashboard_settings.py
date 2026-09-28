@@ -41,12 +41,39 @@ def _grid_fields(payload: dict, current: Config) -> GridConfig:
 
 
 def public_settings(config_path: Path) -> dict:
+    import yaml
+
+    from autogui.security import is_encrypted, resolve_secret
+
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     cfg = Config.load(config_path)
+
+    def credential_state(section: str, field: str, env_name: str) -> str:
+        stored = str((raw.get(section) or {}).get(field) or "")
+        if stored:
+            if not is_encrypted(stored):
+                return "saved"
+            try:
+                if resolve_secret(stored):
+                    return "saved"
+            except Exception:
+                pass
+            return "unavailable"
+        return "environment" if os.getenv(env_name) else "missing"
+
+    model_key_state = credential_state("glm", "api_key", cfg.glm.api_key_env)
+    voice_fields = {
+        "appid": credential_state("voice", "appid", "IFLYTEK_APPID"),
+        "api_key": credential_state("voice", "api_key", "IFLYTEK_API_KEY"),
+        "api_secret": credential_state("voice", "api_secret", "IFLYTEK_API_SECRET"),
+    }
     return {
         "model": {"url": cfg.glm.base_url, "name": cfg.glm.model,
-                  "api_key_configured": bool(cfg.glm.api_key)},
+                  "api_key_configured": bool(cfg.glm.api_key),
+                  "api_key_state": model_key_state},
         "grid": {"mode": cfg.grid.mode, "cols": cfg.grid.cols, "rows": cfg.grid.rows},
-        "voice": {"configured": bool(cfg.voice.appid and cfg.voice.api_key and cfg.voice.api_secret)},
+        "voice": {"configured": bool(cfg.voice.appid and cfg.voice.api_key and cfg.voice.api_secret),
+                  "fields": voice_fields},
     }
 
 
