@@ -85,6 +85,20 @@ class GLMConfig(BaseModel):
     max_tokens: int = 1024
     timeout: float = 30.0
     max_retries: int = 4
+    # 思考强度：low/high/max；空串=不发送该参数。
+    # 注意：llm.thundersoft.com 网关 9/29 实测忽略此参数（三档延迟与思考链长度无差异），
+    # 当前为占位配置；网关侧支持或换模型后即生效。默认 high。
+    reasoning_effort: str = "high"
+
+    @field_validator("reasoning_effort")
+    @classmethod
+    def _effort_enum(cls, v: str) -> str:
+        if v == "":
+            return ""
+        allowed = {"low", "high", "max"}
+        if v not in allowed:
+            raise ValueError(f"reasoning_effort 必须是 {sorted(allowed)} 之一或空串，得到 {v!r}")
+        return v
 
     @field_validator("api_key")
     @classmethod
