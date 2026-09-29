@@ -619,8 +619,10 @@ class Runner:
                             ) -> tuple[Observation, grid_mod.Grid]:
         if not self._is_launch_ad(obs.xml):
             return obs, grid
+        if getattr(self.log, "debug", False):
+            self.log.save_image(f"step{self.log.step:02d}_ad_before", obs.png)
         elapsed = time.monotonic() - self.launch_monotonic
-        remaining = max(0.0, 5.0 - elapsed)
+        remaining = max(0.0, 6.0 - elapsed)
         self.log.phase("ad", f"启动广告已识别；距启动 {elapsed:.1f}s，等待 {remaining:.1f}s 后重抓")
         if remaining:
             time.sleep(remaining)
@@ -632,12 +634,22 @@ class Runner:
                 candidate_token_budget=self.cfg.agent.tree_candidate_token_budget,
                 focus_terms=self.focus_terms,
                 last_size=(grid.width, grid.height),
+                shot_after_dump=True,
             )
         except ADBError as e:
             self.log.phase("ad", f"广告后重抓失败，交由模型处理现有画面：{e}")
             return obs, grid
-        self.log.phase("ad", "广告已消失，进入正式决策" if not self._is_launch_ad(refreshed.xml)
-                       else "5 秒后仍有广告，交由模型处理")
+        if getattr(self.log, "debug", False):
+            self.log.save_image(f"step{self.log.step:02d}_ad_after", refreshed.png)
+        if not refreshed.xml:
+            self.log.phase("ad", "重抓 XML 为空，无法据此判断广告是否消失；使用重抓截图继续决策",
+                           shot_ms=getattr(refreshed, "shot_ms", None),
+                           dump_ms=getattr(refreshed, "tree_ms", None))
+        else:
+            self.log.phase("ad", "广告已消失，进入正式决策" if not self._is_launch_ad(refreshed.xml)
+                           else "6 秒后仍有广告，交由模型处理",
+                           shot_ms=getattr(refreshed, "shot_ms", None),
+                           dump_ms=getattr(refreshed, "tree_ms", None))
         return refreshed, new_grid
 
     @staticmethod

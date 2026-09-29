@@ -189,6 +189,13 @@ def select_candidates(cands: list[Candidate], limit: int, screen_height: int,
             chosen.append(c)
             picked.add(c.bounds)
 
+    # Input fields are frequent next actions and may have no visible text.
+    # Reserve slots before task-title matches can consume the small limit.
+    inputs = sorted((c for c in cands if c.editable),
+                    key=lambda c: (not c.focused, not c.enabled, *_reading_order(c)))
+    for c in inputs[:min(4, max(1, limit // 8))]:
+        add(c)
+
     targets = sorted((c for c in cands if target_score(c, focus_terms) >= 20),
                      key=lambda c: (-target_score(c, focus_terms),
                                     c.editable, c.cy, c.cx))

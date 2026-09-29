@@ -68,6 +68,30 @@ def test_every_device_xml_dump_has_own_artifact(tmp_path, monkeypatch):
     log.close()
 
 
+def test_empty_xml_records_dump_output_and_remote_file(tmp_path, monkeypatch):
+    log = DecisionLog("empty xml", tmp_path, verbose=False, debug=True)
+    device = Device("fake")
+    device.trace_log = log
+
+    def fake_soft(*args, **kwargs):
+        if args[1] == "uiautomator":
+            return ADBResult(0, "UI hierarchy dumped to: /sdcard/autogui_ui.xml", "")
+        if args[1] == "ls":
+            return ADBResult(0, "-rw-rw---- 1 shell sdcard_rw 0 autogui_ui.xml", "")
+        return ADBResult(0, "", "")
+
+    monkeypatch.setattr(device, "adb_soft", fake_soft)
+    monkeypatch.setattr(device, "adb", lambda *args, **kwargs: "")
+
+    assert device.dump_xml() == ""
+    event = next(e for e in log.events if e["phase"] == "xml")
+    assert event["status"] == "empty"
+    assert event["dump_exit"] == 0
+    assert "UI hierarchy dumped" in event["dump_stdout"]
+    assert " 0 autogui_ui.xml" in event["remote_file"]
+    log.close()
+
+
 def test_runner_prepare_wires_trace_after_log_creation(tmp_path, monkeypatch):
     device = Device("fake")
     monkeypatch.setattr("autogui.core.graph.tools.dev", lambda: device)

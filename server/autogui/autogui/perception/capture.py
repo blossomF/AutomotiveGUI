@@ -81,8 +81,9 @@ def observe(
     candidate_token_budget: int = 900,
     focus_terms: list[str] | None = None,
     last_size: tuple[int, int] | None = None,
+    shot_after_dump: bool = False,
 ) -> tuple[Observation, Grid]:
-    """并行抓取帧 + 树，并为当前屏幕构建网格。"""
+    """通常并行抓帧与树；广告等待后可先 dump 再截最新画面。"""
     import time
 
     timings: dict[str, float] = {}
@@ -97,11 +98,15 @@ def observe(
         x = device.dump_xml()
         return x, (time.perf_counter() - t) * 1000
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        f_shot = pool.submit(shot)
-        f_dump = pool.submit(dump)
-        png, timings["shot"] = f_shot.result()
-        xml, timings["dump"] = f_dump.result()
+    if shot_after_dump:
+        xml, timings["dump"] = dump()
+        png, timings["shot"] = shot()
+    else:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            f_shot = pool.submit(shot)
+            f_dump = pool.submit(dump)
+            png, timings["shot"] = f_shot.result()
+            xml, timings["dump"] = f_dump.result()
 
     width, height = _resolve_size(png, last_size or device.screen_size())
     candidate_stats: dict[str, int] = {}

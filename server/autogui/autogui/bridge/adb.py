@@ -325,31 +325,60 @@ class Device:
         失败返回空树，让 route 走 VLM 网格兜底。
         """
         started = time.perf_counter()
+        stage = "remove_old"
         try:
-            self.adb_soft("shell", "rm", "-f", remote, timeout=timeout)
+            removed = self.adb_soft("shell", "rm", "-f", remote, timeout=timeout)
+            if not removed.ok:
+                self._trace_xml("", started, "remove_failed", removed.stderr or removed.stdout,
+                                remote, remove_exit=removed.returncode)
+                return ""
+            stage = "dump"
             r = self.adb_soft("shell", "uiautomator", "dump", remote, timeout=timeout)
-        except ADBError as e:  # rm/dump 挂起超时 → 按空树处理，走 VLM 兜底
-            self._trace_xml("", started, "timeout", str(e)[:200], remote)
+        except ADBError as e:  # 抓树失败按空树处理，走 VLM 兜底
+            self._trace_xml("", started, "timeout" if e.returncode == -1 else "adb_error",
+                            str(e), remote, stage=stage, adb_exit=e.returncode)
             return ""
-        if not r.ok and "dump failed" in (r.stdout + r.stderr).lower():
+        dump_meta = dict(dump_exit=r.returncode, dump_stdout=r.stdout,
+                         dump_stderr=r.stderr)
+        if not r.ok:
             xml = ""
-            self._trace_xml(xml, started, "dump_failed", (r.stdout + " " + r.stderr).strip(), remote)
+            self._trace_xml(xml, started, "dump_failed", (r.stdout + " " + r.stderr).strip(),
+                            remote, **dump_meta)
             return xml
         try:
             xml = self.adb("exec-out", "cat", remote, timeout=timeout)
-            detail = ""
         except ADBError as e:
             xml = ""
-            detail = str(e)
-        self._trace_xml(xml, started, "ok" if xml else "empty", detail, remote)
+            self._trace_xml(xml, started, "read_error", str(e), remote,
+                            read_exit=e.returncode, **dump_meta)
+            return xml
+        remote_file = ""
+        if not xml:
+            # An empty cat does not reveal whether dump created a zero-byte
+            # file. Probe only on this rare path to keep normal capture fast.
+            try:
+                probe = self.adb_soft("shell", "ls", "-l", remote, timeout=timeout)
+                remote_file = f"exit={probe.returncode} {(probe.stdout or probe.stderr).strip()}"
+            except ADBError as e:
+                remote_file = str(e)
+        self._trace_xml(xml, started, "ok" if xml else "empty", "", remote,
+                        remote_file=remote_file, **dump_meta)
         return xml
 
-    def _trace_xml(self, xml: str, started: float, status: str, detail: str, remote: str) -> None:
+    def _trace_xml(self, xml: str, started: float, status: str, detail: str,
+                   remote: str, **diagnostics) -> None:
         log = self.trace_log
-        if log is not None and log.debug:
-            log.trace_text("xml", xml, status=status, adb_detail=detail[:300],
-                           command=f"uiautomator dump {remote}; exec-out cat {remote}",
-                           dump_ms=round((time.perf_counter() - started) * 1000, 1))
+        if log is None:
+            return
+        metrics = dict(status=status, adb_detail=detail[:300],
+                       command=f"uiautomator dump {remote}; exec-out cat {remote}",
+                       dump_ms=round((time.perf_counter() - started) * 1000, 1))
+        metrics.update({key: value[:500] if isinstance(value, str) else value
+                        for key, value in diagnostics.items()})
+        if log.debug:
+            log.trace_text("xml", xml, **metrics)
+        else:
+            log.phase("xml", f"XML dump {status} ({len(xml)} 字符)", **metrics)
 
     # ── 输入 ─────────────────────────────────────────────────────────────────
 
