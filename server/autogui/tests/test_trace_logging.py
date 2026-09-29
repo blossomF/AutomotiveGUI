@@ -14,10 +14,11 @@ def test_glm_trace_keeps_prompt_response_and_call_id_without_base64(tmp_path):
     log = DecisionLog("trace", tmp_path, verbose=False, debug=True)
     log.step_begin(2)
 
-    response = SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content='{"type":"BACK"}'))],
-        usage=SimpleNamespace(prompt_tokens=12, completion_tokens=4),
-    )
+    response = [
+        SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content='{"type":"BACK"}'))],
+                        usage=None),
+        SimpleNamespace(choices=[], usage=SimpleNamespace(prompt_tokens=12, completion_tokens=4)),
+    ]
 
     class Completions:
         def create(self, **kwargs):

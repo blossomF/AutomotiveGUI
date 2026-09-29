@@ -8,6 +8,7 @@ import main
 from autogui.app_routes import choose_initial_route
 from autogui.config import AppConfig, Config
 from autogui.core.graph import Runner
+from autogui.skills.base import Skill
 
 
 def _config():
@@ -71,6 +72,48 @@ def test_model_selects_configured_id_without_regex_or_package_guess():
                                 FakeGLM({"decision": "OBSERVE", "app_id": None}, [] )).app is None
     assert choose_initial_route("打开未知应用", cfg.apps,
                                 FakeGLM({"decision": "OPEN_ONLY", "app_id": 99}, [])).app is None
+
+
+def test_initial_model_can_select_app_specific_skill_without_another_model_call():
+    events = []
+    skill = Skill(app="qqmusic", name="play_song", summary="播放歌曲", guide="点歌曲行",
+                  params=["song"], configured_app="QQ音乐")
+    book = SimpleNamespace(for_configured_app=lambda name: [skill] if name == "QQ音乐" else [])
+    answer = {"decision": "OPEN_CONTINUE", "app_id": 2,
+              "skill": "qqmusic.play_song", "params": {"song": "红烧狮子头"}}
+    route = choose_initial_route("打开QQ音乐播放红烧狮子头", _config().apps,
+                                 FakeGLM(answer, events), book)
+    assert route.skill_key == "qqmusic.play_song"
+    assert route.skill_params == {"song": "红烧狮子头"}
+    assert events == ["model"]
+
+    wrong_app = dict(answer, app_id=1)
+    route = choose_initial_route("打开美团", _config().apps,
+                                 FakeGLM(wrong_app, []), book)
+    assert route.skill_key == ""
+
+
+def test_selected_skill_is_loaded_before_first_screen_decision(monkeypatch):
+    events = []
+    answer = {"decision": "OPEN_CONTINUE", "app_id": 2,
+              "skill": "qqmusic.play_song", "params": {"song": "红烧狮子头"}}
+    runner = _runner(monkeypatch, "打开QQ音乐播放红烧狮子头", answer, events)
+    skill = Skill(app="qqmusic", name="play_song", summary="播放歌曲", guide="点歌曲标题",
+                  params=["song"], configured_app="QQ音乐")
+    runner.book = SimpleNamespace(
+        for_configured_app=lambda name: [skill] if name == "QQ音乐" else [],
+        guidance=lambda key, params: f"{key}:{params['song']}:点歌曲标题",
+    )
+
+    class Graph:
+        def invoke(self, state, *, config):
+            assert "qqmusic.play_song:红烧狮子头:点歌曲标题" in runner.context.active_skill_guide
+            assert "qqmusic.play_song" in runner.activated_skills
+            return {"success": True, "status": "complete", "step": 1}
+
+    monkeypatch.setattr(runner, "graph", lambda: Graph())
+    assert runner.execute()["success"] is True
+    assert events == ["model", ("launch_app", {"package": "com.example.music"})]
 
 
 def test_pure_open_model_then_adb_no_screen_or_graph(monkeypatch):

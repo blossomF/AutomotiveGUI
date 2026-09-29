@@ -48,6 +48,7 @@ class Skill:
     steps: list[dict] = field(default_factory=list)
     popups: list[dict] = field(default_factory=list)
     package: str = ""
+    configured_app: str = ""
 
     def signature(self) -> str:
         """一行技能签名，注入永久提示词块。
@@ -95,6 +96,7 @@ class SkillBook:
                     steps=list(spec.get("steps") or []),
                     popups=popups,
                     package=package,
+                    configured_app=str(doc.get("configured_app") or "").strip(),
                 )
                 self.by_id[f"{skill.app}.{skill.name}"] = skill
 
@@ -103,6 +105,11 @@ class SkillBook:
         return "\n".join(
             s.signature() for _, s in sorted(self.by_id.items(), key=lambda kv: kv[1].app) if s.guide
         ) or "（无）"
+
+    def for_configured_app(self, app_name: str) -> list[Skill]:
+        """Skills explicitly bound to a configured app for the initial model route."""
+        return [s for s in self.by_id.values()
+                if s.guide and s.configured_app == app_name]
 
     def guidance(self, key: str, params: dict | None = None) -> str:
         """返回给模型的操作指导，不执行任何设备动作。"""

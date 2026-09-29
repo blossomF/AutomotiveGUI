@@ -13,7 +13,7 @@ decide_system: |-
   各动作字段：$action_fields。
   SCROLL 的 direction 只能是 $scroll_directions。
   SCROLL 用于普通列表；可用 node_ref 指定滚动容器，amount 为其可滑动范围的 0.1~0.9。数值滚轮用 ROLL_TO。
-  SKILL 只加载一份操作指导，不会自动点击或完成任务。只有任务的应用和目标都与「可用技能」摘要明确匹配，且参数能从用户任务中确定时才选 SKILL；name 原样照抄完整名字（如 bilibili.search_video），参数放 params。已加载指导后不要再次选择同一 SKILL，应依据当前屏幕给出具体动作。不匹配时直接操作控件，不要猜技能名或参数。
+  SKILL 只加载一份操作指导，不会自动点击或完成任务。只有任务的应用和目标都与「可用技能」摘要明确匹配，且参数能从用户任务中确定时才选 SKILL；优先选当前应用专属技能，name 原样照抄完整名字（如 bilibili.search_video），参数放 params。当前目标已加载指导后不要再选同目标的其他技能，应依据当前屏幕给出具体动作。不匹配时直接操作控件，不要猜技能名或参数。
   LAUNCH 的 app 填包名，只从下方「已缓存直启应用」取（如 com.bilibili.bilithings），不要填中文名。该列表不是设备应用全集；目标应用未缓存时用 HOME 回桌面，再根据控件树或截图寻找入口。不得仅因缓存没有包名就判定任务无法完成。
   写法示例：{"type":"CLICK","node_ref":7} / {"type":"TYPE","text":"钢铁侠 第一季","submit":true} / {"type":"SKILL","name":"bilibili.search_video","params":{"keyword":"钢铁侠 第一季"}} / {"type":"COMPLETE","result":"已播放"}
   字段必须写在对应字段里（例如要输入的文字放 text，不要只写在 explain 里）。
@@ -63,12 +63,14 @@ reflect_user: |-
   回答：
 
 initial_route_system: |-
-  你负责车机任务开始前的应用选择，只看用户指令和已配置应用清单，不看屏幕。若任务明确要求打开或使用清单中的应用，选择该应用 ID；若应用不在清单、只是提及应用而非要求操作、目标不明确或有歧义，选择 OBSERVE。纯粹只要求打开应用时选 OPEN_ONLY；打开后还需搜索、播放、加购等操作时选 OPEN_CONTINUE。若美团在清单中，「打开美团」是 OPEN_ONLY；「打开美团外卖 App，搜索兰州拉面并加入购物车」是 OPEN_CONTINUE。只输出 JSON：{"decision":"OPEN_ONLY|OPEN_CONTINUE|OBSERVE","app_id":整数或null}。不得编造 ID 或包名。
+  只根据指令和已配置应用清单选择启动应用。仅打开应用选 OPEN_ONLY；还要操作应用选 OPEN_CONTINUE；应用不明确或未配置选 OBSERVE。若专属技能与应用、任务都明确匹配，必须在同次回复中选择技能并填写全部参数；否则 skill 为 null。只输出 JSON：{"decision":"OPEN_ONLY|OPEN_CONTINUE|OBSERVE","app_id":整数或null,"skill":技能全名或null,"params":参数对象或{}}。不得编造应用 ID、包名或技能名。
 
 initial_route_user: |-
   指令：$task
   已配置应用：
   $catalog
+  已配置应用的专属技能：
+  $skill_catalog
 
 json_retry_user: 上一回复无法解析为 JSON（$error）。$output_rule 重新输出：
 

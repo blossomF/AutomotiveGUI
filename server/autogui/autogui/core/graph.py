@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 
 from autogui.actions import MUTATING, TERMINAL
 from autogui.bridge import tools
-from autogui.bridge.adb import ADBError, node_attr, node_class, node_text, nodes
+from autogui.bridge.adb import ADBError, node_attr, node_class, node_desc, node_text, nodes
 from autogui.bridge.input import UnicodeInputUnavailable, to_pinyin_syllables
 from autogui.brain.context import Context
 from autogui.brain.glm_client import GLMClient, GLMError
@@ -98,6 +98,7 @@ class Runner:
     unicode_xml_unavailable_this_step: bool = False
     launch_note_decisions: int = 0
     skip_waited_targets: set[str] = field(default_factory=set)
+    launch_monotonic: float | None = None
     vlm_image_size: tuple[int, int] | None = None
     last_grid_click: str = ""
 
@@ -166,6 +167,11 @@ class Runner:
                 candidate_limit=self.cfg.agent.tree_candidate_limit,
                 last_size=(self.grid.width, self.grid.height) if self.grid else None,
             )
+            if self.launch_monotonic is not None:
+                # Reuse the normal first observation. A short launch ad does
+                # not need a model decision or a task step just to wait.
+                self.obs, self.grid = self._wait_for_launch_ad(self.obs, self.grid)
+                self.launch_monotonic = None
         except ADBError as e:
             self.log.phase("error", f"抓帧失败: {e}")
             return {"step": step, "error": str(e), "done": True, "status": "error", "success": False}
@@ -574,8 +580,41 @@ class Runner:
         self.context.launch_note = app
         self.launch_note_decisions = 2
         self.skip_waited_targets.clear()
+        self.launch_monotonic = time.monotonic()
         if self.log:
             self.log.phase("route", f"启动后弹窗提示已启用：{app}", decisions=2)
+
+    @staticmethod
+    def _is_launch_ad(xml: str) -> bool:
+        """Require both a skip control and ad marker; never swallow consent UI."""
+        if not xml:
+            return False
+        labels = [f"{node_text(n)} {node_desc(n)}".strip() for n in nodes(xml)]
+        return (any("跳过" in label for label in labels)
+                and any("广告" in label for label in labels))
+
+    def _wait_for_launch_ad(self, obs: Observation, grid: grid_mod.Grid
+                            ) -> tuple[Observation, grid_mod.Grid]:
+        if not self._is_launch_ad(obs.xml):
+            return obs, grid
+        elapsed = time.monotonic() - self.launch_monotonic
+        remaining = max(0.0, 5.0 - elapsed)
+        self.log.phase("ad", f"启动广告已识别；距启动 {elapsed:.1f}s，等待 {remaining:.1f}s 后重抓")
+        if remaining:
+            time.sleep(remaining)
+        try:
+            refreshed, new_grid = observe(
+                tools.dev(), grid_cols=self.cfg.grid.cols, grid_rows=self.cfg.grid.rows,
+                grid_mode=self.cfg.grid.mode,
+                candidate_limit=self.cfg.agent.tree_candidate_limit,
+                last_size=(grid.width, grid.height),
+            )
+        except ADBError as e:
+            self.log.phase("ad", f"广告后重抓失败，交由模型处理现有画面：{e}")
+            return obs, grid
+        self.log.phase("ad", "广告已消失，进入正式决策" if not self._is_launch_ad(refreshed.xml)
+                       else "5 秒后仍有广告，交由模型处理")
+        return refreshed, new_grid
 
     @staticmethod
     def _skip_label(label: str) -> bool:
@@ -1055,7 +1094,7 @@ class Runner:
             if has_cached_app:
                 self.route_counts["initial_model"] = self.route_counts.get("initial_model", 0) + 1
             try:
-                initial = (choose_initial_route(self.task, available_apps, self.glm)
+                initial = (choose_initial_route(self.task, available_apps, self.glm, self.book)
                            if cache_matches else InitialRoute(reason="应用包名未针对当前设备重新加载，跳过直启"))
                 self.log.phase("route", f"首次文本判断：{initial.reason}",
                                app=initial.app.name if initial.app else "",
@@ -1066,6 +1105,15 @@ class Runner:
                 initial = None
                 self.log.phase("route", f"首次文本判断失败，进入屏幕观测：{e}")
             if initial and initial.app and self._launch_selected_app(initial.app):
+                if initial.skill_key and self.book:
+                    try:
+                        guide = self.book.guidance(initial.skill_key, initial.skill_params)
+                        self.context.active_skill_guide = guide
+                        self.activated_skills.add(initial.skill_key)
+                        self.route_counts["skill_guide"] = self.route_counts.get("skill_guide", 0) + 1
+                        self.log.phase("skill", f"首次模型同时选中 {initial.skill_key}，已加载指导（{len(guide)} 字）；未执行 ADB")
+                    except SkillMiss as e:
+                        self.log.phase("skill", f"首次技能指导不可用：{e}")
                 if initial.finish_after_launch:
                     elapsed = self.elapsed
                     usage = self.glm.usage.as_dict()

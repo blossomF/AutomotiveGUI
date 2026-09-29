@@ -237,4 +237,5 @@ def test_external_prompt_templates_render_all_routes():
     reflect = build_reflect_messages("CLICK", "播放歌曲", "before", "after")
     assert "A = 动作生效" in reflect[0]["content"]
     assert "刚执行的动作：CLICK" in reflect[1]["content"][0]["text"]
-    assert "打开美团" in render("initial_route_user", task="打开美团", catalog="1: 美团")
+    assert "打开美团" in render("initial_route_user", task="打开美团", catalog="1: 美团",
+                                  skill_catalog="（无）")
