@@ -1207,14 +1207,46 @@ function autoFillEmpty(){
     if(pkgInput.value.trim()) return;
     const tokens=[row.querySelector('.app-name').value.trim(),
       ...row.querySelector('.app-alias').value.split(/[,，、;；]/).map(s=>s.trim()).filter(Boolean)];
-    const candidates=new Set();
+
+    let bestMatch=null;
+    let bestScore=0;
+
     for(const token of tokens){
+      if(!token) continue;
       const n=normToken(token);
-      if(n.length<3) continue;
-      for(const p of devicePackages){ if(normToken(p).includes(n)) candidates.add(p); }
+      if(n.length<2) continue;
+
+      for(const p of devicePackages){
+        const parts=p.toLowerCase().split('.');
+
+        // 优先：精确匹配某个部分
+        for(const part of parts){
+          if(normToken(part)===n){
+            bestMatch=p;
+            bestScore=1000; // 最高优先级
+            break;
+          }
+        }
+        if(bestScore===1000) break;
+
+        // 否则：计算相似度（部分包含）
+        for(const part of parts){
+          const pn=normToken(part);
+          let score=0;
+          if(pn.includes(n)) score=n.length*10; // 别名被包含
+          else if(n.includes(pn) && pn.length>=2) score=pn.length*5; // 部分被别名包含
+
+          if(score>bestScore){
+            bestScore=score;
+            bestMatch=p;
+          }
+        }
+      }
+      if(bestScore===1000) break; // 已找到精确匹配，停止
     }
-    if(candidates.size===1){
-      pkgInput.value=[...candidates][0];
+
+    if(bestMatch && bestScore>=20){ // 至少2个字符匹配才认为有效
+      pkgInput.value=bestMatch;
       row.classList.add('filled');
       filled++;
     }
