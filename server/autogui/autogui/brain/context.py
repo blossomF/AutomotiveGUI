@@ -49,6 +49,7 @@ class Context:
     active_skill_guide: str = ""
     app_index: str = ""
     input_guide: str = ""
+    launch_note: str = ""
     page_hints: list[str] = field(default_factory=list)
 
     history_window: int = 5
@@ -70,6 +71,8 @@ class Context:
             lines.append(prompts.render("context_active_skill", guide=self.active_skill_guide))
         if self.input_guide:
             lines.append(prompts.render("context_input_guide", guide=self.input_guide))
+        if self.launch_note:
+            lines.append(prompts.render("context_launch_note", app=self.launch_note))
         return "\n".join(lines)
 
     # ── 滑动块 ───────────────────────────────────────────────────────────────
@@ -132,6 +135,7 @@ class Context:
                 entities=self.entities, skill_index=self.skill_index,
                 active_skill_guide=self.active_skill_guide, app_index=self.app_index,
                 input_guide=self.input_guide,
+                launch_note=self.launch_note,
                 page_hints=self.page_hints,
                 history_window=w, candidate_limit=k,
             )

@@ -54,7 +54,7 @@ class ActionSpec:
 
 
 ACTIONS: tuple[ActionSpec, ...] = (
-    ActionSpec("CLICK", ("node_ref | grid",), "Tap one on-screen candidate"),
+    ActionSpec("CLICK", ("node_ref | grid", "target_label?"), "Tap one on-screen candidate"),
     ActionSpec("LONG_PRESS", ("node_ref | grid",), "Hold ~0.8s — context menus, drag handles"),
     ActionSpec("TYPE", ("text", "clear_first?", "submit?"),
                "Type into the focused field; submit=true presses ENTER after typing (search boxes)"),
@@ -102,6 +102,8 @@ def parse_action(raw: dict) -> dict:
     out: dict = {"type": name, "explain": str(raw.get("explain", ""))[:200]}
 
     if name in ("CLICK", "LONG_PRESS"):
+        if name == "CLICK" and raw.get("target_label") is not None:
+            out["target_label"] = str(raw["target_label"]).strip()[:60]
         if "node_ref" in raw and raw["node_ref"] is not None:
             try:
                 out["node_ref"] = int(str(raw["node_ref"]).lstrip("#"))

@@ -228,7 +228,7 @@ def test_only_current_page_hints_enter_context():
 
 def test_external_prompt_templates_render_all_routes():
     tree = build_decide_messages("任务：播放歌曲", None, "20x10", screen=(1920, 1080))
-    assert "CLICK(node_ref | grid)" in tree[0]["content"]
+    assert "CLICK(node_ref | grid, target_label?)" in tree[0]["content"]
     assert "1920×1080" in tree[1]["content"]
     vlm = build_decide_messages("任务：播放歌曲", "abc", "20x10")
     assert vlm[1]["content"][1]["text"].startswith("当前屏幕截图已叠加 20x10")

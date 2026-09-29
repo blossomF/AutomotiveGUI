@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -94,6 +95,8 @@ class Runner:
     decide_attempts: int = 0
     pending_unicode: str = ""
     blocked_unicode_attempts: int = 0
+    launch_note_decisions: int = 0
+    skip_waited_targets: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         """构造完成后按配置初始化 Context（四层上下文管理器，token 预算裁剪）。"""
@@ -187,6 +190,8 @@ class Runner:
             self.pending_unicode = ""
             self.blocked_unicode_attempts = 0
             self.context.input_guide = ""
+        if not any(self._skip_label(c.label) for c in self.obs.candidates):
+            self.skip_waited_targets.clear()
         same = bool(state.get("screen_sig")) and self.obs.signature == state.get("screen_sig")
         no_progress = state.get("no_progress", 0) + 1 if same else 0
         return {
@@ -279,6 +284,10 @@ class Runner:
         if self.log.debug and self.context.page_hints:
             self.log.detail("decide", f"页面提示命中: {len(self.context.page_hints)}")
         text, kept, counts = self.context.trim(self.obs.candidates if route == "tree" else [])
+        if self.launch_note_decisions:
+            self.launch_note_decisions -= 1
+            if not self.launch_note_decisions:
+                self.context.launch_note = ""
 
         # 细粒度日志：候选裁剪
         if self.log.debug and route == "tree":
@@ -417,6 +426,14 @@ class Runner:
         if a_type in TERMINAL:
             return {"last_action": action}
 
+        if a_type == "CLICK" and self._is_skip_click(action):
+            refreshed = self._preflight_skip_click(action)
+            if refreshed is None:
+                self.context.record(state.get("step", 0), state.get("route", "?"),
+                                    "CLICK 跳过", "广告已消失或临近结束；取消过期点击，重新观察")
+                return {"last_action": {}, "no_progress": 0}
+            action = refreshed
+
         try:
             result = self._dispatch(action)
         except UnicodeInputUnavailable as e:
@@ -501,10 +518,89 @@ class Runner:
         if a_type == "LAUNCH":
             self.pending_unicode = ""
             self.context.input_guide = ""
-            return ex.call("launch_app", package=action["app"])
+            result = ex.call("launch_app", package=action["app"])
+            if not result.startswith("TOOL_ERROR"):
+                self._note_launch(action["app"])
+            return result
         if a_type == "WAIT":
             return ex.call("sleep", seconds=action.get("seconds", 1.5))
         raise ValueError(f"no dispatch for {a_type}")
+
+    def _note_launch(self, app: str) -> None:
+        """Show a short-lived launch hint for the next two model decisions."""
+        self.context.launch_note = app
+        self.launch_note_decisions = 2
+        self.skip_waited_targets.clear()
+        if self.log:
+            self.log.phase("route", f"启动后弹窗提示已启用：{app}", decisions=2)
+
+    @staticmethod
+    def _skip_label(label: str) -> bool:
+        return "跳过" in label or "skip" in label.casefold()
+
+    def _is_skip_click(self, action: dict) -> bool:
+        if self._skip_label(str(action.get("target_label") or "")):
+            return True
+        candidate = (tree_mod.by_ref(self.obs.candidates, action["node_ref"])
+                     if self.obs and action.get("node_ref") is not None else None)
+        if candidate is not None:
+            return self._skip_label(candidate.label)
+        # Older VLM answers may omit target_label. Use explain only if it
+        # explicitly describes a tap on Skip, not merely mentions an ad.
+        return bool(re.search(r"(?:点击|点按|轻点).{0,12}跳过", str(action.get("explain") or "")))
+
+    def _preflight_skip_click(self, action: dict) -> dict | None:
+        """Revalidate an ephemeral skip target; never tap a stale grid coordinate."""
+        candidate = (tree_mod.by_ref(self.obs.candidates, action["node_ref"])
+                     if self.obs and action.get("node_ref") is not None else None)
+        if candidate is None:
+            # A VLM grid has no stable node identity. A short ad will close by
+            # itself; a blind coordinate tap after another model call is unsafe.
+            self.log.phase("act", "看图识别的跳过按钮：等待 2 秒后重新观察，不点旧网格")
+            time.sleep(2.0)
+            return None
+
+        try:
+            xml = tools.dev().dump_xml()
+        except ADBError as e:
+            self.log.phase("act", f"跳过按钮复核失败，取消点击：{e}")
+            return None
+        fresh = tree_mod.candidates_from_xml(
+            xml, limit=200, screen=(self.obs.width, self.obs.height))
+        matches = [item for item in fresh if item.enabled and self._skip_label(item.label)
+                   and item.cls == candidate.cls
+                   and (item.rid == candidate.rid if candidate.rid else
+                        abs(item.cx - candidate.cx) < self.obs.width // 4
+                        and abs(item.cy - candidate.cy) < self.obs.height // 4)]
+        if not matches:
+            self.log.phase("act", "跳过按钮已从新 XML 消失，取消过期点击")
+            self.skip_waited_targets.clear()
+            return None
+        target = min(matches, key=lambda item: abs(item.cx - candidate.cx) + abs(item.cy - candidate.cy))
+        key = f"{candidate.rid}:{candidate.bounds}"
+        countdown = re.search(r"(\d+)\s*(?:s|秒)", target.label, re.I)
+        if countdown and int(countdown.group(1)) <= 5:
+            wait = min(5.3, int(countdown.group(1)) + 0.3)
+            self.skip_waited_targets.add(key)
+            self.log.phase("act", f"跳过按钮剩余约 {countdown.group(1)} 秒，等待自动关闭", wait_s=wait)
+            time.sleep(wait)
+            return None
+        if re.search(r"\d+\s*(?:s|秒)", candidate.label, re.I):
+            self.skip_waited_targets.add(key)
+            self.log.phase("act", "原倒计时广告仍显示跳过入口，等待 2 秒后重新观察")
+            time.sleep(2.0)
+            return None
+        if key not in self.skip_waited_targets:
+            self.skip_waited_targets.add(key)
+            self.log.phase("act", "跳过按钮未显示倒计时，先等待 2 秒再确认是否自动关闭")
+            time.sleep(2.0)
+            return None
+        self.log.phase("act", "跳过按钮仍存在，使用新 XML 坐标", x=target.cx, y=target.cy)
+        self.skip_waited_targets.discard(key)
+        refreshed = dict(action)
+        refreshed.pop("node_ref", None)
+        refreshed["coord"] = (target.cx, target.cy)
+        return refreshed
 
     @staticmethod
     def _field_contains(xml: str, expected: str) -> bool:
@@ -803,7 +899,9 @@ class Runner:
             else:
                 app = self._foreground_package()
                 if app:
-                    self.executor.call("launch_app", package=app)
+                    result = self.executor.call("launch_app", package=app)
+                    if not result.startswith("TOOL_ERROR"):
+                        self._note_launch(app)
         except ADBError as e:
             self.log.phase("recovery", f"恢复失败：{e}")
         self.context.record(state.get("step", 0), "recovery", rung, "屏幕无变化，尝试恢复", failed=True)
@@ -973,4 +1071,5 @@ class Runner:
         self.context.entities["已打开应用"] = app.name
         self.context.progress = f"已打开 {app.name}；继续完成用户指令"
         self.route_counts["model_adb_launch"] = 1
+        self._note_launch(app.name)
         return True
