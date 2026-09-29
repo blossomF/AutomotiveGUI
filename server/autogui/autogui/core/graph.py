@@ -98,6 +98,8 @@ class Runner:
     unicode_xml_unavailable_this_step: bool = False
     launch_note_decisions: int = 0
     skip_waited_targets: set[str] = field(default_factory=set)
+    vlm_image_size: tuple[int, int] | None = None
+    last_grid_click: str = ""
 
     def __post_init__(self) -> None:
         """构造完成后按配置初始化 Context（四层上下文管理器，token 预算裁剪）。"""
@@ -309,9 +311,14 @@ class Runner:
                     "done": True, "success": False, "status": "error", "error": "no GLM client"}
 
         jpeg = None
+        image_size = None
         if route == "vlm":
             annotated = self.grid.annotate(self.obs.png, self.cfg.grid)
             jpeg = grid_mod.encode_jpeg(annotated, self.cfg.grid.jpeg_quality, self.cfg.grid.max_side)
+            max_side = self.cfg.grid.max_side
+            scale = min(1.0, max_side / max(self.obs.width, self.obs.height))
+            image_size = (int(self.obs.width * scale), int(self.obs.height * scale))
+            self.vlm_image_size = image_size
 
             # 细粒度日志：VLM网格图
             if self.log.debug:
@@ -325,7 +332,7 @@ class Runner:
         try:
             action, usage = self.glm.decide(
                 text, jpeg_b64=jpeg, grid_spec=f"{self.grid.cols}x{self.grid.rows}",
-                screen_size=(self.obs.width, self.obs.height),
+                screen_size=(self.obs.width, self.obs.height), image_size=image_size,
             )
         except (GLMError, ValueError) as e:
             self.log.phase("error", f"决策失败：{e}")
@@ -344,6 +351,25 @@ class Runner:
             f"{action['type']} {self._action_detail(action)} — {action.get('explain', '')}",
             glms=usage.calls, in_tok=usage.prompt_tokens, out_tok=usage.completion_tokens,
         )
+        if route == "tree" and action.get("point") is not None:
+            self.log.phase("route", "tree 模式没有图片坐标系，改用 VLM 重新定位")
+            return {"route": "vlm", "action": {}, "retry_decision": True}
+        if route == "vlm" and action.get("point") is not None:
+            x, y = action["point"]
+            if image_size is None or not (0 <= x < image_size[0] and 0 <= y < image_size[1]):
+                self.log.phase("decide", f"图片坐标越界：{action['point']}，图片尺寸={image_size}")
+                self.context.record(state.get("step", 0), route, "CLICK", "图片坐标越界；请按本轮图片尺寸重新定位", failed=True)
+                return {"action": {}, "retry_decision": False, "no_progress": state.get("no_progress", 0) + 1}
+            action["image_size"] = image_size
+        if (route == "vlm" and action.get("type") == "CLICK" and action.get("grid")
+                and action["grid"] == self.last_grid_click
+                and re.search(r"未生效|仍在|没有进入|未进入|未切换", action.get("explain", ""))):
+            self.context.record(state.get("step", 0), route, "CLICK",
+                                f"连续点击 {action['grid']} 仍未进入目标页；下一轮用 point 给出目标图片坐标", failed=True)
+            self.log.phase("decide", f"阻止重复无效格心点击 {action['grid']}；下一轮请用 point")
+            self.last_grid_click = ""
+            return {"action": {}, "retry_decision": False, "no_progress": state.get("no_progress", 0) + 1}
+        self.last_grid_click = action.get("grid", "") if action.get("type") == "CLICK" else ""
         if self.pending_unicode and action.get("type") == "COMPLETE":
             # XML can be absent indefinitely on WebView-heavy pages. This
             # decision already saw the current screenshot on the forced VLM
@@ -408,7 +434,7 @@ class Runner:
 
     def _action_detail(self, action: dict) -> str:
         """提取动作第一个非空的关键参数（node_ref/grid/text 等），供日志与反思提示词使用。"""
-        for k in ("node_ref", "coord", "grid", "text", "direction", "app", "skill"):
+        for k in ("node_ref", "point", "coord", "grid", "text", "direction", "app", "skill"):
             if action.get(k) not in (None, ""):
                 detail = f"{k}={action[k]!r}"
                 if k == "text" and action.get("submit"):
@@ -640,6 +666,16 @@ class Runner:
             x, y = action["coord"]
             w, h = self.obs.width, self.obs.height
             return (max(0, min(int(x), w - 1)), max(0, min(int(y), h - 1)))
+        if action.get("point") and self.obs:
+            image_size = action.get("image_size") or self.vlm_image_size
+            if not image_size or min(image_size) <= 0:
+                return (None, None)
+            px, py = action["point"]
+            x = round(px * self.obs.width / image_size[0])
+            y = round(py * self.obs.height / image_size[1])
+            resolved = self._clamp_xy(x, y)
+            self.log.phase("act", f"图片坐标 {action['point']} / {image_size} → 设备坐标 {resolved} / {(self.obs.width, self.obs.height)}")
+            return resolved
         if action.get("grid") and self.grid:
             return self.grid.to_pixel(action["grid"])
         return (None, None)

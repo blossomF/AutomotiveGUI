@@ -29,6 +29,7 @@ def test_click_accepts_node_ref_or_grid():
     assert parse_action({"action": "CLICK", "node_ref": 7})["node_ref"] == 7
     assert parse_action({"action": "CLICK", "node_ref": "#12"})["node_ref"] == 12
     assert parse_action({"action": "CLICK", "grid": "j5"})["grid"] == "J5"
+    assert parse_action({"action": "CLICK", "point": [990, 127]})["point"] == (990.0, 127.0)
     with pytest.raises(ValueError):
         parse_action({"action": "CLICK"})
 
@@ -228,11 +229,11 @@ def test_only_current_page_hints_enter_context():
 
 def test_external_prompt_templates_render_all_routes():
     tree = build_decide_messages("任务：播放歌曲", None, "20x10", screen=(1920, 1080))
-    assert "CLICK(node_ref | grid, target_label?)" in tree[0]["content"]
+    assert "CLICK(node_ref | grid | point, target_label?)" in tree[0]["content"]
     assert "1920×1080" in tree[1]["content"]
-    vlm = build_decide_messages("任务：播放歌曲", "abc", "20x10")
-    assert vlm[1]["content"][1]["text"].startswith("当前屏幕截图已叠加 20x10")
-    assert '"grid":"J5"' in vlm[1]["content"][3]["text"]
+    vlm = build_decide_messages("任务：播放歌曲", "abc", "20x10", image_size=(1568, 882))
+    assert vlm[1]["content"][1]["text"].startswith("当前截图尺寸为 1568×882")
+    assert '"point":[990,127]' in vlm[1]["content"][3]["text"]
     reflect = build_reflect_messages("CLICK", "播放歌曲", "before", "after")
     assert "A = 动作生效" in reflect[0]["content"]
     assert "刚执行的动作：CLICK" in reflect[1]["content"][0]["text"]

@@ -52,8 +52,8 @@ def test_failed_chinese_type_forces_keyboard_screenshot_without_repeating():
     assert runner.pending_unicode == "会议"
     assert "不要再次 TYPE" in runner.context.permanent_block()
     assert runner.route({})["route"] == "vlm"
-    assert "屏幕键盘" in prompts.render("decide_vlm_screen", grid_spec="10x20") or "看图" in prompts.render(
-        "decide_vlm_screen", grid_spec="10x20")
+    assert "看图" in prompts.render("decide_vlm_screen", grid_spec="10x20",
+                                image_width=1080, image_height=2400)
 
 
 def test_unicode_submission_requires_exact_edittext_readback(monkeypatch):

@@ -223,6 +223,7 @@ class GLMClient:
         jpeg_b64: str | None = None,
         grid_spec: str = "20x10",
         screen_size: tuple[int, int] | None = None,
+        image_size: tuple[int, int] | None = None,
     ) -> tuple[dict, Usage]:
         """请求下一个动作。返回归一化后的动作 dict。
 
@@ -231,7 +232,7 @@ class GLMClient:
         绝不崩溃。
         """
         messages = prompts.build_decide_messages(
-            context_text, jpeg_b64, grid_spec, screen=screen_size
+            context_text, jpeg_b64, grid_spec, screen=screen_size, image_size=image_size
         )
         raw = self.chat_json(messages, kind="decide")
         try:

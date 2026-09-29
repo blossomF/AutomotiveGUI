@@ -13,6 +13,7 @@ dock 的横屏车机上这个提示是错的，模型会白白烧掉步数找按
 from __future__ import annotations
 
 import re
+import math
 from dataclasses import dataclass
 
 # tree（纯文本）模式没有网格图，模型无法回答 E5 这类格号；当它需要点中一个
@@ -54,8 +55,8 @@ class ActionSpec:
 
 
 ACTIONS: tuple[ActionSpec, ...] = (
-    ActionSpec("CLICK", ("node_ref | grid", "target_label?"), "Tap one on-screen candidate"),
-    ActionSpec("LONG_PRESS", ("node_ref | grid",), "Hold ~0.8s — context menus, drag handles"),
+    ActionSpec("CLICK", ("node_ref | grid | point", "target_label?"), "Tap one on-screen candidate"),
+    ActionSpec("LONG_PRESS", ("node_ref | grid | point",), "Hold ~0.8s — context menus, drag handles"),
     ActionSpec("TYPE", ("text", "clear_first?", "submit?"),
                "Type into the focused field; submit=true presses ENTER after typing (search boxes)"),
     ActionSpec("SCROLL", ("direction", "node_ref?", "amount?"),
@@ -109,6 +110,13 @@ def parse_action(raw: dict) -> dict:
                 out["node_ref"] = int(str(raw["node_ref"]).lstrip("#"))
             except (TypeError, ValueError):
                 raise ValueError(f"node_ref must be an integer, got {raw['node_ref']!r}")
+        elif raw.get("point") is not None:
+            point = raw["point"]
+            if (not isinstance(point, (list, tuple)) or len(point) != 2
+                    or any(isinstance(v, bool) or not isinstance(v, (int, float))
+                           or not math.isfinite(v) for v in point)):
+                raise ValueError("point must be two finite image coordinates [x,y]")
+            out["point"] = tuple(float(v) for v in point)
         elif raw.get("grid") is not None:
             coord = parse_coord(raw["grid"])
             if coord is not None:

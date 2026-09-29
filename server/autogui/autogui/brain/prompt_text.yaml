@@ -4,7 +4,7 @@
 
 output_rule: 只输出一个 JSON 对象。不要 markdown 代码块，不要解释文字，不要输出多个对象。
 decide_schema_tree: '{"type":"CLICK","node_ref":7,"explain":"...","progress":"...","entities":{"时间":"19:00"}}'
-decide_schema_vlm: '{"type":"CLICK","grid":"J5","explain":"...","progress":"...","entities":{"时间":"19:00"}}'
+decide_schema_vlm: '{"type":"CLICK","point":[990,127],"explain":"...","progress":"...","entities":{"时间":"19:00"}}'
 
 decide_system: |-
   你是车机（Android Automotive 中控横屏）GUI Agent 的决策器。每一轮你会看到任务、历史、已确认信息，以及当前屏幕，你要给出**一个**下一步动作。
@@ -43,7 +43,7 @@ decide_tree_coords: |-
   本路是纯文本、没有网格图，grid 字段**不要**写 E5 这类字母格号（那是看图模式才用）。屏幕像素尺寸为 $width×$height，候选行中的 [x,y] 是该控件中心的真实像素坐标。绝大多数点击直接回复 node_ref 即可。
 
 decide_vlm_screen: |-
-  当前屏幕截图已叠加 $grid_spec 网格（列 A-… 行 1-…）。此轮需看图操作；点击屏幕键盘等树外控件时用 grid 字段，例如 "J5"。
+  当前截图尺寸为 $image_width×$image_height，叠加了 $grid_spec 网格（列 A-… 行 1-…）。看图点击优先用 point:[x,y]，坐标按这张截图的尺寸填写，点在目标可点击区域内部；程序会换算为设备坐标。大目标也可用 grid 格号（如 "J5"），但格号只会点击格子中心。小目标或位于两个格子中心之间的目标必须用 point，不要反复尝试相邻格号。
 
 decide_vlm_output: |-
   输出示例：$schema_text

@@ -74,13 +74,16 @@ def decide_user_text(context_text: str, screen: tuple[int, int] | None = None) -
     )
 
 
-def decide_user_vlm(context_text: str, jpeg_b64: str, grid_spec: str) -> list[dict]:
+def decide_user_vlm(context_text: str, jpeg_b64: str, grid_spec: str,
+                    image_size: tuple[int, int] | None = None) -> list[dict]:
     """兜底路由——一张叠加了网格的截图。"""
     return [
         {"type": "text", "text": context_text},
         {
             "type": "text",
-            "text": render("decide_vlm_screen", grid_spec=grid_spec),
+            "text": render("decide_vlm_screen", grid_spec=grid_spec,
+                           image_width=(image_size or (0, 0))[0],
+                           image_height=(image_size or (0, 0))[1]),
         },
         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{jpeg_b64}"}},
         {"type": "text", "text": render("decide_vlm_output", schema_text=render("decide_schema_vlm"))},
@@ -90,10 +93,12 @@ def decide_user_vlm(context_text: str, jpeg_b64: str, grid_spec: str) -> list[di
 def build_decide_messages(
     context_text: str, jpeg_b64: str | None, grid_spec: str,
     screen: tuple[int, int] | None = None,
+    image_size: tuple[int, int] | None = None,
 ) -> list[dict]:
     msgs = [{"role": "system", "content": DECIDE_SYSTEM}]
     if jpeg_b64:
-        msgs.append({"role": "user", "content": decide_user_vlm(context_text, jpeg_b64, grid_spec)})
+        msgs.append({"role": "user", "content": decide_user_vlm(context_text, jpeg_b64, grid_spec,
+                                                              image_size or screen)})
     else:
         msgs.append({"role": "user", "content": decide_user_text(context_text, screen)})
     return msgs
