@@ -107,7 +107,8 @@ class GLMClient:
                 raise GLMError(f"{cfg.api_key_env} is not set — cannot call GLM")
             from openai import OpenAI
 
-            self._client = OpenAI(api_key=cfg.api_key, base_url=cfg.base_url, timeout=cfg.timeout)
+            self._client = OpenAI(api_key=cfg.api_key, base_url=cfg.base_url,
+                                  timeout=cfg.timeout, max_retries=0)
 
     # ── 原始 chat ────────────────────────────────────────────────────────────
 
@@ -144,21 +145,41 @@ class GLMClient:
         for attempt in range(self.cfg.max_retries + 1):
             started = time.perf_counter()
             try:
+                # 流式接收：ts-glm-53-flash 是思维链模型，复杂步思考可达数分钟。
+                # 非流式下网关整体生成完才回包，60s 读超时内无任何字节 → 必然超时；
+                # 流式下思考 token 持续到达，读超时只约束块间静默，长思考可正常完成。
+                # SDK 内部重试已关闭（max_retries=0），重试统一走下方循环（带退避+日志）。
+                extra: dict = {}
+                effort = getattr(self.cfg, "reasoning_effort", "")
+                if effort:
+                    extra["reasoning_effort"] = effort
                 resp = self._client.chat.completions.create(
                     model=self.cfg.model,
                     messages=messages,
                     temperature=self.cfg.temperature,
                     max_tokens=self.cfg.max_tokens,
+                    stream=True,
+                    stream_options={"include_usage": True},
+                    extra_body=extra,
                 )
                 call.calls += 1
                 call.retries += attempt
+                content_parts: list[str] = []
+                final_usage = None
+                for ev in resp:
+                    if getattr(ev, "usage", None):
+                        final_usage = ev.usage
+                    if ev.choices:
+                        piece = getattr(ev.choices[0].delta, "content", None)
+                        if piece:
+                            content_parts.append(piece)
                 call.latency_ms += (time.perf_counter() - started) * 1000
-                if getattr(resp, "usage", None):
-                    call.prompt_tokens += int(resp.usage.prompt_tokens or 0)
-                    call.completion_tokens += int(resp.usage.completion_tokens or 0)
+                if final_usage:
+                    call.prompt_tokens += int(final_usage.prompt_tokens or 0)
+                    call.completion_tokens += int(final_usage.completion_tokens or 0)
                 self.usage.merge(call)
                 self.last_call = call
-                content = (resp.choices[0].message.content or "").strip()
+                content = "".join(content_parts).strip()
 
                 if self._log and self._log.debug:
                     self._log.trace_text("glm_response", content, call_id=call_id, request_kind=kind,
