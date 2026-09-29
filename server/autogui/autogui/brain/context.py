@@ -51,6 +51,7 @@ class Context:
     input_guide: str = ""
     launch_note: str = ""
     page_hints: list[str] = field(default_factory=list)
+    focus_terms: list[str] = field(default_factory=list)
 
     history_window: int = 5
     token_budget: int = 8000
@@ -137,6 +138,7 @@ class Context:
                 input_guide=self.input_guide,
                 launch_note=self.launch_note,
                 page_hints=self.page_hints,
+                focus_terms=self.focus_terms,
                 history_window=w, candidate_limit=k,
             )
             body = kept[:k]
@@ -163,6 +165,7 @@ class Context:
             else:
                 kept = tree_mod.select_candidates(
                     kept, max(6, len(kept) - 6), max((c.cy for c in kept), default=1) + 1,
+                    self.focus_terms,
                 )
             text, tokens = build(window, len(kept))
 

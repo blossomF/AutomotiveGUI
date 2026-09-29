@@ -117,6 +117,7 @@ class AgentConfig(BaseModel):
     history_window: int = Field(default=5, ge=1, le=20)
     token_budget: int = Field(default=8000, ge=1000, le=128000)
     tree_candidate_limit: int = Field(default=40, ge=5, le=200)
+    tree_candidate_token_budget: int = Field(default=900, ge=200, le=8000)
     reflection: Literal["cheap", "always", "off"] = "cheap"
 
 

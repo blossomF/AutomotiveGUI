@@ -101,6 +101,13 @@ class Runner:
     launch_monotonic: float | None = None
     vlm_image_size: tuple[int, int] | None = None
     last_grid_click: str = ""
+    skill_focus_params: dict = field(default_factory=dict)
+    focus_terms: list[str] = field(default_factory=list)
+
+    def _current_focus_terms(self) -> list[str]:
+        return tree_mod.focus_terms_from_task(
+            self.task, self.context.entities, self.skill_focus_params,
+        )
 
     def __post_init__(self) -> None:
         """构造完成后按配置初始化 Context（四层上下文管理器，token 预算裁剪）。"""
@@ -159,12 +166,15 @@ class Runner:
         self.skill_activated_this_step = False
         try:
             self.prev_obs = self.obs
+            self.focus_terms = self._current_focus_terms()
             self.obs, self.grid = observe(
                 tools.dev(),
                 grid_cols=self.cfg.grid.cols,
                 grid_rows=self.cfg.grid.rows,
                 grid_mode=self.cfg.grid.mode,
                 candidate_limit=self.cfg.agent.tree_candidate_limit,
+                candidate_token_budget=self.cfg.agent.tree_candidate_token_budget,
+                focus_terms=self.focus_terms,
                 last_size=(self.grid.width, self.grid.height) if self.grid else None,
             )
             if self.launch_monotonic is not None:
@@ -184,7 +194,11 @@ class Runner:
                             f"{self.obs.candidate_stats.get('eligible', 0)}有效 → "
                             f"{self.obs.candidate_stats.get('unique', 0)}去重 → "
                             f"{len(self.obs.candidates)}候选；"
-                            f"截断可操作控件 {self.obs.candidate_stats.get('omitted_actionable', 0)}")
+                            f"截断可操作控件 {self.obs.candidate_stats.get('omitted_actionable', 0)}；"
+                            f"静态文本 {self.obs.candidate_stats.get('omitted_passive', 0)}；"
+                            f"目标 {self.obs.candidate_stats.get('target_selected', 0)}/"
+                            f"{self.obs.candidate_stats.get('target_in_raw', 0)}；"
+                            f"候选约 {self.obs.candidate_stats.get('candidate_tokens', 0)} token")
 
         self.log.phase(
             "perceive",
@@ -193,6 +207,9 @@ class Runner:
             dump_ms=self.obs.tree_ms,
             sig=self.obs.signature[:9],
             omitted_actionable=self.obs.candidate_stats.get("omitted_actionable", 0),
+            omitted_passive=self.obs.candidate_stats.get("omitted_passive", 0),
+            target_lost=self.obs.candidate_stats.get("target_lost", 0),
+            candidate_tokens=self.obs.candidate_stats.get("candidate_tokens", 0),
         )
         if self.pending_unicode and self._field_contains(self.obs.xml, self.pending_unicode):
             self.log.phase("input", f"已从控件树确认目标中文：{self.pending_unicode!r}")
@@ -235,6 +252,9 @@ class Runner:
         if self.pending_unicode:
             self.log.phase("route", "中文输入需观察屏幕键盘 → vlm")
             return {"route": "vlm"}
+        if self.obs and getattr(self.obs, "candidate_stats", {}).get("target_lost"):
+            self.log.phase("route", "XML 中有任务目标但候选裁剪未保留 → vlm")
+            return {"route": "vlm"}
         if self.log.debug:
             self.log.phase("route", "评估", guide_count=len(self.book.by_id) if self.book else 0,
                            tree_usable=bool(self.obs and self.obs.tree_usable),
@@ -259,6 +279,7 @@ class Runner:
         try:
             guide = self.book.guidance(key, params)
             self.context.active_skill_guide = guide
+            self.skill_focus_params.update(params or {})
             self.activated_skills.add(key)
             self.route_counts["skill_guide"] = self.route_counts.get("skill_guide", 0) + 1
             self.log.phase("skill", f"加载 {key} 指导（{len(guide)} 字）；未执行 ADB")
@@ -292,6 +313,7 @@ class Runner:
         )
         if self.log.debug and self.context.page_hints:
             self.log.detail("decide", f"页面提示命中: {len(self.context.page_hints)}")
+        self.context.focus_terms = self.focus_terms
         text, kept, counts = self.context.trim(self.obs.candidates if route == "tree" else [])
         if self.launch_note_decisions:
             self.launch_note_decisions -= 1
@@ -607,6 +629,8 @@ class Runner:
                 tools.dev(), grid_cols=self.cfg.grid.cols, grid_rows=self.cfg.grid.rows,
                 grid_mode=self.cfg.grid.mode,
                 candidate_limit=self.cfg.agent.tree_candidate_limit,
+                candidate_token_budget=self.cfg.agent.tree_candidate_token_budget,
+                focus_terms=self.focus_terms,
                 last_size=(grid.width, grid.height),
             )
         except ADBError as e:
@@ -909,6 +933,8 @@ class Runner:
                     grid_rows=self.cfg.grid.rows,
                     grid_mode=self.cfg.grid.mode,
                     candidate_limit=self.cfg.agent.tree_candidate_limit,
+                    candidate_token_budget=self.cfg.agent.tree_candidate_token_budget,
+                    focus_terms=self.focus_terms,
                     last_size=(self.grid.width, self.grid.height) if self.grid else None,
                 )
                 # 让随后的 _reflect（若仍需）拿到的是正确配对：act 前 → act 后。
@@ -1109,6 +1135,7 @@ class Runner:
                     try:
                         guide = self.book.guidance(initial.skill_key, initial.skill_params)
                         self.context.active_skill_guide = guide
+                        self.skill_focus_params.update(initial.skill_params or {})
                         self.activated_skills.add(initial.skill_key)
                         self.route_counts["skill_guide"] = self.route_counts.get("skill_guide", 0) + 1
                         self.log.phase("skill", f"首次模型同时选中 {initial.skill_key}，已加载指导（{len(guide)} 字）；未执行 ADB")

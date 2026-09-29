@@ -78,6 +78,8 @@ def observe(
     grid_rows: int = 10,
     grid_mode: str = "manual",
     candidate_limit: int = 40,
+    candidate_token_budget: int = 900,
+    focus_terms: list[str] | None = None,
     last_size: tuple[int, int] | None = None,
 ) -> tuple[Observation, Grid]:
     """并行抓取帧 + 树，并为当前屏幕构建网格。"""
@@ -104,7 +106,8 @@ def observe(
     width, height = _resolve_size(png, last_size or device.screen_size())
     candidate_stats: dict[str, int] = {}
     cands = tree_mod.candidates_from_xml(xml, limit=candidate_limit, screen=(width, height),
-                                         stats=candidate_stats)
+                                         stats=candidate_stats, focus_terms=focus_terms,
+                                         token_budget=candidate_token_budget)
     cols, rows = grid_dimensions(width, height, mode=grid_mode, cols=grid_cols, rows=grid_rows)
     grid = Grid(width=width, height=height, cols=cols, rows=rows)
 

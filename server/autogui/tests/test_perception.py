@@ -103,9 +103,28 @@ def test_dedup_and_priority_happen_before_limit():
     stats = {}
     cands = tree_mod.extract(xml, screen=(1080, 2400), limit=40, stats=stats)
     assert len(cands) == 40
-    assert stats == {"eligible": 91, "unique": 47, "selected": 40, "omitted_actionable": 0}
+    assert all(stats[key] == value for key, value in {
+        "eligible": 91, "unique": 47, "selected": 40, "omitted_actionable": 0,
+        "omitted_passive": 7, "target_lost": 0,
+    }.items())
     assert len([c for c in cands if c.bounds == (0, 100, 100, 200)]) == 1
     assert next(c for c in cands if c.rid == "timezone_button_row").clickable
+
+
+def test_task_target_survives_candidate_and_token_budget():
+    noise = [_ui_node(f"button{i}", f"[0,{i*30}][90,{i*30+25}]", clickable=True)
+             for i in range(65)]
+    title = _ui_node("song_title", "[200,1600][540,1640]", text="Simon")
+    artist = _ui_node("song_artist", "[200,1650][540,1680]", text="丁世光")
+    queue = _ui_node("queue_button", "[600,1600][700,1640]", text="添加到播放队列", clickable=True)
+    xml = "<hierarchy>" + "".join(noise + [title, artist, queue]) + "</hierarchy>"
+    stats = {}
+    cands = tree_mod.extract(xml, screen=(1080, 2400), limit=40, stats=stats,
+                             focus_terms=["Simon"], token_budget=900)
+    labels = {c.label for c in cands}
+    assert {"Simon", "丁世光", "添加到播放队列"} <= labels
+    assert stats["target_lost"] == 0
+    assert stats["candidate_tokens"] <= 900
 
 
 def test_render_preserves_action_and_state_attributes():

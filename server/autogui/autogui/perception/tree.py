@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 
 from autogui.bridge.adb import node_attr, node_bounds, node_class, node_clickable, node_desc, node_rid, node_text, nodes
@@ -43,6 +44,7 @@ class Candidate:
     editable: bool = False
     focused: bool = False
     scroll_axis: str = ""
+    search_text: str = ""  # full XML text for ranking; never sent to the model
 
     def as_dict(self) -> dict:
         return {
@@ -101,8 +103,67 @@ def _reading_order(c: Candidate) -> tuple[int, int]:
     return c.cy // 40, c.cx
 
 
-def select_candidates(cands: list[Candidate], limit: int, screen_height: int) -> list[Candidate]:
-    """Rank after dedup; reserve coverage across the whole screen."""
+def focus_terms_from_task(task: str, entities: dict | None = None,
+                          skill_params: dict | None = None) -> list[str]:
+    """Extract ranking hints, never an action or a claim that a result exists."""
+    values = [str(v) for v in (skill_params or {}).values() if v]
+    for key, value in (entities or {}).items():
+        if any(marker in str(key) for marker in ("目标", "歌曲", "歌名", "关键词", "商品", "联系人", "时间")):
+            values.append(str(value))
+    values += re.findall(r"[《「“\"]([^》」”\"]{2,40})[》」”\"]", task)
+    verbs = list(re.finditer(r"播放|搜索|查找|查看|打开|选择|设置", task))
+    if verbs:
+        tail = task[verbs[-1].end():]
+        tail = re.split(r"[\s，。；,;！？!?]|(?:然后|并且|并|把|加入|点击)", tail, maxsplit=1)[0]
+        values.append(tail.strip("《》「」“”\" App应用"))
+    out: list[str] = []
+    for value in values:
+        value = value.strip()
+        if 2 <= len(value) <= 40 and value.casefold() not in {v.casefold() for v in out}:
+            out.append(value)
+    return out[:6]
+
+
+def _normalized(value: str) -> str:
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", value).casefold())
+
+
+def target_score(c: Candidate, focus_terms: list[str] | None) -> int:
+    """Exact result titles outrank query fields and incidental prose mentions."""
+    if not focus_terms or c.editable:
+        return 0
+    label = _normalized(c.label)
+    source = _normalized(c.search_text or c.label)
+    best = 0
+    for term in focus_terms:
+        query = _normalized(term)
+        if len(query) < 2:
+            continue
+        if label == query:
+            best = max(best, 100)
+        elif label.startswith(query + "(") or label.startswith(query + "（"):
+            best = max(best, 90)
+        elif label.startswith(query):
+            best = max(best, 70)
+        elif query in label:
+            best = max(best, 35)
+        elif query in source:
+            best = max(best, 15)
+        elif len(label) >= 2 and label in query:
+            best = max(best, 20)
+    return best
+
+
+def _estimated_tokens(value: str) -> int:
+    cjk = len(re.findall(r"[㐀-䶿一-鿿豈-﫿぀-ヿ]", value))
+    return cjk + (len(value) - cjk + 3) // 4
+
+
+def select_candidates(cands: list[Candidate], limit: int, screen_height: int,
+                      focus_terms: list[str] | None = None) -> list[Candidate]:
+    """Keep task evidence, its nearby controls and navigational anchors, then spread the rest."""
+    if limit <= 0:
+        return []
     if len(cands) <= limit:
         return sorted(cands, key=_reading_order)
 
@@ -120,11 +181,51 @@ def select_candidates(cands: list[Candidate], limit: int, screen_height: int) ->
                     taken.append(band.pop(0))
         return taken
 
-    actionable = [c for c in cands if is_actionable(c)]
-    passive = [c for c in cands if not is_actionable(c)]
-    chosen = take_spread(actionable, limit)
-    if len(chosen) < limit:
-        chosen.extend(take_spread(passive, limit - len(chosen)))
+    chosen: list[Candidate] = []
+    picked: set[tuple[int, int, int, int]] = set()
+
+    def add(c: Candidate) -> None:
+        if len(chosen) < limit and c.bounds not in picked:
+            chosen.append(c)
+            picked.add(c.bounds)
+
+    targets = sorted((c for c in cands if target_score(c, focus_terms) >= 20),
+                     key=lambda c: (-target_score(c, focus_terms),
+                                    c.editable, c.cy, c.cx))
+    for c in targets[:max(1, min(8, limit // 4))]:
+        add(c)
+
+    # Keep the controls and metadata on the same visible result row. XML often
+    # marks the song title static and only its adjacent buttons actionable.
+    for target in targets[:3]:
+        companions = [c for c in cands if c.bounds not in picked
+                      and abs(c.cy - target.cy) <= max(70, screen_height // 24)
+                      and (is_actionable(c) or bool(c.text))]
+        companions.sort(key=lambda c: (abs(c.cy - target.cy),
+                                       -candidate_priority(c), c.cx))
+        nearby_controls = [c for c in companions if is_actionable(c)]
+        nearby_text = [c for c in companions if not is_actionable(c) and c.text
+                       and not re.fullmatch(r"[\d.,]+[kKmMwW+]*", c.text)]
+        for c in nearby_controls[:2] + nearby_text[:1]:
+            add(c)
+
+    anchor_words = ("返回", "搜索", "确定", "确认", "同意", "关闭", "跳过", "取消", "下一步")
+    anchors = [c for c in cands if c.bounds not in picked and
+               (c.focused or c.editable or c.selected or
+                (is_actionable(c) and any(word in c.label for word in anchor_words)))]
+    anchors.sort(key=lambda c: (-candidate_priority(c), *_reading_order(c)))
+    for c in anchors[:min(8, max(1, limit // 5))]:
+        add(c)
+
+    remaining = limit - len(chosen)
+    actionable = [c for c in cands if c.bounds not in picked and is_actionable(c)]
+    passive = [c for c in cands if c.bounds not in picked and not is_actionable(c)]
+    for c in take_spread(actionable, min(len(actionable), (remaining * 3 + 3) // 4)):
+        add(c)
+    for c in take_spread(passive, limit - len(chosen)):
+        add(c)
+    for c in take_spread(actionable, limit - len(chosen)):
+        add(c)
     return sorted(chosen, key=_reading_order)
 
 
@@ -135,6 +236,8 @@ def extract(
     limit: int = 40,
     include_non_clickable: bool = True,
     stats: dict[str, int] | None = None,
+    focus_terms: list[str] | None = None,
+    token_budget: int | None = None,
 ) -> list[Candidate]:
     """把 uiautomator dump 解析为最多 ``limit`` 个可寻址候选。"""
     if not xml:
@@ -190,6 +293,7 @@ def extract(
             long_clickable=long_clickable,
             editable=editable, focused=node_attr(n, "focused") == "true",
             scroll_axis=_scroll_axis(cls, b) if scrollable else "",
+            search_text=f"{node_text(n)} {node_desc(n)}",
         ))
 
     if not raw:
@@ -226,9 +330,16 @@ def extract(
         best.editable |= other.editable
         best.focused |= other.focused
         best.enabled &= other.enabled
+        if len(other.search_text) > len(best.search_text):
+            best.search_text = other.search_text
         by_bounds[c.bounds] = best
 
-    out = select_candidates(list(by_bounds.values()), max(0, limit), sh)
+    unique = list(by_bounds.values())
+    out = select_candidates(unique, max(0, limit), sh, focus_terms)
+    before_budget = len(out)
+    if token_budget and token_budget > 0:
+        while len(out) > 6 and _estimated_tokens(render_candidates(out)) > token_budget:
+            out = select_candidates(unique, max(6, len(out) - 5), sh, focus_terms)
     if stats is not None:
         selected_bounds = {c.bounds for c in out}
         stats.update(
@@ -238,15 +349,25 @@ def extract(
                 for c in by_bounds.values()
                 if is_actionable(c)
             ),
+            omitted_passive=sum(c.bounds not in selected_bounds for c in unique
+                                if not is_actionable(c)),
+            target_in_raw=sum(target_score(c, focus_terms) >= 20 for c in unique),
+            target_selected=sum(target_score(c, focus_terms) >= 20 for c in out),
+            budget_reduced=before_budget - len(out),
+            candidate_tokens=_estimated_tokens(render_candidates(out)),
         )
+        stats["target_lost"] = int(stats["target_in_raw"] > 0 and stats["target_selected"] == 0)
     for i, c in enumerate(out, start=1):
         c.ref = i
     return out
 
 
 def candidates_from_xml(xml: str, limit: int = 40, screen: tuple[int, int] | None = None,
-                        stats: dict[str, int] | None = None) -> list[Candidate]:
-    return extract(xml, limit=limit, screen=screen, stats=stats)
+                        stats: dict[str, int] | None = None,
+                        focus_terms: list[str] | None = None,
+                        token_budget: int | None = None) -> list[Candidate]:
+    return extract(xml, limit=limit, screen=screen, stats=stats,
+                   focus_terms=focus_terms, token_budget=token_budget)
 
 
 def render_candidates(cands: list[Candidate]) -> str:
