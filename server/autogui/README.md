@@ -121,6 +121,12 @@ flowchart LR
 
 降级是真实发生的代码路径，决策链里会打印 `tree 决策无效 → 本轮降级 vlm` 这样的行，供 AI Reviewer 核验。
 
+### 滚动控件
+
+- 普通列表用 `SCROLL(direction, node_ref?, amount?)`；指定 `node_ref` 时，手势落在该控件内，`amount` 是可滑动范围的 0.1～0.9。页面有多个滚轮时必须指定目标。
+- XML 可读的整数 `NumberPicker` 用 `ROLL_TO(node_ref, target, delta_units?)`，例如目标 `19时`。模型选择目标并可填写当前值到目标值的差；执行器在滚轮内部短滑、重新读取数值并逐次修正，不采用固定的每格像素数。
+- 达到目标值只表示滚轮读数正确；弹窗的“确定”和表单时间核验仍由后续决策完成。日期等无法解析成单个整数的控件，可用指定目标的 `SCROLL` 逐步观察。
+
 ---
 
 ## 4. 命令
@@ -254,7 +260,7 @@ autogui/
 ├── run.bat                Windows 一键入口
 ├── requirements.txt       无 uv 时的 pip 路径
 ├── autogui/
-│   ├── actions.py         动作空间：11 个动作 + 严格校验
+│   ├── actions.py         动作协议 + 严格校验
 │   ├── config.py          pydantic 配置（不碰设备）
 │   ├── bridge/
 │   │   ├── adb.py         ADB 原语：exec-out/PNG裁剪/错误分级/防注入/树解析

@@ -38,6 +38,7 @@ from autogui.brain.glm_client import GLMClient, GLMError
 from autogui.app_routes import InitialRoute, choose_initial_route
 from autogui.config import AppConfig, Config, PROJECT_ROOT
 from autogui.core import guard
+from autogui.core.picker import roll_to
 from autogui.core.decision_log import DecisionLog
 from autogui.core.executor import make_executor
 from autogui.core.state import AgentState
@@ -164,7 +165,11 @@ class Runner:
         # 包括技能执行和 verify 补抓，不只限于 perceive 这一处。
         if self.log.debug:
             self.log.save_image(f"step{step:02d}_screenshot", self.obs.png)
-            self.log.detail("perceive", f"控件树: {self.obs.node_count}节点 → {len(self.obs.candidates)}候选")
+            self.log.detail("perceive", f"控件树: {self.obs.node_count}节点 → "
+                            f"{self.obs.candidate_stats.get('eligible', 0)}有效 → "
+                            f"{self.obs.candidate_stats.get('unique', 0)}去重 → "
+                            f"{len(self.obs.candidates)}候选；"
+                            f"截断可操作控件 {self.obs.candidate_stats.get('omitted_actionable', 0)}")
 
         self.log.phase(
             "perceive",
@@ -172,6 +177,7 @@ class Runner:
             shot_ms=self.obs.shot_ms,
             dump_ms=self.obs.tree_ms,
             sig=self.obs.signature[:9],
+            omitted_actionable=self.obs.candidate_stats.get("omitted_actionable", 0),
         )
         same = bool(state.get("screen_sig")) and self.obs.signature == state.get("screen_sig")
         no_progress = state.get("no_progress", 0) + 1 if same else 0
@@ -265,7 +271,11 @@ class Runner:
 
         # 细粒度日志：候选裁剪
         if self.log.debug and route == "tree":
-            self.log.detail("decide", f"候选裁剪: {len(self.obs.candidates)}→{len(kept)}")
+            omitted_actions = sum(tree_mod.is_actionable(c) for c in self.obs.candidates) - sum(
+                tree_mod.is_actionable(c) for c in kept
+            )
+            self.log.detail("decide", f"候选裁剪: {len(self.obs.candidates)}→{len(kept)}；"
+                            f"预算截断可操作控件 {omitted_actions}")
             self.log.save_text(f"step{state.get('step', 0):02d}_candidates", text)
 
         if route == "tree":
@@ -360,6 +370,10 @@ class Runner:
                 detail = f"{k}={action[k]!r}"
                 if k == "text" and action.get("submit"):
                     detail += " submit=True"
+                if k == "node_ref" and action.get("target"):
+                    detail += f" target={action['target']!r}"
+                    if action.get("delta_units") is not None:
+                        detail += f" delta_units={action['delta_units']}"
                 return detail
         if action.get("from") and action.get("to"):
             return f"from={action['from']} to={action['to']} ms={action.get('duration', 400)}"
@@ -421,7 +435,19 @@ class Runner:
                     r = (r + " + ENTER(submit)").strip(" +")
             return r
         if a_type == "SCROLL":
-            return self._scroll(action["direction"])
+            return self._scroll(action["direction"], action.get("node_ref"), action.get("amount", 0.6))
+        if a_type == "ROLL_TO":
+            candidate = tree_mod.by_ref(self.obs.candidates, action["node_ref"]) if self.obs else None
+            if candidate is None:
+                raise ValueError(f"ROLL_TO node_ref={action['node_ref']} 不在当前候选中")
+            return roll_to(
+                candidate, action["target"], delta_hint=action.get("delta_units"),
+                screen=(self.obs.width, self.obs.height),
+                dump_xml=tools.dev().dump_xml,
+                swipe=lambda x1, y1, x2, y2: ex.call(
+                    "swipe", x1=x1, y1=y1, x2=x2, y2=y2, ms=400),
+                report=lambda message, **metrics: self.log.phase("roll", message, **metrics),
+            )
         if a_type == "DRAG":
             (x1, y1), (x2, y2) = self._resolve_drag(action)
             return ex.call("swipe", x1=x1, y1=y1, x2=x2, y2=y2, ms=action.get("duration", 400))
@@ -464,19 +490,24 @@ class Runner:
         """DRAG 的起/止像素点，各自按屏幕夹紧。"""
         return self._clamp_xy(*action["from"]), self._clamp_xy(*action["to"])
 
-    def _scroll(self, direction: str) -> str:
+    def _scroll(self, direction: str, node_ref: int | None = None, amount: float = 0.6) -> str:
         """把 SCROLL 转成 swipe 并执行。
 
         优先把手势约束在「方向匹配的可滚动容器」内部（起终点都在容器内、
         留 10% 边距），避免全屏中心滑动冲出横滚条/落到外层竖向列表被吞
         （实测 QQ音乐推荐页 hsv_recommend_top 横条只能在自身 bounds 内横滑）；
-        树里找不到对应容器时，回退屏幕中心 ±28% 的通用向量，行为不退化。
+        树里找不到对应容器时，按 amount 在屏幕中心滑动。
         """
         w, h = self.obs.width, self.obs.height
-        vector = self._confined_scroll_vector(direction, w, h)
+        if node_ref is None and direction in ("up", "down"):
+            vertical = tree_mod.scroll_targets(self.obs.xml, screen=(w, h))["vertical"]
+            if sum(tail == "NumberPicker" for _, tail in vertical) > 1:
+                raise ValueError("当前有多个滚轮；SCROLL 必须指定 node_ref，数值滚轮优先用 ROLL_TO")
+        vector = (self._target_scroll_vector(direction, node_ref, amount)
+                  if node_ref is not None else self._confined_scroll_vector(direction, w, h, amount))
         if vector is None:
             cx, cy = w // 2, h // 2
-            dist = int(h * 0.28) if direction in ("down", "up") else int(w * 0.28)
+            dist = round((h if direction in ("down", "up") else w) * 0.8 * amount / 2)
             vector = {
                 "down": (cx, cy + dist, cx, cy - dist),
                 "up": (cx, cy - dist, cx, cy + dist),
@@ -486,8 +517,45 @@ class Runner:
         return self.executor.call("swipe", x1=vector[0], y1=vector[1],
                                  x2=vector[2], y2=vector[3], ms=400)
 
+    def _target_scroll_vector(
+        self, direction: str, node_ref: int, amount: float
+    ) -> tuple[int, int, int, int]:
+        """Scroll the selected XML container, with both endpoints inside it."""
+        candidate = tree_mod.by_ref(self.obs.candidates, node_ref) if self.obs else None
+        if candidate is None:
+            raise ValueError(f"SCROLL node_ref={node_ref} 不在当前候选中")
+        axis = "horizontal" if direction in ("left", "right") else "vertical"
+        groups = tree_mod.scroll_targets(
+            self.obs.xml, screen=(self.obs.width, self.obs.height))
+        if not any(bounds == candidate.bounds for bounds, _ in groups[axis]):
+            raise ValueError(f"#{node_ref} 不是{axis}可滚动控件")
+        x1, y1, x2, y2 = candidate.bounds
+        if axis == "vertical":
+            margin = max(8, round((y2 - y1) * 0.1))
+            span = y2 - y1 - 2 * margin
+            if span < 20:
+                raise ValueError(f"#{node_ref} 可滑动区域过小")
+            travel = max(12, round(span * amount))
+            mid = (y1 + y2) // 2
+            start, end = mid + travel // 2, mid - (travel - travel // 2)
+            if direction == "up":
+                start, end = end, start
+            x = (x1 + x2) // 2
+            return x, start, x, end
+        margin = max(8, round((x2 - x1) * 0.1))
+        span = x2 - x1 - 2 * margin
+        if span < 20:
+            raise ValueError(f"#{node_ref} 可滑动区域过小")
+        travel = max(12, round(span * amount))
+        mid = (x1 + x2) // 2
+        start, end = mid + travel // 2, mid - (travel - travel // 2)
+        if direction == "right":
+            start, end = end, start
+        y = (y1 + y2) // 2
+        return start, y, end, y
+
     def _confined_scroll_vector(
-        self, direction: str, w: int, h: int
+        self, direction: str, w: int, h: int, amount: float = 0.6
     ) -> tuple[int, int, int, int] | None:
         """在最近一帧控件树里找方向匹配的滚动容器，返回容器内滑动向量。"""
         try:
@@ -520,13 +588,15 @@ class Runner:
         mx = max(8, int((x2 - x1) * 0.10))
         my = max(8, int((y2 - y1) * 0.10))
         midx, midy = (x1 + x2) // 2, (y1 + y2) // 2
+        hdist = max(12, round((x2 - x1 - 2 * mx) * amount))
+        vdist = max(12, round((y2 - y1 - 2 * my) * amount))
         if direction == "left":      # 手指左滑 → 内容左移，露出右侧
-            return (x2 - mx, midy, x1 + mx, midy)
+            return (midx + hdist // 2, midy, midx - (hdist - hdist // 2), midy)
         if direction == "right":
-            return (x1 + mx, midy, x2 - mx, midy)
+            return (midx - hdist // 2, midy, midx + (hdist - hdist // 2), midy)
         if direction == "down":     # scroll down：手指上滑 → 内容上移，露出下方
-            return (midx, y2 - my, midx, y1 + my)
-        return (midx, y1 + my, midx, y2 - my)  # up：手指下滑，露出上方
+            return (midx, midy + vdist // 2, midx, midy - (vdist - vdist // 2))
+        return (midx, midy - vdist // 2, midx, midy + (vdist - vdist // 2))  # up：手指下滑
 
     def verify(self, state: AgentState) -> dict:
         """结算本步，只在屏幕看起来没变化时才花一次 VLM 调用。

@@ -70,6 +70,91 @@ def test_empty_or_garbage_xml_does_not_raise():
     assert tree_mod.extract("<hierarchy></hierarchy>", limit=10) == []
 
 
+def _ui_node(rid: str, bounds: str, *, text: str = "", desc: str = "",
+             cls: str = "android.view.View", clickable: bool = False,
+             scrollable: bool = False, extra: str = "") -> str:
+    return (f'<node text="{text}" content-desc="{desc}" resource-id="app:id/{rid}" '
+            f'class="{cls}" clickable="{str(clickable).lower()}" '
+            f'scrollable="{str(scrollable).lower()}" bounds="{bounds}" {extra} />')
+
+
+def test_large_scroll_container_and_same_bounds_pager_keep_scroll_semantics():
+    xml = "<hierarchy>" + "".join((
+        _ui_node("root", "[0,0][1080,2400]", cls="android.widget.FrameLayout"),
+        _ui_node("scroll_view", "[0,609][1080,2270]", cls="android.widget.ScrollView", scrollable=True),
+        _ui_node("month_container", "[0,100][1080,1200]"),
+        _ui_node("view_pager", "[0,100][1080,1200]", cls="androidx.viewpager.widget.ViewPager", scrollable=True),
+    )) + "</hierarchy>"
+    cands = tree_mod.extract(xml, screen=(1080, 2400))
+    assert len(cands) == 2
+    assert {c.rid for c in cands} == {"scroll_view", "view_pager"}
+    assert all(c.scrollable for c in cands)
+    rendered = tree_mod.render_candidates(cands)
+    assert "纵滚" in rendered and "横滚" in rendered
+    assert "范围:(0, 609, 1080, 2270)" in rendered
+
+
+def test_dedup_and_priority_happen_before_limit():
+    duplicates = [_ui_node(f"wrapper{i}", "[0,100][100,200]") for i in range(45)]
+    passive = [_ui_node(f"label{i}", f"[100,{200+i*30}][200,{225+i*30}]", text=f"标签{i}")
+               for i in range(45)]
+    target = _ui_node("timezone_button_row", "[100,2000][500,2100]", text="时区", clickable=True)
+    xml = "<hierarchy>" + "".join(duplicates + passive + [target]) + "</hierarchy>"
+    stats = {}
+    cands = tree_mod.extract(xml, screen=(1080, 2400), limit=40, stats=stats)
+    assert len(cands) == 40
+    assert stats == {"eligible": 91, "unique": 47, "selected": 40, "omitted_actionable": 0}
+    assert len([c for c in cands if c.bounds == (0, 100, 100, 200)]) == 1
+    assert next(c for c in cands if c.rid == "timezone_button_row").clickable
+
+
+def test_render_preserves_action_and_state_attributes():
+    xml = "<hierarchy>" + "".join((
+        _ui_node("remember", "[10,10][200,80]", text="记住", desc="保存登录状态",
+                 clickable=True, extra='checkable="true" checked="true" selected="true"'),
+        _ui_node("query", "[10,100][400,180]", text="搜索", clickable=True,
+                 cls="android.widget.EditText", extra='focused="true"'),
+        _ui_node("later", "[10,200][200,280]", text="稍后", clickable=True,
+                 extra='enabled="false" long-clickable="true"'),
+    )) + "</hierarchy>"
+    cands = tree_mod.extract(xml, screen=(1080, 2400))
+    rendered = tree_mod.render_candidates(cands)
+    for marker in ("可点", "已勾", "选中", "描述:保存登录状态", "输入", "焦点", "禁用", "长按"):
+        assert marker in rendered
+    assert next(c for c in cands if c.rid == "remember").as_dict()["checked"] is True
+
+
+def test_same_bounds_wrapper_merges_child_state_without_losing_click():
+    bounds = "[10,10][200,80]"
+    xml = "<hierarchy>" + "".join((
+        _ui_node("row", bounds, clickable=True),
+        _ui_node("check", bounds, text="提醒", extra='checkable="true" checked="true"'),
+    )) + "</hierarchy>"
+    cands = tree_mod.extract(xml, screen=(1080, 2400))
+    assert len(cands) == 1
+    assert cands[0].label == "提醒"
+    assert cands[0].clickable and cands[0].checkable and cands[0].checked
+
+
+def test_partly_visible_scroll_target_uses_visible_bounds():
+    xml = "<hierarchy>" + _ui_node(
+        "items", "[-20,100][1100,500]", cls="android.widget.ScrollView", scrollable=True,
+    ) + "</hierarchy>"
+    cands = tree_mod.extract(xml, screen=(1080, 2400))
+    assert cands[0].bounds == (0, 100, 1080, 500)
+    assert tree_mod.scroll_targets(xml, screen=(1080, 2400))["vertical"][0][0] == cands[0].bounds
+
+
+def test_number_picker_uses_numeric_description_when_text_is_a_title():
+    xml = "<hierarchy>" + _ui_node(
+        "hour", "[100,100][300,500]", text="小时", desc="19时",
+        cls="android.widget.NumberPicker", scrollable=True,
+    ) + "</hierarchy>"
+    cands = tree_mod.extract(xml, screen=(1080, 2400))
+    assert tree_mod.is_value_wheel(cands[0])
+    assert "描述:19时" in tree_mod.render_candidates(cands)
+
+
 # ── 横屏网格 ───────────────────────────────────────────────────────────────────
 
 
@@ -150,6 +235,13 @@ def test_signature_catches_purely_visual_change():
     """文本不变、只有像素变——比如视频开始播放。只用文本会漏掉。"""
     same_xml = SAMPLE_XML
     assert compute_signature(same_xml, _solid_png("black")) != compute_signature(same_xml, _solid_png("white"))
+
+
+def test_signature_catches_checked_change_without_text_change():
+    before = "<hierarchy>" + _ui_node("setting", "[10,10][100,90]", text="提醒",
+                                      extra='checkable="true" checked="false"') + "</hierarchy>"
+    after = before.replace('checked="false"', 'checked="true"')
+    assert compute_signature(before, _solid_png("black")) != compute_signature(after, _solid_png("black"))
 
 
 def test_screen_size_prefers_the_frame_over_wm_size():

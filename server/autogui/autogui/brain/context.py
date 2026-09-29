@@ -116,7 +116,7 @@ class Context:
     def trim(self, cands: list[tree_mod.Candidate]) -> tuple[str, list[tree_mod.Candidate], dict]:
         """返回 (context_text, 可能被截短的候选, token 计数)。
 
-        超预算时的牺牲顺序：先最旧的历史行，再尾部候选。
+        超预算时先去掉最旧的历史行，再按可操作性和屏幕覆盖裁候选。
         实体和永久块永不丢弃——丢了任务或记住的会议时间，
         比丢一行菜单严重。
         """
@@ -132,12 +132,16 @@ class Context:
                 history_window=w, candidate_limit=k,
             )
             body = kept[:k]
+            wheel_guide = prompts.render("picker_guide") if any(
+                tree_mod.is_value_wheel(item) for item in body
+            ) else ""
             text = "\n\n".join(p for p in (
                 c.permanent_block(),
                 (c.entities_block() + "\n\n") if c.entities else "",
                 prompts.render("context_history", history=c.history_block()),
                 prompts.render("context_progress", progress=self.progress) if self.progress else "",
                 prompts.render("context_candidates", candidates=c.observation_text(body)),
+                wheel_guide,
                 prompts.render("context_page_hints", page_hints="\n".join(c.page_hints)) if c.page_hints else "",
             ) if p)
             return text, estimate_tokens(text)
@@ -149,7 +153,9 @@ class Context:
             if window > 1:
                 window -= 1
             else:
-                kept = kept[: max(6, len(kept) - 6)]
+                kept = tree_mod.select_candidates(
+                    kept, max(6, len(kept) - 6), max((c.cy for c in kept), default=1) + 1,
+                )
             text, tokens = build(window, len(kept))
 
         if dropped_any:

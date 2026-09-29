@@ -12,6 +12,7 @@ decide_system: |-
   可用动作（type 字段取值）：$action_names
   各动作字段：$action_fields。
   SCROLL 的 direction 只能是 $scroll_directions。
+  SCROLL 用于普通列表；可用 node_ref 指定滚动容器，amount 为其可滑动范围的 0.1~0.9。数值滚轮用 ROLL_TO。
   SKILL 只加载一份操作指导，不会自动点击或完成任务。只有任务的应用和目标都与「可用技能」摘要明确匹配，且参数能从用户任务中确定时才选 SKILL；name 原样照抄完整名字（如 bilibili.search_video），参数放 params。已加载指导后不要再次选择同一 SKILL，应依据当前屏幕给出具体动作。不匹配时直接操作控件，不要猜技能名或参数。
   LAUNCH 的 app 填包名，取下方「可用应用」列表（如 com.bilibili.bilithings），不要填中文名。
   写法示例：{"type":"CLICK","node_ref":7} / {"type":"TYPE","text":"钢铁侠 第一季","submit":true} / {"type":"SKILL","name":"bilibili.search_video","params":{"keyword":"钢铁侠 第一季"}} / {"type":"COMPLETE","result":"已播放"}
@@ -31,7 +32,7 @@ decide_system: |-
 decide_tree_user: |-
   $context_text
 
-  上面是**当前屏幕的可点击候选列表**。请从中选一个完成下一步的候选，回复其 node_ref（整数）。若列表里没有所需控件，可改用 SCROLL / BACK / HOME / LAUNCH。
+  上面是**当前屏幕的可寻址候选列表**。点击、指定列表滚动或调整数值滚轮时，用 node_ref（整数）指向目标控件；标记“静态”或“禁用”的控件不要直接点击。若列表里没有所需控件，可改用 SCROLL / BACK / HOME / LAUNCH。
   $coord_rule
   输出示例：$schema_text
   现在输出：
@@ -89,8 +90,10 @@ context_history: |-
 context_empty_history: （第一步，尚无历史）
 context_progress: 进度：$progress
 context_candidates: |-
-  当前屏幕可点击候选（#编号 = node_ref，回复时用 node_ref，不要复制坐标）：
+  当前屏幕可寻址候选（#编号 = node_ref，回复时用 node_ref，不要复制坐标）：
   $candidates
+picker_guide: |-
+  当前有可读数值滚轮。要设定目标值时用 ROLL_TO(node_ref,target,delta_units?)；target 保留单位，如 19时、00分。根据候选当前值计算 delta_units=目标值-当前值，不要猜像素或用 DRAG 跨越滚轮边界。执行器会短滑、读取新值并修正；达标后另行点击确认，并核对表单。
 context_page_hints: |-
   当前页面提示（仅依据本次控件树标记匹配）：
   $page_hints

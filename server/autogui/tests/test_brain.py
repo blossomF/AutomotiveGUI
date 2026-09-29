@@ -160,6 +160,17 @@ def test_budget_pressure_trims_history_then_candidates():
     assert "任务" in text                  # 任务本身永不丢弃
 
 
+def test_budget_trim_keeps_bottom_scroll_target():
+    cands = [tree_mod.Candidate(i, f"说明{i}", 50, i * 20, (0, i * 20, 100, i * 20 + 10),
+                                False, "", "android.widget.TextView") for i in range(1, 61)]
+    target = tree_mod.Candidate(61, "列表", 500, 2200, (0, 1800, 1080, 2300),
+                                False, "items", "android.widget.ScrollView", scrollable=True)
+    c = _ctx(token_budget=550)
+    text, kept, _ = c.trim(cands + [target])
+    assert len(kept) < len(cands) + 1
+    assert target in kept and "纵滚" in text
+
+
 def test_task_and_entities_survive_extreme_pressure():
     c = _ctx(token_budget=200)
     c.merge_entities({"时间": "19:00"})

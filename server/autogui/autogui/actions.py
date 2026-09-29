@@ -58,7 +58,10 @@ ACTIONS: tuple[ActionSpec, ...] = (
     ActionSpec("LONG_PRESS", ("node_ref | grid",), "Hold ~0.8s — context menus, drag handles"),
     ActionSpec("TYPE", ("text", "clear_first?", "submit?"),
                "Type into the focused field; submit=true presses ENTER after typing (search boxes)"),
-    ActionSpec("SCROLL", ("direction",), "Scroll down|up (or right|left on landscape lists)"),
+    ActionSpec("SCROLL", ("direction", "node_ref?", "amount?"),
+               "Scroll a specific list by a fraction of its viewport"),
+    ActionSpec("ROLL_TO", ("node_ref", "target", "delta_units?"),
+               "Adjust a readable value wheel to the target, checking each movement"),
     ActionSpec("DRAG", ("from", "to", "duration?"),
                "Press-and-drag between two pixel points [x,y] — sliders/seek bars IGNORE taps; "
                "drag the thumb from its current position to the target ratio"),
@@ -75,7 +78,7 @@ ACTION_NAMES: tuple[str, ...] = tuple(a.name for a in ACTIONS)
 TERMINAL: frozenset[str] = frozenset({"COMPLETE", "FAIL"})
 
 # 可以用“屏幕指纹变化”来校验效果、而不必花一次 VLM 调用的动作。
-MUTATING: frozenset[str] = frozenset({"CLICK", "LONG_PRESS", "TYPE", "SCROLL", "DRAG", "BACK", "HOME", "LAUNCH"})
+MUTATING: frozenset[str] = frozenset({"CLICK", "LONG_PRESS", "TYPE", "SCROLL", "ROLL_TO", "DRAG", "BACK", "HOME", "LAUNCH"})
 
 SCROLL_DIRECTIONS = ("down", "up", "left", "right")
 
@@ -130,6 +133,31 @@ def parse_action(raw: dict) -> dict:
         if d not in SCROLL_DIRECTIONS:
             raise ValueError(f"SCROLL direction must be one of {SCROLL_DIRECTIONS}, got {d!r}")
         out["direction"] = d
+        if raw.get("node_ref") is not None:
+            try:
+                out["node_ref"] = int(str(raw["node_ref"]).lstrip("#"))
+            except (TypeError, ValueError):
+                raise ValueError("SCROLL node_ref must be an integer")
+        try:
+            amount = float(raw.get("amount", 0.6))
+        except (TypeError, ValueError):
+            raise ValueError("SCROLL amount must be a fraction from 0.1 to 0.9")
+        if not 0.1 <= amount <= 0.9:
+            raise ValueError("SCROLL amount must be a fraction from 0.1 to 0.9")
+        out["amount"] = amount
+    elif name == "ROLL_TO":
+        try:
+            out["node_ref"] = int(str(raw["node_ref"]).lstrip("#"))
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("ROLL_TO needs an integer node_ref")
+        out["target"] = str(raw.get("target", "")).strip()
+        if not out["target"]:
+            raise ValueError("ROLL_TO needs target, e.g. 19时")
+        if raw.get("delta_units") is not None:
+            try:
+                out["delta_units"] = int(raw["delta_units"])
+            except (TypeError, ValueError):
+                raise ValueError("ROLL_TO delta_units must be an integer")
     elif name == "DRAG":
         # 进度条/滑块专用：from/to 都是显式像素 [x,y]。起拖点必须是 thumb 当前
         # 位置（模型按 当前时间/总时长 × 轨道 bounds 算），不是轨道起点——实测

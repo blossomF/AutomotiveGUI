@@ -35,6 +35,7 @@ class Observation:
     height: int
     signature: str
     candidates: list[tree_mod.Candidate] = field(default_factory=list)
+    candidate_stats: dict[str, int] = field(default_factory=dict)
     tree_ms: float = 0.0
     shot_ms: float = 0.0
 
@@ -101,7 +102,9 @@ def observe(
         xml, timings["dump"] = f_dump.result()
 
     width, height = _resolve_size(png, last_size or device.screen_size())
-    cands = tree_mod.candidates_from_xml(xml, limit=candidate_limit, screen=(width, height))
+    candidate_stats: dict[str, int] = {}
+    cands = tree_mod.candidates_from_xml(xml, limit=candidate_limit, screen=(width, height),
+                                         stats=candidate_stats)
     cols, rows = grid_dimensions(width, height, mode=grid_mode, cols=grid_cols, rows=grid_rows)
     grid = Grid(width=width, height=height, cols=cols, rows=rows)
 
@@ -113,6 +116,7 @@ def observe(
             height=height,
             signature=compute_signature(xml, png),
             candidates=cands,
+            candidate_stats=candidate_stats,
             shot_ms=round(timings["shot"], 1),
             tree_ms=round(timings["dump"], 1),
         ),

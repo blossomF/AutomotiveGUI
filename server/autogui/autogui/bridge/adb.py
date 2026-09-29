@@ -133,12 +133,17 @@ def ascii_typeable(text: str) -> str:
 # ── XML 树解析（纯函数，操作 ``uiautomator dump`` 的输出） ────────────────────
 
 _NODE_RE = re.compile(r"<node\b[^>]*?/?>", re.S)
-_BOUNDS_RE = re.compile(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"')
+_BOUNDS_RE = re.compile(r'bounds="\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]"')
 
 
 def _attr(node: str, name: str) -> str:
     m = re.search(rf'\b{name}="([^"]*)"', node)
     return html.unescape(m.group(1)).strip() if m else ""
+
+
+def node_attr(node: str, name: str) -> str:
+    """Read one uiautomator node attribute with XML entities decoded."""
+    return _attr(node, name)
 
 
 def nodes(xml: str) -> list[str]:
