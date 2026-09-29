@@ -11,10 +11,9 @@ import pytest
 
 from autogui.config import Config
 from autogui.dashboard_settings import (
-    device_apps, grid_preview, public_settings, refresh_app_cache,
+    device_apps, public_settings, refresh_app_cache,
     save_apps, save_settings, test_model as verify_model,
 )
-from autogui.perception.grid import auto_grid_dimensions, grid_dimensions
 
 
 @pytest.fixture
@@ -32,14 +31,16 @@ def config_path(tmp_path, monkeypatch):
     return path
 
 
-def test_auto_grid_uses_actual_screenshot_dimensions():
-    assert auto_grid_dimensions(1080, 2400) == (11, 22)
-    assert auto_grid_dimensions(1920, 1080) == (19, 10)
-    assert grid_dimensions(1080, 2400, mode="manual", cols=20, rows=10) == (20, 10)
-    assert grid_dimensions(1080, 2400, mode="auto", cols=20, rows=10) == (11, 22)
+def test_legacy_grid_keeps_only_image_encoding_values(config_path):
+    source = config_path.read_text(encoding="utf-8")
+    config_path.write_text(source.replace("  rows: 10", "  rows: 10\n  jpeg_quality: 72\n  max_side: 1200"),
+                           encoding="utf-8")
+    cfg = Config.load(config_path)
+    assert (cfg.image.jpeg_quality, cfg.image.max_side) == (72, 1200)
+    assert "grid" not in public_settings(config_path)
 
 
-def test_settings_save_preserves_unrelated_config_and_manual_precedence(config_path):
+def test_settings_save_ignores_legacy_grid_and_preserves_other_fields(config_path):
     data = save_settings(config_path, {
         "model": {"url": "https://new.example/v1", "name": "new-model", "api_key": ""},
         "grid": {"mode": "manual", "cols": 12, "rows": 24},
@@ -48,13 +49,11 @@ def test_settings_save_preserves_unrelated_config_and_manual_precedence(config_p
     assert "debug: true" in source
     assert "# manual fallback" in source
     assert data["model"]["url"] == "https://new.example/v1"
-    assert data["grid"] == {"mode": "manual", "cols": 12, "rows": 24}
+    assert "grid" not in data
     assert data["apps"] == [
         {"name": "QQ音乐", "package": "com.example.music", "aliases": []},
         {"name": "飞书", "package": "com.example.feishu", "aliases": []},
     ]
-    assert grid_preview(config_path, (1080, 2400))["active"]["cols"] == 12
-    assert grid_preview(config_path, (1080, 2400))["auto"] == {"cols": 11, "rows": 22}
 
 
 def test_key_is_encrypted_on_disk_and_reloaded_for_local_settings(config_path, monkeypatch):
@@ -85,7 +84,7 @@ def test_saved_settings_reappear_after_reload(config_path, monkeypatch):
         "api_key": "model-secret", "api_key_configured": True,
         "temperature": 0.1, "max_tokens": 1024, "timeout": 30.0, "max_retries": 4,
     }
-    assert reloaded["grid"] == {"mode": "manual", "cols": 12, "rows": 24}
+    assert "grid" not in reloaded
     assert reloaded["voice"]["appid"] == "app-id"
     assert reloaded["voice"]["api_key"] == "voice-key"
     assert reloaded["voice"]["api_secret"] == "voice-secret"
@@ -184,11 +183,11 @@ def test_dashboard_settings_page_and_api_work_without_device(config_path, monkey
     try:
         with urllib.request.urlopen(base + "/settings") as response:
             html = response.read().decode("utf-8")
-        assert "验证连接" in html and "gridManual" in html and "appCheckList" in html
+        assert "验证连接" in html and "gridManual" not in html and "appCheckList" in html
         assert "reloadAppsBtn" in html and "addAppBtn" in html and "devicePackages" in html
         with urllib.request.urlopen(base + "/api/settings") as response:
             settings = json.load(response)
-        assert settings["grid"]["mode"] == "auto"
+        assert "grid" not in settings
         assert settings["model"]["api_key"] == ""
         assert settings["apps"][0]["aliases"] == []
         body = json.dumps({"grid": {"mode": "manual", "cols": 12, "rows": 24}}).encode()
@@ -196,8 +195,8 @@ def test_dashboard_settings_page_and_api_work_without_device(config_path, monkey
                                          headers={"Content-Type": "application/json"}, method="POST")
         with urllib.request.urlopen(request) as response:
             saved = json.load(response)
-        assert saved["ok"] and saved["grid"]["mode"] == "manual"
-        assert Config.load(config_path).grid.cols == 12
+        assert saved["ok"] and "grid" not in saved
+        assert "# manual fallback" in config_path.read_text(encoding="utf-8")
         body = json.dumps({"apps": [
             {"name": "飞书", "package": "com.example.feishu2", "aliases": ["Lark"]},
             {"name": "新应用", "package": "com.example.new", "aliases": []},

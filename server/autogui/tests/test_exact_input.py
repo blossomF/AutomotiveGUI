@@ -89,16 +89,25 @@ def test_visual_completion_is_allowed_when_unicode_readback_is_unavailable(monke
     runner = Runner(cfg=Config(), task="搜索晴天")
     runner.pending_unicode = "晴天"
     runner.context.input_guide = "等待视觉确认"
-    runner.obs = Observation(b"screenshot", "", 1080, 2400, "sig", [])
-    runner.grid = SimpleNamespace(cols=10, rows=20, annotate=lambda *args: object())
+    import io
+    from PIL import Image
+    image = io.BytesIO()
+    Image.new("RGB", (1080, 2400), "white").save(image, format="PNG")
+    runner.obs = Observation(image.getvalue(), "", 1080, 2400, "sig", [])
+    runner.screen = SimpleNamespace(width=1080, height=2400)
     runner.log = SimpleNamespace(phase=lambda *args, **kw: None, debug=False)
-    runner.glm = SimpleNamespace(decide=lambda *args, **kw: (
-        {"type": "COMPLETE", "result": "已显示晴天搜索结果"},
-        SimpleNamespace(calls=1, prompt_tokens=10, completion_tokens=10)))
-    monkeypatch.setattr("autogui.core.graph.grid_mod.encode_jpeg", lambda *args: b"jpeg")
+    seen = []
+    def decide(*args, **kw):
+        import base64
+        sent = Image.open(io.BytesIO(base64.b64decode(kw["jpeg_b64"])))
+        seen.append(sent.getpixel((sent.width // 2, sent.height // 2)))
+        return ({"type": "COMPLETE", "result": "已显示晴天搜索结果"},
+                SimpleNamespace(calls=1, prompt_tokens=10, completion_tokens=10))
+    runner.glm = SimpleNamespace(decide=decide)
 
     result = runner.decide({"step": 4, "route": "vlm"})
     assert result["action"]["type"] == "COMPLETE"
+    assert min(seen[0]) > 245  # 原始白图，没有红色格线或标签覆盖
     assert runner.pending_unicode == ""
     assert runner.context.input_guide == ""
     acted = runner.act({"action": result["action"]})

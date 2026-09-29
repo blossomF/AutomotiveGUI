@@ -125,7 +125,7 @@ class GLMClient:
         self._call_seq += 1
         call_id = self._call_seq
         if self._log and self._log.debug:
-            # 原始 base64 已单独保存为网格图；请求文件保留全部文本和图片位置，
+            # 原始 base64 已单独保存为截图；请求文件保留全部文本和图片位置，
             # 避免把数 MB 的编码重复写入 JSONL/文本，仍可逐条核对模型看到了什么。
             def readable(value):
                 if isinstance(value, list):
@@ -242,7 +242,6 @@ class GLMClient:
         context_text: str,
         *,
         jpeg_b64: str | None = None,
-        grid_spec: str = "20x10",
         screen_size: tuple[int, int] | None = None,
         image_size: tuple[int, int] | None = None,
     ) -> tuple[dict, Usage]:
@@ -253,7 +252,7 @@ class GLMClient:
         绝不崩溃。
         """
         messages = prompts.build_decide_messages(
-            context_text, jpeg_b64, grid_spec, screen=screen_size, image_size=image_size
+            context_text, jpeg_b64, screen=screen_size, image_size=image_size
         )
         raw = self.chat_json(messages, kind="decide")
         try:

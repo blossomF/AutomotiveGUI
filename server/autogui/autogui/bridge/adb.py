@@ -246,6 +246,7 @@ class Device:
         self.serial = serial
         self.default_delay = default_delay
         self.trace_log = None  # Runner.prepare 注入；只记录当前任务的 XML dump
+        self._dump_137_diagnosed = False
         # Android 9+ 支持 `screencap --display <id>`。否则车机上的默认
         # 捕获可能来自仪表屏而不是中控屏，而规则明确把后者之外的屏
         # 划出范围（规则 4.2）。
@@ -322,7 +323,7 @@ class Device:
 
         超时取 8s：WebView 重的页面（如车机/手机 H5 搜索页）uiautomator
         可能挂起 10s+ 且最终仍返回空树（实测 11.4s/0 节点）。宁可快速
-        失败返回空树，让 route 走 VLM 网格兜底。
+        失败返回空树，让 route 走 VLM 截图兜底。
         """
         started = time.perf_counter()
         stage = "remove_old"
@@ -342,8 +343,9 @@ class Device:
                          dump_stderr=r.stderr)
         if not r.ok:
             xml = ""
+            diagnostics = self._diagnose_dump_137(remote) if r.returncode == 137 else {}
             self._trace_xml(xml, started, "dump_failed", (r.stdout + " " + r.stderr).strip(),
-                            remote, **dump_meta)
+                            remote, **dump_meta, **diagnostics)
             return xml
         try:
             xml = self.adb("exec-out", "cat", remote, timeout=timeout)
@@ -364,6 +366,35 @@ class Device:
         self._trace_xml(xml, started, "ok" if xml else "empty", "", remote,
                         remote_file=remote_file, **dump_meta)
         return xml
+
+    def _diagnose_dump_137(self, remote: str) -> dict:
+        """Collect bounded device evidence once per task after SIGKILL-like exit 137."""
+        if self._dump_137_diagnosed or not self.trace_log or not self.trace_log.debug:
+            return {}
+        self._dump_137_diagnosed = True
+        diagnostics: dict = {}
+        try:
+            probe = self.adb_soft("shell", "ls", "-l", remote, timeout=3)
+            diagnostics["remote_file"] = (
+                f"exit={probe.returncode} {(probe.stdout or probe.stderr).strip()}")[:500]
+        except ADBError as e:
+            diagnostics["remote_file"] = str(e)[:500]
+        try:
+            result = self.adb_soft("shell", "logcat", "-d", "-t", "300", timeout=3)
+            pattern = re.compile(
+                r"uiautomator|lowmemory|lmkd|\boom\b|kill(?:ing|ed)? process|"
+                r"am_proc_died|androidruntime|fatal exception", re.I)
+            matches = [line for line in result.stdout.splitlines() if pattern.search(line)]
+            excerpt = "\n".join(matches[-30:])
+            diagnostics["logcat_exit"] = result.returncode
+            diagnostics["logcat_matches"] = len(matches)
+            if excerpt:
+                path = self.trace_log.save_text(
+                    f"step{self.trace_log.step:02d}_dump_137_logcat", excerpt)
+                diagnostics["logcat_artifact"] = path.name if path else ""
+        except ADBError as e:
+            diagnostics["logcat_error"] = str(e)[:500]
+        return diagnostics
 
     def _trace_xml(self, xml: str, started: float, status: str, detail: str,
                    remote: str, **diagnostics) -> None:

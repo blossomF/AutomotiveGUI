@@ -60,11 +60,11 @@ def test_countdown_skip_waits_instead_of_tapping(monkeypatch):
     assert calls == []
 
 
-def test_visual_skip_waits_without_stale_grid_tap(monkeypatch):
+def test_visual_skip_waits_without_stale_point_tap(monkeypatch):
     runner, calls = _runner(monkeypatch, "<hierarchy/>")
     waits = []
     monkeypatch.setattr("autogui.core.graph.time.sleep", waits.append)
-    action = parse_action({"type": "CLICK", "grid": "J1", "target_label": "跳过"})
+    action = parse_action({"type": "CLICK", "point": [80, 90], "target_label": "跳过"})
     result = runner.act({"step": 1, "route": "vlm", "action": action})
     assert result["last_action"] == {}
     assert waits == [2.0]
@@ -73,8 +73,7 @@ def test_visual_skip_waits_without_stale_grid_tap(monkeypatch):
 
 def test_regular_click_does_not_recheck_or_wait(monkeypatch):
     runner, calls = _runner(monkeypatch, "<hierarchy/>")
-    action = {"type": "CLICK", "grid": "J1"}
-    runner.grid = SimpleNamespace(to_pixel=lambda cell: (80, 90))
+    action = {"type": "CLICK", "point": [80, 90], "image_size": (1080, 2400)}
     result = runner.act({"step": 1, "route": "vlm", "action": action})
     assert result["last_action"] == action
     assert calls == [("tap", {"x": 80, "y": 90})]
@@ -82,7 +81,7 @@ def test_regular_click_does_not_recheck_or_wait(monkeypatch):
 
 def test_launch_note_is_in_trimmed_context_and_expires_after_two_decisions(monkeypatch):
     runner, _ = _runner(monkeypatch, "<hierarchy/>")
-    runner.grid = SimpleNamespace(cols=10, rows=20)
+    runner.screen = SimpleNamespace(width=1080, height=2400)
     runner.glm = SimpleNamespace(decide=lambda *args, **kw: (
         {"type": "WAIT", "seconds": 1}, SimpleNamespace(calls=1, prompt_tokens=1, completion_tokens=1)))
     runner._note_launch("QQ音乐")

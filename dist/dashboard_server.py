@@ -433,14 +433,6 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json({"error": "设置仅允许本机访问"}, 403)
                 else:
                     self._send_json(_settings_api().public_settings(CONFIG_PATH))
-            elif path == "/api/settings/grid-preview":
-                if not self._settings_allowed():
-                    self._send_json({"error": "设置仅允许本机访问"}, 403)
-                else:
-                    try:
-                        self._send_json({"ok": True, **_settings_api().grid_preview(CONFIG_PATH)})
-                    except Exception as e:
-                        self._send_json({"ok": False, "error": str(e)})
             elif path == "/api/tasks":
                 self._send_json(list_tasks())
             elif path.startswith("/api/task/"):
@@ -1173,7 +1165,6 @@ loadTasks(qsTask);
 """
 
 SETTINGS_JS = r"""
-let screenPreview = null;
 let devicePackages = [];
 let currentDeviceSerial = '';
 function appRows(){
@@ -1281,28 +1272,12 @@ function settingsPayload(){
             iat_url:$('#voiceIatUrl').value.trim(),
             max_seconds:numOrNull('#voiceMaxSeconds'), silence_seconds:numOrNull('#voiceSilenceSeconds'),
             silence_threshold:numOrNull('#voiceSilenceThreshold')},
-    grid: {mode:$('#gridManual').checked ? 'manual' : 'auto',
-           cols:Number($('#gridCols').value), rows:Number($('#gridRows').value)},
     apps: appRows(), device_serial: currentDeviceSerial
   };
 }
 function status(id, message, good){
   const node = $(id); node.textContent = message;
   node.className = 'settings-message ' + (good ? 'good' : 'error');
-}
-function updateGrid(){
-  const manual = $('#gridManual').checked;
-  $('#gridCols').disabled = !manual;
-  $('#gridRows').disabled = !manual;
-  if(!screenPreview){
-    $('#gridPreview').textContent = '设备未连接或截图不可用；自动网格将在运行时按实际截图计算。';
-    return;
-  }
-  const w=screenPreview.width, h=screenPreview.height;
-  const c=manual ? Number($('#gridCols').value) : screenPreview.auto.cols;
-  const r=manual ? Number($('#gridRows').value) : screenPreview.auto.rows;
-  $('#gridPreview').textContent = `${w}×${h} 截图；自动建议 ${screenPreview.auto.cols}×${screenPreview.auto.rows}；`
-    + `当前表单将使用 ${c}×${r}（单格约 ${Math.round(w/c)}×${Math.round(h/r)}px）。保存后对新任务生效。`;
 }
 async function readSettings(){
   try {
@@ -1316,9 +1291,6 @@ async function readSettings(){
     $('#modelMaxTokens').value = data.model.max_tokens;
     $('#modelTimeout').value = data.model.timeout;
     $('#modelMaxRetries').value = data.model.max_retries;
-    $('#gridManual').checked = data.grid.mode === 'manual';
-    $('#gridCols').value = data.grid.cols;
-    $('#gridRows').value = data.grid.rows;
     $('#voiceAppid').value = data.voice.appid || '';
     $('#voiceApiKey').value = data.voice.api_key || '';
     $('#voiceApiSecret').value = data.voice.api_secret || '';
@@ -1341,17 +1313,7 @@ async function readSettings(){
       currentDeviceSerial = '';
       status('#appsDeviceStatus', `暂时无法核对设备：${error.message}。配置文件：${data.config_path}`, false);
     }
-    updateGrid();
   } catch(error){ status('#saveStatus', error.message, false); }
-}
-async function readPreview(){
-  try {
-    const response = await fetch('/api/settings/grid-preview', {cache:'no-store'});
-    const data = await response.json();
-    screenPreview = data.ok ? data : null;
-    if(!data.ok) $('#gridPreview').textContent = '无法预览设备：' + (data.error || '未知错误');
-    else updateGrid();
-  } catch(error){ screenPreview=null; updateGrid(); }
 }
 async function postSettings(path, body){
   const response = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'},
@@ -1360,9 +1322,6 @@ async function postSettings(path, body){
   if(!response.ok) throw new Error(data.error || data.message || '请求失败');
   return data;
 }
-$('#gridManual').addEventListener('change', updateGrid);
-$('#gridCols').addEventListener('input', updateGrid);
-$('#gridRows').addEventListener('input', updateGrid);
 $('#voiceEnabled').addEventListener('change', () => {
   $('#voiceFields').style.display = $('#voiceEnabled').checked ? '' : 'none';
 });
@@ -1402,7 +1361,6 @@ $('#saveBtn').onclick = async () => {
     status('#saveStatus', currentDeviceSerial
       ? '设置已保存；目标应用包名已针对当前设备核对。'
       : '设置已保存；应用包名尚未针对当前设备核对，请点「重新加载」后再直启。', true);
-    updateGrid();
   } catch(error){ status('#saveStatus', error.message, false); }
   finally { button.disabled=false; };
 };
@@ -1457,7 +1415,7 @@ $('#reloadAppsBtn').onclick = async () => {
     st.textContent = '重新加载失败：' + error.message;
   } finally { button.disabled = false; }
 };
-readSettings(); readPreview();
+readSettings();
 """
 
 # 下指令页：只有大圣喵 + 输入坞 + 一行状态，日志入口丢到新标签
@@ -1594,17 +1552,6 @@ PAGE_SETTINGS_TPL = r"""<!DOCTYPE html>
       <div id="asrVerifyStatus" class="settings-message" role="status" aria-live="polite"></div>
     </div>
   </section>
-  <section class="settings-card">
-    <h2>VLM 网格</h2>
-    <label><input id="gridManual" type="checkbox"> 手动设置网格（优先于自动计算）</label>
-    <div class="settings-row">
-      <label class="field">列数<input id="gridCols" type="number" min="5" max="26" value="20" disabled></label>
-      <label class="field">行数<input id="gridRows" type="number" min="3" max="40" value="10" disabled></label>
-    </div>
-    <p id="gridPreview" class="settings-hint">正在读取屏幕尺寸…</p>
-    <p class="settings-hint">默认按实际截图尺寸自动计算；手动覆盖只对保存后的新任务生效。</p>
-  </section>
-
   <section class="settings-card">
     <h2>应用配置</h2>
     <p class="settings-hint">此处只维护目标应用。点击「重新加载」会以当前设备为准核对并保存目标应用的包名；另一设备上不存在的旧包名会清空，之后请从包名列表选正确包名再保存。获取到的全部包名只作为候选，不会全部写入配置。</p>

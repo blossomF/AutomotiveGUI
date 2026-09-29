@@ -29,7 +29,9 @@ from __future__ import annotations
 
 import re
 import time
+import io
 from dataclasses import dataclass, field
+from PIL import Image
 
 from autogui.actions import MUTATING, TERMINAL
 from autogui.bridge import tools
@@ -44,9 +46,9 @@ from autogui.core.picker import roll_to
 from autogui.core.decision_log import DecisionLog
 from autogui.core.executor import make_executor
 from autogui.core.state import AgentState
-from autogui.perception import grid as grid_mod
+from autogui.perception import image as image_mod
 from autogui.perception import tree as tree_mod
-from autogui.perception.capture import Observation, observe
+from autogui.perception.capture import Observation, ScreenGeometry, observe
 from autogui.skills.base import SkillBook, SkillMiss
 from autogui.skills.ui_hints import PageHintBook
 
@@ -70,8 +72,8 @@ class Runner:
     obs: Observation | None = None
     # 上一步的观测：用于 verify 指纹对比与反思 before/after 双图
     prev_obs: Observation | None = None
-    # 当前屏幕的网格（行列规格 + 标注/坐标换算），vlm 模式用
-    grid: grid_mod.Grid | None = None
+    # 当前屏幕尺寸；VLM 的 point 按编码后的图片尺寸换算。
+    screen: ScreenGeometry | None = None
     # 四层上下文管理器（历史/进度/实体/技能索引 + token 预算裁剪）
     # 不进构造器：依赖 cfg 的多个参数，在 __post_init__ 里初始化
     context: Context = field(init=False, default=None)  # type: ignore[assignment]
@@ -100,7 +102,6 @@ class Runner:
     skip_waited_targets: set[str] = field(default_factory=set)
     launch_monotonic: float | None = None
     vlm_image_size: tuple[int, int] | None = None
-    last_grid_click: str = ""
     skill_focus_params: dict = field(default_factory=dict)
     focus_terms: list[str] = field(default_factory=list)
 
@@ -127,6 +128,7 @@ class Runner:
         if self.glm is not None:
             self.glm._log = self.log
         tools.dev().trace_log = self.log
+        tools.dev()._dump_137_diagnosed = False
         self.device_serial = tools.dev().serial
         if self.executor is None:
             self.executor, note = make_executor(self.cfg.exec_mode)
@@ -168,20 +170,17 @@ class Runner:
         try:
             self.prev_obs = self.obs
             self.focus_terms = self._current_focus_terms()
-            self.obs, self.grid = observe(
+            self.obs, self.screen = observe(
                 tools.dev(),
-                grid_cols=self.cfg.grid.cols,
-                grid_rows=self.cfg.grid.rows,
-                grid_mode=self.cfg.grid.mode,
                 candidate_limit=self.cfg.agent.tree_candidate_limit,
                 candidate_token_budget=self.cfg.agent.tree_candidate_token_budget,
                 focus_terms=self.focus_terms,
-                last_size=(self.grid.width, self.grid.height) if self.grid else None,
+                last_size=(self.screen.width, self.screen.height) if self.screen else None,
             )
             if self.launch_monotonic is not None:
                 # Reuse the normal first observation. A short launch ad does
                 # not need a model decision or a task step just to wait.
-                self.obs, self.grid = self._wait_for_launch_ad(self.obs, self.grid)
+                self.obs, self.screen = self._wait_for_launch_ad(self.obs, self.screen)
                 self.launch_monotonic = None
         except ADBError as e:
             self.log.phase("error", f"抓帧失败: {e}")
@@ -269,7 +268,7 @@ class Runner:
         reason = f"控件树不可用（候选{len(self.obs.candidates) if self.obs else 0}）"
         if self.log.debug:
             self.log.detail("route", f"降级VLM: {reason}")
-        self.log.phase("route", f"vlm 网格兜底 — {reason}")
+        self.log.phase("route", f"vlm 截图兜底 — {reason}")
         return {"route": "vlm"}
 
     def run_skill(self, state: AgentState) -> dict:
@@ -295,7 +294,7 @@ class Runner:
         return {"route": self.pending_route, "action": {}, "retry_decision": True}
 
     def decide(self, state: AgentState) -> dict:
-        """决策节点：调 GLM 产出本步动作。tree 模式只发控件树纯文本，vlm 模式附网格截图；
+        """决策节点：调 GLM 产出本步动作。tree 模式只发控件树纯文本，vlm 模式附原始截图；
         越界 node_ref 或决策失败时降级 vlm 重新决策（每步最多重试一次，防 decide 乒乓）。"""
         route = state.get("route") or "tree"
         # tree→vlm 的重新决策每步最多发生一次。如果没有这个上限，一个在 vlm
@@ -333,7 +332,7 @@ class Runner:
         if route == "tree":
             self.log.phase("decide", f"tree 模式（纯文本，无图）候选={len(kept)} ≈in={counts['approx_input']}tok")
         else:
-            self.log.phase("decide", f"vlm 模式（网格 {self.grid.cols}×{self.grid.rows}）≈in={counts['approx_input']}tok")
+            self.log.phase("decide", f"vlm 模式（原始截图）≈in={counts['approx_input']}tok")
 
         if self.glm is None:
             return {"action": {}, "retry_decision": False,
@@ -342,17 +341,16 @@ class Runner:
         jpeg = None
         image_size = None
         if route == "vlm":
-            annotated = self.grid.annotate(self.obs.png, self.cfg.grid)
-            jpeg = grid_mod.encode_jpeg(annotated, self.cfg.grid.jpeg_quality, self.cfg.grid.max_side)
-            max_side = self.cfg.grid.max_side
+            screenshot = Image.open(io.BytesIO(self.obs.png)).convert("RGB")
+            jpeg = image_mod.encode_jpeg(screenshot, self.cfg.image.jpeg_quality, self.cfg.image.max_side)
+            max_side = self.cfg.image.max_side
             scale = min(1.0, max_side / max(self.obs.width, self.obs.height))
             image_size = (int(self.obs.width * scale), int(self.obs.height * scale))
             self.vlm_image_size = image_size
 
-            # 细粒度日志：VLM网格图
+            # 细粒度日志：实际发送给 VLM 的无格线缩放图
             if self.log.debug:
-                self.log.save_image(f"step{state.get('step', 0):02d}_grid", jpeg, extension="jpg")
-                self.log.detail("decide", f"VLM网格: {self.grid.cols}x{self.grid.rows}")
+                self.log.save_image(f"step{state.get('step', 0):02d}_vlm", jpeg, extension="jpg")
 
             import base64
 
@@ -360,7 +358,7 @@ class Runner:
 
         try:
             action, usage = self.glm.decide(
-                text, jpeg_b64=jpeg, grid_spec=f"{self.grid.cols}x{self.grid.rows}",
+                text, jpeg_b64=jpeg,
                 screen_size=(self.obs.width, self.obs.height), image_size=image_size,
             )
         except (GLMError, ValueError) as e:
@@ -390,15 +388,6 @@ class Runner:
                 self.context.record(state.get("step", 0), route, "CLICK", "图片坐标越界；请按本轮图片尺寸重新定位", failed=True)
                 return {"action": {}, "retry_decision": False, "no_progress": state.get("no_progress", 0) + 1}
             action["image_size"] = image_size
-        if (route == "vlm" and action.get("type") == "CLICK" and action.get("grid")
-                and action["grid"] == self.last_grid_click
-                and re.search(r"未生效|仍在|没有进入|未进入|未切换", action.get("explain", ""))):
-            self.context.record(state.get("step", 0), route, "CLICK",
-                                f"连续点击 {action['grid']} 仍未进入目标页；下一轮用 point 给出目标图片坐标", failed=True)
-            self.log.phase("decide", f"阻止重复无效格心点击 {action['grid']}；下一轮请用 point")
-            self.last_grid_click = ""
-            return {"action": {}, "retry_decision": False, "no_progress": state.get("no_progress", 0) + 1}
-        self.last_grid_click = action.get("grid", "") if action.get("type") == "CLICK" else ""
         if self.pending_unicode and action.get("type") == "COMPLETE":
             # XML can be absent indefinitely on WebView-heavy pages. This
             # decision already saw the current screenshot on the forced VLM
@@ -462,8 +451,8 @@ class Runner:
         return key, dict(params)
 
     def _action_detail(self, action: dict) -> str:
-        """提取动作第一个非空的关键参数（node_ref/grid/text 等），供日志与反思提示词使用。"""
-        for k in ("node_ref", "point", "coord", "grid", "text", "direction", "app", "skill"):
+        """提取动作第一个非空的关键参数，供日志与反思提示词使用。"""
+        for k in ("node_ref", "point", "coord", "text", "direction", "app", "skill"):
             if action.get(k) not in (None, ""):
                 detail = f"{k}={action[k]!r}"
                 if k == "text" and action.get("submit"):
@@ -616,10 +605,10 @@ class Runner:
         return (any("跳过" in label for label in labels)
                 and any("广告" in label for label in labels))
 
-    def _wait_for_launch_ad(self, obs: Observation, grid: grid_mod.Grid
-                            ) -> tuple[Observation, grid_mod.Grid]:
+    def _wait_for_launch_ad(self, obs: Observation, screen: ScreenGeometry
+                            ) -> tuple[Observation, ScreenGeometry]:
         if not self._is_launch_ad(obs.xml):
-            return obs, grid
+            return obs, screen
         if getattr(self.log, "debug", False):
             self.log.save_image(f"step{self.log.step:02d}_ad_before", obs.png)
         elapsed = time.monotonic() - self.launch_monotonic
@@ -628,22 +617,21 @@ class Runner:
         if remaining:
             time.sleep(remaining)
         try:
-            refreshed, new_grid = observe(
-                tools.dev(), grid_cols=self.cfg.grid.cols, grid_rows=self.cfg.grid.rows,
-                grid_mode=self.cfg.grid.mode,
+            refreshed, new_screen = observe(
+                tools.dev(),
                 candidate_limit=self.cfg.agent.tree_candidate_limit,
                 candidate_token_budget=self.cfg.agent.tree_candidate_token_budget,
                 focus_terms=self.focus_terms,
-                last_size=(grid.width, grid.height),
+                last_size=(screen.width, screen.height),
                 shot_after_dump=True,
             )
         except ADBError as e:
             self.log.phase("ad", f"广告后重抓失败，交由模型处理现有画面：{e}")
-            return obs, grid
-        if getattr(self.log, "debug", False):
-            self.log.save_image(f"step{self.log.step:02d}_ad_after", refreshed.png)
+            return obs, screen
+        # perceive() saves refreshed.png as stepXX_screenshot. Keep the
+        # pre-wait image above, but do not write the same post-wait bytes twice.
         if not refreshed.xml:
-            self.log.phase("ad", "重抓 XML 为空，无法据此判断广告是否消失；使用重抓截图继续决策",
+            self.log.phase("ad", "重抓未获得 XML（失败或空内容，详见 XML 状态日志）；使用重抓截图继续决策",
                            shot_ms=getattr(refreshed, "shot_ms", None),
                            dump_ms=getattr(refreshed, "tree_ms", None))
         else:
@@ -651,7 +639,7 @@ class Runner:
                            else "6 秒后仍有广告，交由模型处理",
                            shot_ms=getattr(refreshed, "shot_ms", None),
                            dump_ms=getattr(refreshed, "tree_ms", None))
-        return refreshed, new_grid
+        return refreshed, new_screen
 
     @staticmethod
     def _skip_label(label: str) -> bool:
@@ -669,13 +657,13 @@ class Runner:
         return bool(re.search(r"(?:点击|点按|轻点).{0,12}跳过", str(action.get("explain") or "")))
 
     def _preflight_skip_click(self, action: dict) -> dict | None:
-        """Revalidate an ephemeral skip target; never tap a stale grid coordinate."""
+        """Revalidate an ephemeral skip target; never tap a stale image coordinate."""
         candidate = (tree_mod.by_ref(self.obs.candidates, action["node_ref"])
                      if self.obs and action.get("node_ref") is not None else None)
         if candidate is None:
-            # A VLM grid has no stable node identity. A short ad will close by
+            # A VLM point has no stable node identity. A short ad will close by
             # itself; a blind coordinate tap after another model call is unsafe.
-            self.log.phase("act", "看图识别的跳过按钮：等待 2 秒后重新观察，不点旧网格")
+            self.log.phase("act", "看图识别的跳过按钮：等待 2 秒后重新观察，不点旧坐标")
             time.sleep(2.0)
             return None
 
@@ -727,9 +715,9 @@ class Runner:
                    if ("EditText" in node_class(node) or node_attr(node, "editable") == "true"))
 
     def _resolve_point(self, action: dict) -> tuple[int | None, int | None]:
-        """node_ref 优先于显式像素坐标，再到 grid 字母格号。
+        """node_ref 优先于显式设备坐标，再到图片坐标。
 
-        grid 也是动作中途 tree→vlm 的逃生通道；coord 是 tree（无网格图）模式
+        coord 是 tree（无截图）模式
         下模型对长条控件特定比例位置（如进度条 70%）给的真实像素，按屏幕夹紧，
         避免越界坐标把手势带出屏。
         """
@@ -752,8 +740,6 @@ class Runner:
             resolved = self._clamp_xy(x, y)
             self.log.phase("act", f"图片坐标 {action['point']} / {image_size} → 设备坐标 {resolved} / {(self.obs.width, self.obs.height)}")
             return resolved
-        if action.get("grid") and self.grid:
-            return self.grid.to_pixel(action["grid"])
         return (None, None)
 
     def _clamp_xy(self, x: int, y: int) -> tuple[int, int]:
@@ -940,18 +926,15 @@ class Runner:
             pre_obs = self.obs
             try:
                 time.sleep(max(0.0, float(getattr(self.cfg.agent, "delay_after_action", 1.0))))
-                post_obs, post_grid = observe(
+                post_obs, post_screen = observe(
                     tools.dev(),
-                    grid_cols=self.cfg.grid.cols,
-                    grid_rows=self.cfg.grid.rows,
-                    grid_mode=self.cfg.grid.mode,
                     candidate_limit=self.cfg.agent.tree_candidate_limit,
                     candidate_token_budget=self.cfg.agent.tree_candidate_token_budget,
                     focus_terms=self.focus_terms,
-                    last_size=(self.grid.width, self.grid.height) if self.grid else None,
+                    last_size=(self.screen.width, self.screen.height) if self.screen else None,
                 )
                 # 让随后的 _reflect（若仍需）拿到的是正确配对：act 前 → act 后。
-                self.prev_obs, self.obs, self.grid = pre_obs, post_obs, post_grid
+                self.prev_obs, self.obs, self.screen = pre_obs, post_obs, post_screen
 
                 # 细粒度日志：实时帧
                 if self.log.debug:
@@ -988,27 +971,27 @@ class Runner:
         return dict(ok_state)
 
     def _reflect(self, action: dict) -> str:
-        """反思调用：动作前后两帧做网格标注，连同动作描述发给 GLM；
+        """反思调用：动作前后两帧原始画面，连同动作描述发给 GLM；
         返回 A(生效)/B(未生效)/C(进错页)，调用失败返回 UNKNOWN。"""
         import base64
 
         try:
-            before = self.grid.annotate(self.prev_obs.png, self.cfg.grid)
-            after = self.grid.annotate(self.obs.png, self.cfg.grid)
+            before = Image.open(io.BytesIO(self.prev_obs.png)).convert("RGB")
+            after = Image.open(io.BytesIO(self.obs.png)).convert("RGB")
 
             # 细粒度日志：反思前后图
             if self.log.debug:
                 step = self.log.step if hasattr(self.log, 'step') and self.log.step else 0
                 self.log.save_image(f"step{step:02d}_reflect_before",
-                                  grid_mod.encode_jpeg(before, self.cfg.grid.jpeg_quality, self.cfg.grid.max_side),
+                                  image_mod.encode_jpeg(before, self.cfg.image.jpeg_quality, self.cfg.image.max_side),
                                   extension="jpg")
                 self.log.save_image(f"step{step:02d}_reflect_after",
-                                  grid_mod.encode_jpeg(after, self.cfg.grid.jpeg_quality, self.cfg.grid.max_side),
+                                  image_mod.encode_jpeg(after, self.cfg.image.jpeg_quality, self.cfg.image.max_side),
                                   extension="jpg")
                 self.log.detail("verify", "反思图像已落盘")
 
-            b = base64.b64encode(grid_mod.encode_jpeg(before, self.cfg.grid.jpeg_quality, self.cfg.grid.max_side)).decode("ascii")
-            a = base64.b64encode(grid_mod.encode_jpeg(after, self.cfg.grid.jpeg_quality, self.cfg.grid.max_side)).decode("ascii")
+            b = base64.b64encode(image_mod.encode_jpeg(before, self.cfg.image.jpeg_quality, self.cfg.image.max_side)).decode("ascii")
+            a = base64.b64encode(image_mod.encode_jpeg(after, self.cfg.image.jpeg_quality, self.cfg.image.max_side)).decode("ascii")
             return self.glm.reflect(self._action_detail(action) + " " + action.get("explain", ""),
                                     self.task, b, a)
         except (GLMError, ADBError) as e:

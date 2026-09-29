@@ -1,4 +1,4 @@
-"""自检应使用实际截图网格，并将性能/能力不足标为警告。"""
+"""自检应检查截图，并将性能/能力不足标为警告。"""
 
 from types import SimpleNamespace
 
@@ -44,7 +44,7 @@ def test_check_reports_auto_grid_and_warnings_without_model(monkeypatch, capsys)
 
     assert main.cmd_check(cfg) == 0
     output = capsys.readouterr().out
-    assert "auto 11×22" in output
+    assert "网格" not in output
     assert "可寻址候选" in output and "34 个" in output
     assert "[!] 中文输入能力" in output
     assert "[✓] 自检串行采集耗时" in output

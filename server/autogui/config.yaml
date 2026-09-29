@@ -11,15 +11,9 @@ display_id: null           # 保持 null；仅当 `--check` 报告多屏且
                             # 捕获到的不是中控屏时才设置
 input_chain: [yadb, adbkeyboard, ascii]
 
-# 默认按实际截图尺寸自动计算。cols/rows 是勾选手动覆盖后的备用值：
-# 1920x1080 下 20x10 约为 96x108px/格。
-grid:
-  mode: "auto" # 默认按实际截图尺寸计算；前端勾选手动设置时改为 manual
-  cols: 20
-  rows: 10
+image:
   jpeg_quality: 85
-  max_side: 1568           # 暂定值；LightGUIAgent 把它写死为“Claude 最优”
-                            # —— 9/19 A/B 测试中针对 GLM 重新实测
+  max_side: 1568           # VLM 截图编码前的最长边
 
 agent:
   max_steps: 20
@@ -76,16 +70,12 @@ app_cache_serial: "509c27fd"
 apps:
   - name: QQ音乐
     aliases: ["qqmusic"]
-    package:
   - name: 哔哩哔哩
     aliases: ["bili", "bilibili"]
-    package:
   - name: 飞书
     aliases: ["feishu", "lark"]
-    package:
   - name: 美团
     aliases: ["meituan"]
-    package:
 log_dir: artifacts/logs
 verbose: true
 

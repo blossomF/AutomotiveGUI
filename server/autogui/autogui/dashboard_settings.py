@@ -1,4 +1,4 @@
-"""本地面板的模型和网格设置；不把 API Key 返回给浏览器。"""
+"""本地面板设置；不把 API Key 返回给浏览器。"""
 
 from __future__ import annotations
 
@@ -10,8 +10,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-from autogui.config import Config, GLMConfig, GridConfig
-from autogui.perception.grid import auto_grid_dimensions, grid_dimensions
+from autogui.config import Config, GLMConfig
 
 
 def _model_fields(payload: dict, current: Config) -> tuple[str, str, str]:
@@ -42,15 +41,6 @@ def _num_field(raw: dict, key: str, fallback: object, caster) -> object:
         raise ValueError(f"{key} 必须是数字")
 
 
-def _grid_fields(payload: dict, current: Config) -> GridConfig:
-    raw = payload.get("grid") or {}
-    if not isinstance(raw, dict):
-        raise ValueError("grid 必须是对象")
-    return GridConfig(mode=raw.get("mode", current.grid.mode),
-                      cols=raw.get("cols", current.grid.cols),
-                      rows=raw.get("rows", current.grid.rows))
-
-
 def public_settings(config_path: Path) -> dict:
     import yaml
 
@@ -79,7 +69,6 @@ def public_settings(config_path: Path) -> dict:
                   "max_tokens": cfg.glm.max_tokens,
                   "timeout": cfg.glm.timeout,
                   "max_retries": cfg.glm.max_retries},
-        "grid": {"mode": cfg.grid.mode, "cols": cfg.grid.cols, "rows": cfg.grid.rows},
         "voice": {
             "appid": str(voice_raw.get("appid") or ""),
             "api_key": str(voice_raw.get("api_key") or ""),
@@ -255,7 +244,7 @@ def _verified_serial(serial: str, apps: list) -> str:
 
 
 def save_apps(config_path: Path, apps: list, device_serial: str | None = None) -> dict:
-    """只保存完整应用清单；不动模型、ASR 和网格字段。"""
+    """只保存完整应用清单；不动模型和 ASR 字段。"""
     parsed = _apps_fields({"apps": apps})
     if parsed is None:
         raise ValueError("apps 必须是列表")
@@ -315,7 +304,6 @@ def save_settings(config_path: Path, payload: dict) -> dict:
     """校验后原子保存。api_key 和 api_secret 加密存储，其余明文。"""
     current = Config.load(config_path)
     url, name, key = _model_fields(payload, current)
-    grid = _grid_fields(payload, current)
     apps = _apps_fields(payload)
     model_raw = payload.get("model") or {}
     model_updates: dict[str, object] = {
@@ -348,7 +336,6 @@ def save_settings(config_path: Path, payload: dict) -> dict:
         voice_updates["silence_threshold"] = _num_field(voice_raw, "silence_threshold", current.voice.silence_threshold, int)
     updates = {
         "glm": model_updates,
-        "grid": {"mode": grid.mode, "cols": grid.cols, "rows": grid.rows},
     }
     if voice_updates:
         updates["voice"] = voice_updates
@@ -475,21 +462,3 @@ def test_asr(config_path: Path, payload: dict) -> dict:
         detail = str(exc).replace(api_secret, "<redacted-api-secret>")[:300]
         return {"ok": False, "message": detail, "error_type": type(exc).__name__,
                 "latency_ms": round((time.perf_counter()-started)*1000)}
-
-
-def grid_preview(config_path: Path, screen_size: tuple[int, int] | None = None) -> dict:
-    """按实际截图预览；设备离线时由调用方显示不可用。"""
-    cfg = Config.load(config_path)
-    if screen_size is None:
-        from autogui.bridge.adb import get_device, png_size
-        device = get_device(cfg.device_serial, display=cfg.display_id)
-        screen_size = png_size(device.screenshot())
-    if not screen_size:
-        raise RuntimeError("无法从截图读取屏幕尺寸")
-    width, height = screen_size
-    auto_cols, auto_rows = auto_grid_dimensions(width, height)
-    cols, rows = grid_dimensions(width, height, mode=cfg.grid.mode,
-                                 cols=cfg.grid.cols, rows=cfg.grid.rows)
-    return {"width": width, "height": height, "auto": {"cols": auto_cols, "rows": auto_rows},
-            "active": {"mode": cfg.grid.mode, "cols": cols, "rows": rows,
-                       "cell_width": round(width / cols, 1), "cell_height": round(height / rows, 1)}}

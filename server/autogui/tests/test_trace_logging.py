@@ -92,6 +92,34 @@ def test_empty_xml_records_dump_output_and_remote_file(tmp_path, monkeypatch):
     log.close()
 
 
+def test_dump_exit_137_captures_device_evidence_once(tmp_path, monkeypatch):
+    log = DecisionLog("dump 137", tmp_path, verbose=False, debug=True)
+    device = Device("fake")
+    device.trace_log = log
+    calls = []
+
+    def fake_soft(*args, **kwargs):
+        calls.append(args)
+        if args[1] == "uiautomator":
+            return ADBResult(137, "", "")
+        if args[1] == "ls":
+            return ADBResult(1, "", "No such file")
+        if args[1] == "logcat":
+            return ADBResult(0, "lmkd: Killing uiautomator\nother line", "")
+        return ADBResult(0, "", "")
+
+    monkeypatch.setattr(device, "adb_soft", fake_soft)
+    assert device.dump_xml() == device.dump_xml() == ""
+    events = [e for e in log.events if e["phase"] == "xml"]
+    assert len(events) == 2
+    assert events[0]["dump_exit"] == 137
+    assert events[0]["logcat_matches"] == 1
+    assert "logcat_artifact" in events[0]
+    assert "logcat_matches" not in events[1]
+    assert sum(args[1] == "logcat" for args in calls) == 1
+    log.close()
+
+
 def test_runner_prepare_wires_trace_after_log_creation(tmp_path, monkeypatch):
     device = Device("fake")
     monkeypatch.setattr("autogui.core.graph.tools.dev", lambda: device)
