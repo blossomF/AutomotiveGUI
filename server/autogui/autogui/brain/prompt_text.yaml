@@ -14,7 +14,7 @@ decide_system: |-
   SCROLL 的 direction 只能是 $scroll_directions。
   SCROLL 用于普通列表；可用 node_ref 指定滚动容器，amount 为其可滑动范围的 0.1~0.9。数值滚轮用 ROLL_TO。
   SKILL 只加载一份操作指导，不会自动点击或完成任务。只有任务的应用和目标都与「可用技能」摘要明确匹配，且参数能从用户任务中确定时才选 SKILL；name 原样照抄完整名字（如 bilibili.search_video），参数放 params。已加载指导后不要再次选择同一 SKILL，应依据当前屏幕给出具体动作。不匹配时直接操作控件，不要猜技能名或参数。
-  LAUNCH 的 app 填包名，取下方「可用应用」列表（如 com.bilibili.bilithings），不要填中文名。
+  LAUNCH 的 app 填包名，只从下方「已缓存直启应用」取（如 com.bilibili.bilithings），不要填中文名。该列表不是设备应用全集；目标应用未缓存时用 HOME 回桌面，再根据控件树或截图寻找入口。不得仅因缓存没有包名就判定任务无法完成。
   写法示例：{"type":"CLICK","node_ref":7} / {"type":"TYPE","text":"钢铁侠 第一季","submit":true} / {"type":"SKILL","name":"bilibili.search_video","params":{"keyword":"钢铁侠 第一季"}} / {"type":"COMPLETE","result":"已播放"}
   字段必须写在对应字段里（例如要输入的文字放 text，不要只写在 explain 里）。
 
@@ -27,7 +27,8 @@ decide_system: |-
   6. TYPE 的 submit=true 会在输入后按回车；仅在当前搜索框支持回车提交时使用。账号、密码、昵称、多行文本等输入不要带 submit。
   7. explain / progress / entities 的取值必须与用户任务同语言（中文任务用中文说明）。
   8. 滑块按当前控件实际支持的方式操作；需要拖动时从 thumb 当前位置起拖。DRAG 的 from/to 都是屏幕像素 [x,y]。
-  9. $output_rule
+  9. 跨应用任务完成一个子目标后继续处理剩余目标；先尝试 HOME 寻找未缓存的应用，再考虑 FAIL。
+  10. $output_rule
 
 decide_tree_user: |-
   $context_text
@@ -41,7 +42,7 @@ decide_tree_coords: |-
   本路是纯文本、没有网格图，grid 字段**不要**写 E5 这类字母格号（那是看图模式才用）。屏幕像素尺寸为 $width×$height，候选行中的 [x,y] 是该控件中心的真实像素坐标。绝大多数点击直接回复 node_ref 即可。
 
 decide_vlm_screen: |-
-  当前屏幕截图已叠加 $grid_spec 网格（列 A-… 行 1-…）。控件树不可用，请用网格位置回答，字段名 grid，例如 "J5"。
+  当前屏幕截图已叠加 $grid_spec 网格（列 A-… 行 1-…）。此轮需看图操作；点击屏幕键盘等树外控件时用 grid 字段，例如 "J5"。
 
 decide_vlm_output: |-
   输出示例：$schema_text
@@ -73,13 +74,16 @@ json_retry_user: 上一回复无法解析为 JSON（$error）。$output_rule 重
 context_task: 任务：$task
 context_action_types: 动作类型：$action_names
 context_app_index: |-
-  可用应用（LAUNCH 的 app 字段填这里的包名）：
+  已缓存直启应用（仅供 LAUNCH 填包名；不是设备应用全集，未列出的应用可从 HOME 界面寻找）：
   $app_index
 context_skill_index: |-
   可用技能：
   $skill_index
 context_active_skill: |-
   当前已加载的技能指导（不要再次选择同一 SKILL）：
+  $guide
+context_input_guide: |-
+  当前中文输入问题：
   $guide
 context_entities: |-
   已确认的关键信息（后续步骤直接使用，不要重新推断）：

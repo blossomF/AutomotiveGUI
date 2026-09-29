@@ -72,6 +72,59 @@ def test_roll_to_handles_large_minute_change():
     assert wheel.value == 0 and "已核验" in result
 
 
+def test_roll_to_uses_fast_feedback_for_large_minute_change():
+    wheel = FakeWheel(value=30, unit="分")
+    dumps = 0
+    modes = []
+
+    def dump():
+        nonlocal dumps
+        dumps += 1
+        return wheel.dump()
+
+    def fast(*vector):
+        # A short, high velocity gesture flings the real picker farther than
+        # the same length precise swipe. The controller still reads XML after it.
+        wheel.vectors.append(vector)
+        wheel.value += 10 if vector[3] < vector[1] else -10
+        modes.append("fast")
+
+    result = roll_to(_wheel(30, "分"), "00分", dump_xml=dump, swipe=wheel.swipe,
+                     fast_swipe=fast,
+                     report=lambda message, **kw: modes.append(kw.get("gesture", "")))
+    assert wheel.value == 0 and "已核验" in result
+    assert dumps <= 7
+    assert "fast" in modes
+
+
+def test_roll_to_fast_probe_falls_back_when_picker_does_not_fling():
+    wheel = FakeWheel(value=30, unit="分")
+    fast_calls = 0
+
+    def fast(*vector):
+        nonlocal fast_calls
+        fast_calls += 1
+        return wheel.swipe(*vector)
+
+    roll_to(_wheel(30, "分"), "00分", dump_xml=wheel.dump,
+            swipe=wheel.swipe, fast_swipe=fast)
+    assert wheel.value == 0
+    assert fast_calls == 1
+
+
+def test_minute_wheel_uses_wraparound_short_distance():
+    class WrappedWheel(FakeWheel):
+        def swipe(self, *vector):
+            result = super().swipe(*vector)
+            self.value %= 60
+            return result
+
+    wheel = WrappedWheel(value=59, unit="分")
+    result = roll_to(_wheel(59, "分"), "00分", dump_xml=wheel.dump, swipe=wheel.swipe)
+    assert wheel.value == 0 and "已核验" in result
+    assert len(wheel.vectors) <= 2
+
+
 def test_roll_to_stops_when_value_does_not_change():
     wheel = FakeWheel(pixels_per_unit=10000)
     with pytest.raises(PickerError, match="连续两次无变化"):

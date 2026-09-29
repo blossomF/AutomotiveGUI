@@ -14,7 +14,7 @@ dependencies = [
   "pillow>=10",
   "pyyaml>=6",
   "pydantic>=2.7",
-  "pypinyin>=0.51",       # 中文输入兜底：拼音首字母简写（ascii 降级时）
+  "pypinyin>=0.51",       # 屏幕键盘操作所需的全拼提示（不替代中文输入）
 ]
 
 [project.optional-dependencies]

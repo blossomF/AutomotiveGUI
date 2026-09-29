@@ -36,6 +36,14 @@ def _parse_value(text: str) -> tuple[int, str]:
     return int(match[1]), match[2].strip()
 
 
+def _difference(a: int, b: int, unit: str) -> int:
+    """Signed shortest distance on a minute wheel; other wheels stay linear."""
+    raw = a - b
+    if unit == "分" and 0 <= a < 60 and 0 <= b < 60:
+        return (raw + 30) % 60 - 30
+    return raw
+
+
 def read_picker(xml: str, candidate: Candidate) -> PickerReading:
     """Find the same wheel after a fresh dump, even when its value changes."""
     if not is_value_wheel(candidate):
@@ -96,6 +104,7 @@ def roll_to(
     *,
     dump_xml: Callable[[], str],
     swipe: Callable[[int, int, int, int], str],
+    fast_swipe: Callable[[int, int, int, int], str] | None = None,
     report: Callable[..., None] | None = None,
     delta_hint: int | None = None,
     screen: tuple[int, int] | None = None,
@@ -108,12 +117,13 @@ def roll_to(
     reading = read_picker(dump_xml(), candidate)
     if unit and reading.unit and unit != reading.unit:
         raise PickerError(f"目标单位 {unit!r} 与滚轮单位 {reading.unit!r} 不一致")
-    if delta_hint is not None and delta_hint != wanted - reading.value and report:
+    initial_delta = _difference(wanted, reading.value, reading.unit)
+    if delta_hint is not None and delta_hint != initial_delta and report:
         report("模型差值与实时读数不符，以实时读数为准", model_delta=delta_hint,
-               actual_delta=wanted - reading.value)
+               actual_delta=initial_delta)
     if report:
         report(f"滚轮 #{candidate.ref} 开始调整", current=f"{reading.value}{reading.unit}",
-               target=f"{wanted}{reading.unit}", delta_units=wanted - reading.value,
+               target=f"{wanted}{reading.unit}", delta_units=initial_delta,
                model_delta=delta_hint, bounds=reading.bounds)
     if reading.value == wanted:
         return f"ROLL_TO #{candidate.ref} 已是 {wanted}{reading.unit}（0 次滑动）"
@@ -122,34 +132,39 @@ def roll_to(
     # observed value change, since picker implementations may invert direction.
     finger_for_increase = -1  # -1 = finger up, +1 = finger down
     pixels_per_unit: float | None = None
+    fast_works = fast_swipe is not None
     unchanged = 0
     for attempt in range(1, max_swipes + 1):
         if time.monotonic() - started >= max_seconds:
             raise PickerError(f"滚轮调整超过 {max_seconds:g}s；当前 {reading.value}{reading.unit}")
-        remaining = wanted - reading.value
+        remaining = _difference(wanted, reading.value, reading.unit)
+        use_fast = fast_works and abs(remaining) >= 10
         bounds = _visible_bounds(reading.bounds, screen)
         height = bounds[3] - bounds[1]
         inner_span = height - 2 * max(8, round(height * 0.1))
         max_travel = round(inner_span * 0.8)
-        if pixels_per_unit is None:
+        if use_fast:
+            distance = max_travel
+        elif pixels_per_unit is None:
             distance = min(max_travel, max(40, round(inner_span * (0.6 if unchanged else 0.4))))
         else:
             distance = min(max_travel, max(36, round(min(abs(remaining), 4) * pixels_per_unit)))
         direction = finger_for_increase * (1 if remaining > 0 else -1)
         vector = _gesture(bounds, direction * distance)
         before = reading.value
-        swipe(*vector)
+        (fast_swipe if use_fast else swipe)(*vector)
         reading = read_picker(dump_xml(), candidate)
-        change = reading.value - before
+        change = _difference(reading.value, before, reading.unit)
         if report:
             report(f"滚轮 #{candidate.ref}: {before}{reading.unit} → {reading.value}{reading.unit}",
                    target=f"{wanted}{reading.unit}", swipe=vector, attempt=attempt,
-                   delta=change,
+                   delta=change, gesture="fast" if use_fast else "precise",
                    observed_px_per_unit=(round(abs(vector[3] - vector[1]) / abs(change), 1)
                                          if change else None))
         if reading.value == wanted:
             return f"ROLL_TO #{candidate.ref} {before}{reading.unit}→{wanted}{reading.unit}，{attempt} 次滑动已核验"
         if change == 0:
+            fast_works = False
             unchanged += 1
             if unchanged >= 2:
                 raise PickerError(f"滚轮连续两次无变化；当前 {reading.value}{reading.unit}")
@@ -158,5 +173,11 @@ def roll_to(
         # Finger sign times value-change sign tells us which finger direction
         # increases the selected value on this specific wheel.
         finger_for_increase = (1 if direction > 0 else -1) * (1 if change > 0 else -1)
-        pixels_per_unit = abs(vector[3] - vector[1]) / abs(change)
+        if use_fast:
+            # Velocity determines fling travel; this is not a pixels/unit calibration.
+            # A picker that ignores the fast gesture falls back to precise swipes.
+            fast_works = abs(change) >= 3 and abs(_difference(wanted, reading.value, reading.unit)) >= 10
+            pixels_per_unit = None
+        else:
+            pixels_per_unit = abs(vector[3] - vector[1]) / abs(change)
     raise PickerError(f"滚轮达到 {max_swipes} 次滑动上限；当前 {reading.value}{reading.unit}，目标 {wanted}{reading.unit}")

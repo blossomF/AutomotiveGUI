@@ -10,15 +10,14 @@
 屏幕并开始打转。这里在切换前先读当前 IME，并精确还原那个值。
 
 降级顺序（启动时探测一次，然后缓存）：
-    yadb  ->  ADBKeyboard  ->  input text (ASCII)  ->  拼音味 ASCII
+    yadb  ->  ADBKeyboard  ->  input text (仅 ASCII)
 """
 
 from __future__ import annotations
 
-import re
 import time
 
-from autogui.bridge.adb import ADBError, Device, ascii_typeable, input_text_arg
+from autogui.bridge.adb import ADBError, Device, input_text_arg
 
 ADBKEYBOARD_ID = "com.android.adbkeyboard/.AdbIME"
 YADB_CLASSPATH = "/data/local/tmp/yadb"
@@ -28,13 +27,20 @@ YADB_MAIN = "com.ysbing.yadb.Main"
 STRATEGIES = ("yadb", "adbkeyboard", "ascii")
 
 
+class UnicodeInputUnavailable(ValueError):
+    """No exact Unicode input path is available on this device."""
+
+    def __init__(self, text: str, reason: str):
+        self.text = text
+        super().__init__(reason)
+
+
 class InputResult:
     def __init__(self, strategy: str, typed: str, note: str = ""):
         self.strategy = strategy
-        self.typed = typed        # 实际发出去的内容（可能与请求不同）
+        self.typed = typed        # 实际发出去的内容
         self.note = note
-        self.fallback_needed = strategy == "ascii" and typed != "" and not typed.isascii()
-        self.pinyin_fallback = False  # 拼音首字母回退标志：调用方应跳过 ENTER，等 agent 点联想词
+        self.payload_exact = False  # payload matches request; screen readback is separate
 
     def __repr__(self) -> str:  # pragma: no cover - 调试辅助
         return f"InputResult(strategy={self.strategy!r}, typed={self.typed!r}, note={self.note!r})"
@@ -124,6 +130,11 @@ class TextInput:
             return InputResult("none", "", "nothing to type")
         self.probe()
 
+        # A form value must never be silently replaced with pinyin initials.
+        # Reject before clear_first so the existing field is not destroyed.
+        if self.strategy == "ascii" and not text.isascii():
+            raise UnicodeInputUnavailable(text, "当前设备只有 ASCII 输入通道；不能将中文替换为拼音首字母")
+
         if clear_first:
             self.clear_field()
 
@@ -132,17 +143,25 @@ class TextInput:
 
         try:
             if self.strategy == "yadb":
-                return self._via_yadb(text, delay)
+                result = self._via_yadb(text, delay)
+                result.payload_exact = result.typed == text
+                return result
             if self.strategy == "adbkeyboard":
-                return self._via_adbkeyboard(text, delay)
+                result = self._via_adbkeyboard(text, delay)
+                result.payload_exact = result.typed == text
+                return result
         except ADBError as e:
             # 硬性的 adb 失败（设备掉线）——直接暴露，不要伪装成
             # “输入降级”。
             raise
-        except Exception as e:  # 某个策略中途炸掉则降级到 ascii
+        except Exception as e:  # 某个策略中途炸掉；只能在 ASCII 内容上降级
             if self.verbose:
                 print(f"  [input] {self.strategy} failed ({e}), degrading to ascii")
-        return self._via_ascii(text, delay)
+            if not text.isascii():
+                raise UnicodeInputUnavailable(text, f"{self.strategy} 中文输入失败：{e}") from e
+        result = self._via_ascii(text, delay)
+        result.payload_exact = result.typed == text
+        return result
 
     def _via_yadb(self, text: str, delay: float) -> InputResult:
         processed = text.replace("\n", " ").replace("\t", " ")
@@ -184,23 +203,11 @@ class TextInput:
         return InputResult("adbkeyboard", text, f"ime_restored={restore_to or 'system_default'}")
 
     def _via_ascii(self, text: str, delay: float) -> InputResult:
-        folded = ascii_typeable(text)
-        if not folded.strip():
-            # 纯中文（无 ASCII 形式）：输入拼音首字母简写，靠 App 联想候选，
-            # 由 agent 下一轮点选；不发 ENTER（提交会搜拼音原词，且挡住联想条）。
-            initials = to_pinyin_initials(text)
-            if initials:
-                self.device.adb("shell", "input", "text", input_text_arg(initials), timeout=10)
-                time.sleep(delay)
-                r = InputResult("ascii", initials,
-                                f"pinyin-initials fallback from {text!r} to {initials!r}; "
-                                f"ENTER skipped — click the matching app suggestion")
-                r.pinyin_fallback = True
-                return r
-            return InputResult("ascii", "", f"cannot type {text!r}: no ASCII form. Tap a suggestion strip instead.")
-        self.device.adb("shell", "input", "text", input_text_arg(folded), timeout=10)
+        if not text.isascii():
+            raise UnicodeInputUnavailable(text, "ASCII 输入不能精确写入非 ASCII 文本")
+        self.device.adb("shell", "input", "text", input_text_arg(text), timeout=10)
         time.sleep(delay)
-        return InputResult("ascii", folded, f"degraded from {text!r} to {folded!r}")
+        return InputResult("ascii", text)
 
     def clear_field(self, max_chars: int = 60) -> None:
         """全选后删除。
@@ -218,33 +225,10 @@ class TextInput:
         time.sleep(0.2)
 
 
-def to_pinyin_fallback(text: str) -> str:
-    """CJK 的尽力 ASCII 替身，避免搜索框被留空。
-
-    刻意做得简单——我们不带拼音表。重点是给 agent 一个可以跟随的
-    *提示*：先输入 ASCII 部分，再点 IME 候选条。字符串完全没有
-    ASCII 时返回 ""。
-    """
-    ascii_part = re.sub(r"[^A-Za-z0-9]", "", text)
-    return ascii_part
-
-
-def to_pinyin_initials(text: str) -> str:
-    """中文转拼音首字母简写（如“兰州拉面” -> "lzl m" -> "lzlm"）。
-    
-    仅当 pypinyin 可用且文本包含 CJK 字符时返回结果，否则返回空字符串。
-    用于 ascii 降级时的搜索框兜底输入。
-    """
-    cjk_chars = [ch for ch in text if '\u4e00' <= ch <= '\u9fff']
-    if not cjk_chars:
-        return ""
+def to_pinyin_syllables(text: str) -> str:
+    """只为屏幕键盘操作提供全拼提示；绝不把它当成已输入的目标文本。"""
     try:
-        from pypinyin import lazy_pinyin, Style
+        from pypinyin import lazy_pinyin
     except ImportError:
         return ""
-    initials = []
-    for ch in cjk_chars:
-        py = lazy_pinyin(ch, style=Style.FIRST_LETTER)
-        if py:
-            initials.append(py[0])
-    return "".join(initials).lower()
+    return "".join(lazy_pinyin(text))

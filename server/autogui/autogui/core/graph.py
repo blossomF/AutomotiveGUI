@@ -32,7 +32,8 @@ from dataclasses import dataclass, field
 
 from autogui.actions import MUTATING, TERMINAL
 from autogui.bridge import tools
-from autogui.bridge.adb import ADBError
+from autogui.bridge.adb import ADBError, node_attr, node_class, node_text, nodes
+from autogui.bridge.input import UnicodeInputUnavailable, to_pinyin_syllables
 from autogui.brain.context import Context
 from autogui.brain.glm_client import GLMClient, GLMError
 from autogui.app_routes import InitialRoute, choose_initial_route
@@ -91,6 +92,8 @@ class Runner:
     skill_activated_this_step: bool = False
     # 本步 decide 已尝试次数：tree 降级 vlm 重决策每步最多 1 次（防 decide 乒乓）
     decide_attempts: int = 0
+    pending_unicode: str = ""
+    blocked_unicode_attempts: int = 0
 
     def __post_init__(self) -> None:
         """构造完成后按配置初始化 Context（四层上下文管理器，token 预算裁剪）。"""
@@ -179,6 +182,11 @@ class Runner:
             sig=self.obs.signature[:9],
             omitted_actionable=self.obs.candidate_stats.get("omitted_actionable", 0),
         )
+        if self.pending_unicode and self._field_contains(self.obs.xml, self.pending_unicode):
+            self.log.phase("input", f"已从控件树确认目标中文：{self.pending_unicode!r}")
+            self.pending_unicode = ""
+            self.blocked_unicode_attempts = 0
+            self.context.input_guide = ""
         same = bool(state.get("screen_sig")) and self.obs.signature == state.get("screen_sig")
         no_progress = state.get("no_progress", 0) + 1 if same else 0
         return {
@@ -210,6 +218,9 @@ class Runner:
 
     def route(self, state: AgentState) -> dict:
         """固定控件树优先；树不可用时降级到 VLM。"""
+        if self.pending_unicode:
+            self.log.phase("route", "中文输入需观察屏幕键盘 → vlm")
+            return {"route": "vlm"}
         if self.log.debug:
             self.log.phase("route", "评估", guide_count=len(self.book.by_id) if self.book else 0,
                            tree_usable=bool(self.obs and self.obs.tree_usable),
@@ -323,6 +334,23 @@ class Runner:
             f"{action['type']} {self._action_detail(action)} — {action.get('explain', '')}",
             glms=usage.calls, in_tok=usage.prompt_tokens, out_tok=usage.completion_tokens,
         )
+        if self.pending_unicode and action.get("type") == "COMPLETE":
+            self.log.phase("input", "目标中文尚未从输入框读回，拒绝 COMPLETE")
+            self.context.record(state.get("step", 0), route, "COMPLETE",
+                                "目标中文尚未确认，请继续操作屏幕键盘", failed=True)
+            return {"action": {}, "route": route, "retry_decision": False,
+                    "no_progress": state.get("no_progress", 0) + 1}
+        if (self.pending_unicode and action.get("type") == "TYPE"
+                and action.get("text") == self.pending_unicode):
+            self.blocked_unicode_attempts += 1
+            self.log.phase("input", "该中文 TYPE 已被证明不可用，拒绝重复发送",
+                           repeats=self.blocked_unicode_attempts)
+            self.context.record(state.get("step", 0), route, "TYPE", "需改用屏幕键盘选字", failed=True)
+            if self.blocked_unicode_attempts >= 2:
+                return {"action": {"type": "FAIL", "reason": "两次重复了无法完成的中文 TYPE；目标文字未在输入框得到确认"},
+                        "route": route, "retry_decision": False}
+            return {"action": {}, "route": route, "retry_decision": False,
+                    "no_progress": 0}
 
         if route == "tree" and "node_ref" in action and tree_mod.by_ref(self.obs.candidates, action["node_ref"]) is None:
             # 越界 ref：不是错误，而是一次被观测到的 tree→vlm 降级（路径 C 证据）。
@@ -391,6 +419,18 @@ class Runner:
 
         try:
             result = self._dispatch(action)
+        except UnicodeInputUnavailable as e:
+            self.pending_unicode = e.text
+            pinyin = to_pinyin_syllables(e.text)
+            self.context.input_guide = (
+                f"目标是原文 {e.text!r}。当前 ADB 操作未能确认中文已写入；不要再次 TYPE 这段中文，"
+                f"也不要把拼音首字母或全拼当成已完成。请依据截图点击系统输入法按键、选中准确的中文候选，"
+                f"然后在控件树确认字段实际文字。全拼参考：{pinyin or '不可用'}。"
+            )
+            self.log.phase("input", f"中文直输不可用，转屏幕键盘：{e}", target=e.text, pinyin=pinyin)
+            self.context.record(state.get("step", 0), state.get("route", "?"), a_type,
+                                "中文未写入，转屏幕键盘观察", failed=True)
+            return {"last_action": {}, "no_progress": 0}
         except ADBError as e:
             self.log.phase("act", f"ADB 失败：{e}")
             self.context.record(state.get("step", 0), state.get("route", "?"), a_type, "执行失败", failed=True)
@@ -418,17 +458,16 @@ class Runner:
             return ex.call("tap", x=x, y=y) if a_type == "CLICK" else ex.call("long_press", x=x, y=y, ms=800)
         if a_type == "TYPE":
             r = ex.call("input_text", text=action["text"], clear_first=action.get("clear_first", False))
+            if not action["text"].isascii() and not self._field_contains(tools.dev().dump_xml(), action["text"]):
+                raise UnicodeInputUnavailable(action["text"], "输入命令已发送，但控件树未读到目标中文")
             if action.get("submit"):
                 # 搜索类输入框：输完补发 ENTER 触发提交并收起遮挡结果的软键盘
                 # （车机实测 KEYCODE_ENTER 同时完成两件事；普通表单不带 submit）。
-                # 例外：ascii 降级为拼音首字母时跳过 ENTER——靠 App 联想候选，
-                # 由 agent 下一轮点击；实际没输进任何字符时更不能 ENTER
+                # 实际没输进任何字符时不能 ENTER
                 # （会把搜索框残留文本提交出去，制造错误搜索结果）。
                 from autogui.bridge import tools as _tools
                 lr = _tools.last_input_result()
-                if lr is not None and lr.pinyin_fallback:
-                    r = r + " [ENTER skipped: pinyin-initials typed, click the matching app suggestion]"
-                elif lr is None or not (lr.typed or "").strip():
+                if lr is None or not (lr.typed or "").strip():
                     r = r + " [ENTER skipped: nothing actually typed]"
                 else:
                     ex.call("keyevent", key="KEYCODE_ENTER")
@@ -446,6 +485,8 @@ class Runner:
                 dump_xml=tools.dev().dump_xml,
                 swipe=lambda x1, y1, x2, y2: ex.call(
                     "swipe", x1=x1, y1=y1, x2=x2, y2=y2, ms=400),
+                fast_swipe=lambda x1, y1, x2, y2: ex.call(
+                    "swipe", x1=x1, y1=y1, x2=x2, y2=y2, ms=80),
                 report=lambda message, **metrics: self.log.phase("roll", message, **metrics),
             )
         if a_type == "DRAG":
@@ -454,12 +495,21 @@ class Runner:
         if a_type == "BACK":
             return ex.call("press_back")
         if a_type == "HOME":
+            self.pending_unicode = ""
+            self.context.input_guide = ""
             return ex.call("press_home")
         if a_type == "LAUNCH":
+            self.pending_unicode = ""
+            self.context.input_guide = ""
             return ex.call("launch_app", package=action["app"])
         if a_type == "WAIT":
             return ex.call("sleep", seconds=action.get("seconds", 1.5))
         raise ValueError(f"no dispatch for {a_type}")
+
+    @staticmethod
+    def _field_contains(xml: str, expected: str) -> bool:
+        return any(expected == node_text(node).strip() for node in nodes(xml)
+                   if ("EditText" in node_class(node) or node_attr(node, "editable") == "true"))
 
     def _resolve_point(self, action: dict) -> tuple[int | None, int | None]:
         """node_ref 优先于显式像素坐标，再到 grid 字母格号。
