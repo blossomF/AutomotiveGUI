@@ -192,7 +192,8 @@ class DecisionLog:
         text = "\n".join(lines)
         if self.verbose:
             print(text)
-        self.events.append({"t": round(elapsed, 3), "wall": time.strftime("%H:%M:%S"),
+        self.events.append({"t": round(elapsed, 3), "elapsed": round(elapsed, 3),
+                            "wall": time.strftime("%H:%M:%S"),
                             "phase": "finish", "msg": status, "success": success,
                             "steps": steps, "usage": usage, "routes": route_counts})
         self._write_jsonl()

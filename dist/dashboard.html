@@ -60,12 +60,20 @@
   .a-verify { background:#0891b2; } .a-recovery { background:#ca8a04; }
   .a-guard { background:#64748b; } .a-finish { background:#059669; }
   .a-skill { background:#7c3aed; } .a-error { background:#dc2626; } .a-log { background:#475569; }
+  .a-setup { background:#475569; } .a-xml { background:#0e7490; }
+  .a-glm_request { background:#4f46e5; } .a-glm_response { background:#9333ea; }
+  .a-input { background:#b45309; } .a-ad { background:#d97706; }
+  .phase-group { margin:14px 0 7px; padding:8px 10px; border-radius:8px;
+                 background:#eaf2ff; color:#174ea6; font-weight:700; font-size:14px; }
   /* 卡片左侧色条跟 phase 联动 */
   .card.p-perceive { border-left-color:#0891b2; } .card.p-route { border-left-color:#7c3aed; }
   .card.p-decide { border-left-color:#2563eb; } .card.p-act { border-left-color:#059669; }
   .card.p-verify { border-left-color:#0891b2; } .card.p-recovery { border-left-color:#ca8a04; }
   .card.p-guard { border-left-color:#64748b; } .card.p-finish { border-left-color:#059669; }
   .card.p-skill { border-left-color:#7c3aed; } .card.p-error { border-left-color:#dc2626; }
+  .card.p-xml { border-left-color:#0e7490; } .card.p-glm_request { border-left-color:#4f46e5; }
+  .card.p-glm_response { border-left-color:#9333ea; } .card.p-ad { border-left-color:#d97706; }
+  .card.p-input { border-left-color:#b45309; }
   .card.p-log { border-left-color:#475569; }
   .step-no { color:#7b8794; font-weight:600; }
   .meta { margin:8px 0; font-size:13px; color:#3e4c59; line-height:1.6; word-break:break-all; }
@@ -137,13 +145,16 @@ function buildSummary(stem, evs, lineCount){
   evs.forEach(ev => {
     if(ev.phase === 'finish'){
       status = (ev.success === false) ? 'aborted' : 'done';
-      total_time  = num(ev.elapsed);
+      total_time  = num(ev.elapsed ?? ev.t);
       const u = ev.usage || {};
       total_tokens = Math.trunc(num(u.total_tokens));
       total_steps  = Math.trunc(num(ev.steps));
     }
   });
-  if(status === 'running') total_steps = lineCount;
+  if(status === 'running'){
+    total_steps = new Set(evs.filter(ev => Number.isInteger(ev.step) && ev.step > 0).map(ev => ev.step)).size;
+    total_time = Math.max(0, ...evs.map(ev => num(ev.t)));
+  }
   return {
     task_dir: stem, session_id: stem, task: stem,
     status: status,
@@ -155,7 +166,8 @@ function buildSummary(stem, evs, lineCount){
 
 // 决策链明细：每条事件一张卡片（finish 只用于汇总，不单独成卡）
 function buildDetail(stem, evs){
-  let status = 'running', finishUsage = {}, finishSteps = 0, steps = [], prevT = 0;
+  let status = 'running', finishUsage = {}, finishSteps = 0, finishTime = null, steps = [], prevT = 0;
+  const stepCounts = {};
   // 任务开始墙钟时刻（文件名末尾 -YYYYMMDD-HHMMSS）：旧日志无 wall 字段时用 t 偏移还原 HH:MM:SS
   const stampM = String(stem).match(/-(\d{8})-(\d{6})$/);
   let startMs = 0;
@@ -175,8 +187,10 @@ function buildDetail(stem, evs){
       finishUsage = ev.usage || {};
       // 真实步数取自 finish 顶层 steps（与概况口径一致）；usage 里没有 steps。
       finishSteps = Math.trunc(num(ev.steps));
+      finishTime = num(ev.elapsed ?? ev.t);
       return;
     }
+    stepCounts[stepNo] = (stepCounts[stepNo] || 0) + 1;
 
     // 事件自带指标（路由 / 屏幕指纹 / 调用次数 …）-> 卡片 detail
     const metrics = {};
@@ -203,6 +217,7 @@ function buildDetail(stem, evs){
 
     steps.push({
       step: stepNo,
+      substep: stepCounts[stepNo],
       wall_time: wallTime || null,
       action: Object.assign({action: phase, summary: msg, explain: msg}, metrics),
       inference_time: 0, execution_time: 0, total_time: dt,
@@ -212,14 +227,16 @@ function buildDetail(stem, evs){
 
   let totalTokens = Math.trunc(num(finishUsage.total_tokens));
   if(!totalTokens) totalTokens = steps.reduce((a, s) => a + s.tokens.input + s.tokens.output, 0);
-  const avg = steps.length
-    ? steps.reduce((a, s) => a + s.total_time, 0) / steps.length : 0;
+  const totalTime = finishTime ?? prevT;
+  const graphSteps = finishSteps || new Set(steps.filter(s => s.step > 0).map(s => s.step)).size;
+  const avg = graphSteps ? totalTime / graphSteps : 0;
 
   return {
     task_dir: stem, session_id: stem, task: stem,
     status: status,
     stats: {
-      total_steps: finishSteps || steps.length,
+      total_steps: graphSteps,
+      total_time: Math.round(totalTime * 10) / 10,
       total_tokens: totalTokens,
       avg_step: Math.round(avg * 100) / 100
     },
@@ -274,7 +291,7 @@ function renderTaskList(){
   TASKS.forEach(t => {
     const o = document.createElement('option');
     o.value = t.task_dir;
-    o.textContent = `${t.task_dir} | ${t.status==='done'?'✅':(t.status==='aborted'?'⚠️':'⏳')} ${t.total_steps}步 · ${t.total_tokens} token`;
+    o.textContent = `${t.task_dir} | ${t.status==='done'?'✅':(t.status==='aborted'?'⚠️':'⏳')} ${t.total_steps}步 · ${t.total_time}s · ${t.total_tokens} token`;
     sel.appendChild(o);
   });
   if(TASKS.length){ sel.value = TASKS[0].task_dir; renderTask(TASKS[0].task_dir); }
@@ -287,6 +304,7 @@ function renderTask(stem){
     <div class="stat"><div class="k">任务</div><div class="v" style="font-size:14px">${esc(d.task)}</div></div>
     <div class="stat"><div class="k">状态</div><div class="v"><span class="badge ${d.status}">${d.status==='done'?'已完成':(d.status==='aborted'?'已中止':'运行中')}</span></div></div>
     <div class="stat"><div class="k">步数</div><div class="v">${d.stats.total_steps}</div></div>
+    <div class="stat"><div class="k">任务总耗时</div><div class="v">${d.stats.total_time}s</div></div>
     <div class="stat"><div class="k">平均步耗时</div><div class="v">${d.stats.avg_step}s</div></div>
     <div class="stat"><div class="k">总 Token</div><div class="v">${d.stats.total_tokens}</div></div>
   `;
@@ -295,7 +313,15 @@ function renderTask(stem){
   tl.innerHTML = '';
   if(!d.steps.length){ tl.innerHTML = '<div class="empty">该日志没有可回放的事件</div>'; return; }
 
+  let previousGraphStep = null;
   d.steps.forEach(s => {
+    if(previousGraphStep !== s.step){
+      const heading = document.createElement('div');
+      heading.className = 'phase-group';
+      heading.textContent = s.step === 0 ? '任务准备' : `第 ${s.step} 步`;
+      tl.appendChild(heading);
+      previousGraphStep = s.step;
+    }
     const a = s.action || {};
     const explain = a.explain ? `<div class="meta"><b>说明：</b>${esc(a.explain)}</div>` : '';
     const detail = Object.entries(a)
@@ -308,7 +334,7 @@ function renderTask(stem){
     card.innerHTML = `
       <div class="body">
         <div class="row1">
-          <span class="step-no">#${s.step}</span>
+          <span class="step-no">事件 ${s.substep}</span>
           <span class="atype a-${esc(a.action||'')}">${esc(a.action||'?')}</span>
           <span class="timing">${s.wall_time ? s.wall_time + '  cost:' + s.total_time + 's' : 't+' + s.total_time + 's'}</span>
           ${a.decision_source?`<span class="badge" style="background:#e0e7ff;color:#3730a3">${esc(a.decision_source)}</span>`:''}

@@ -118,6 +118,8 @@ def list_tasks() -> list:
         total_steps = 0
         total_tokens = 0
         total_time = 0.0
+        seen_steps = set()
+        event_count = 0
         try:
             lines = [ln for ln in jl.read_text(encoding="utf-8").splitlines() if ln.strip()]
             for line in lines:
@@ -125,15 +127,19 @@ def list_tasks() -> list:
                     ev = json.loads(line)
                 except Exception:
                     continue
+                event_count += 1
                 if ev.get("phase") == "finish":
                     status = "done" if ev.get("success", True) else "aborted"
-                    total_time = float(ev.get("elapsed", 0.0) or 0.0)
+                    total_time = float(ev.get("elapsed", ev.get("t", 0.0)) or 0.0)
                     usage = ev.get("usage") or {}
                     total_tokens = int(usage.get("total_tokens", 0) or 0)
                     total_steps = int(ev.get("steps", 0) or 0)
+                else:
+                    total_time = max(total_time, float(ev.get("t", 0.0) or 0.0))
+                    if isinstance(ev.get("step"), int) and ev["step"] > 0:
+                        seen_steps.add(ev["step"])
             if status == "running":
-                # 没有 finish 事件：用事件条数近似步数
-                total_steps = len(lines)
+                total_steps = len(seen_steps)
         except Exception:
             pass
         out.append(
@@ -143,6 +149,7 @@ def list_tasks() -> list:
                 "task": sid,
                 "status": status,
                 "total_steps": total_steps,
+                "event_count": event_count,
                 "total_time": round(total_time, 1),
                 "total_cost": 0.0,
                 "total_tokens": total_tokens,
@@ -171,7 +178,9 @@ def get_task_detail(task_dir: str) -> dict:
     status = "running"
     finish_usage = {}
     finish_steps = 0
+    finish_time = None
     steps = []
+    step_counts = {}
     prev_t = 0.0
     # 任务开始墙钟时刻：文件名末尾 -YYYYMMDD-HHMMSS（DecisionLog 落盘时写入）。
     # 旧日志事件无 wall 字段时，用它 + 相对时间 t 还原每步的 HH:MM:SS。
@@ -194,7 +203,9 @@ def get_task_detail(task_dir: str) -> dict:
             # 真实步数取自 finish 的顶层 steps（与 list_tasks 口径一致）；
             # 注意 usage 里没有 steps 字段，别去 usage 里找。
             finish_steps = int(ev.get("steps", 0) or 0)
+            finish_time = float(ev.get("elapsed", ev.get("t", 0.0)) or 0.0)
             continue
+        step_counts[step_no] = step_counts.get(step_no, 0) + 1
         # 事件自带的指标（路由/屏幕指纹/调用次数等），用于卡片 detail
         metrics = {k: v for k, v in ev.items()
                    if k not in ("t", "wall", "step", "phase", "msg")}
@@ -218,6 +229,7 @@ def get_task_detail(task_dir: str) -> dict:
         steps.append({
             "idx": idx,              # 唯一事件序号：前端用它做 key，避免同 graph step 下多事件互相覆盖
             "step": step_no,         # graph step 编号（JSONL 里的 step 字段）
+            "substep": step_counts[step_no],
             "wall_time": wall,       # 该步发生的系统时间 HH:MM:SS（可为 None）
             "action": action,
             "inference_time": 0,
@@ -232,15 +244,17 @@ def get_task_detail(task_dir: str) -> dict:
     total_tokens = int(finish_usage.get("total_tokens", 0) or 0)
     if not total_tokens:
         total_tokens = sum(s["tokens"]["input"] + s["tokens"]["output"] for s in steps)
-    total_time = round(float(finish_usage.get("elapsed", prev_t) or prev_t), 1)
-    avg = (sum(s["total_time"] for s in steps) / len(steps)) if steps else 0.0
+    total_time = round(finish_time if finish_time is not None else prev_t, 1)
+    graph_steps = finish_steps or len({s["step"] for s in steps if s["step"] > 0})
+    avg = total_time / graph_steps if graph_steps else 0.0
     return {
         "task_dir": task_dir,
         "session_id": task_dir,
         "task": task_dir,
         "status": status,
         "stats": {
-            "total_steps": finish_steps or len(steps),
+            "total_steps": graph_steps,
+            "total_time": total_time,
             "total_tokens": total_tokens,
             "avg_step": round(avg, 2),
         },
@@ -262,7 +276,7 @@ def get_live(task_dir: str) -> dict:
     if steps:
         s = steps[-1]
         last = {k: s.get(k) for k in (
-            "idx", "step", "wall_time", "action", "image", "total_time", "execution_time",
+            "idx", "step", "substep", "wall_time", "action", "image", "total_time", "execution_time",
             "inference_time", "tokens", "noop", "evidence",
         )}
     return {
@@ -659,8 +673,11 @@ BASE_CSS = r"""
   .live-list::-webkit-scrollbar-thumb { background:#d8dce1; border-radius:4px; }
   .live-list::-webkit-scrollbar-thumb:hover { background:#c2c8cf; }
   .live-list::-webkit-scrollbar-track { background:transparent; }
-  .live-item { display:flex; gap:11px; align-items:flex-start; padding:9px 8px;
+  .live-item { display:block; padding:9px 8px;
                border-radius:9px; border-left:3px solid transparent; }
+  .phase-group { margin:14px 0 7px; padding:8px 10px; border-radius:8px;
+                 background:#eaf2ff; color:#174ea6; font-weight:700; font-size:14px; }
+  .timeline .phase-group { margin-top:18px; }
   /* 最后一行就是「正在执行/最新一步」，用 CSS 自动高亮，不用 JS 维护 */
   .live-item:last-child { background:#f5f9ff; border-left-color:#2563eb; }
   /* 固定 126×80 的行高盒子：截图懒加载完会改变行高，把已滚到底的列表顶离底部，
@@ -712,6 +729,15 @@ BASE_CSS = r"""
   .a-verify { background:#0891b2; } .a-recovery { background:#ca8a04; }
   .a-guard { background:#64748b; } .a-finish { background:#059669; }
   .a-skill { background:#7c3aed; } .a-error { background:#dc2626; } .a-log { background:#475569; }
+  .a-setup { background:#475569; } .a-xml { background:#0e7490; }
+  .a-glm_request { background:#4f46e5; } .a-glm_response { background:#9333ea; }
+  .a-input { background:#b45309; } .a-ad { background:#d97706; }
+  .card.p-setup { border-left:4px solid #475569; } .card.p-xml { border-left:4px solid #0e7490; }
+  .card.p-glm_request { border-left:4px solid #4f46e5; } .card.p-glm_response { border-left:4px solid #9333ea; }
+  .card.p-perceive { border-left:4px solid #0891b2; } .card.p-route { border-left:4px solid #7c3aed; }
+  .card.p-decide { border-left:4px solid #2563eb; } .card.p-act { border-left:4px solid #059669; }
+  .card.p-verify { border-left:4px solid #0891b2; } .card.p-ad { border-left:4px solid #d97706; }
+  .card.p-input { border-left:4px solid #b45309; } .card.p-error { border-left:4px solid #dc2626; }
   .step-no { color:#7b8794; font-weight:600; }
   .meta { margin:8px 0; font-size:13px; color:#3e4c59; line-height:1.6; word-break:break-all; }
   .meta b { color:#1f2933; }
@@ -883,8 +909,9 @@ function clearLive(){
 }
 
 function stepKey(s){ return (s && s.idx != null) ? String(s.idx) : (s && s.step != null ? String(s.step) : ''); }
+function graphStepLabel(n){ return Number(n) === 0 ? '任务准备' : '第 ' + n + ' 步'; }
 
-function liveItemHTML(s){
+function liveItemHTML(s, firstInStep){
   const a = s.action || {};
   const phase = a.action || 'log';
   const msg = a.summary || a.explain || '';
@@ -893,21 +920,23 @@ function liveItemHTML(s){
     .map(([k,v]) => k + '=' + (typeof v === 'object' ? JSON.stringify(v) : v)).join(' · ');
   const meta = (s.wall_time ? s.wall_time + '  cost:' + (s.total_time || 0) + 's' : 't+' + (s.total_time || 0) + 's') + (tok ? ' · ' + tok + ' tok' : '');
   return '<div class="live-item" data-step="' + esc(stepKey(s)) + '">'
+    + (firstInStep ? '<div class="phase-group">' + esc(graphStepLabel(s.step)) + '</div>' : '')
     + '<div class="mini-body">'
     +   '<div class="mini-head">'
-    +     '<span class="idx-no">#' + esc(s.idx != null ? s.idx : '') + '</span>'
+    +     '<span class="idx-no">事件 ' + esc(s.substep != null ? s.substep : '') + '</span>'
     +     '<span class="atype a-' + esc(phase) + '">' + esc(phase) + '</span>'
     +     '<span class="mini-msg">' + esc(msg) + '</span>'
     +   '</div>'
     +   (extra ? '<div class="mini-explain">' + esc(extra) + '</div>' : '')
-    +   '<div class="mini-meta">' + esc(meta) + ' · graph step ' + esc(s.step != null ? s.step : '') + '</div>'
+    +   '<div class="mini-meta">' + esc(meta) + '</div>'
     + '</div></div>';
 }
 
 function appendStep(s){
   const list = $('#liveList'); if(!list) return;
   const box = document.createElement('div');
-  box.innerHTML = liveItemHTML(s);
+  const i = liveSteps.length - 1;
+  box.innerHTML = liveItemHTML(s, i === 0 || liveSteps[i-1].step !== s.step);
   list.appendChild(box.firstElementChild);
   if(stickBottom) list.scrollTop = list.scrollHeight;
 }
@@ -917,7 +946,8 @@ function replaceStep(s){
   const row = list.querySelector('[data-step="' + stepKey(s) + '"]');
   if(!row) return;
   const box = document.createElement('div');
-  box.innerHTML = liveItemHTML(s);
+  const i = liveSteps.findIndex(x => stepKey(x) === stepKey(s));
+  box.innerHTML = liveItemHTML(s, i === 0 || liveSteps[i-1].step !== s.step);
   row.replaceWith(box.firstElementChild);
 }
 
@@ -938,7 +968,7 @@ function renderLive(d){
     else if(JSON.stringify(liveSteps[i]) !== JSON.stringify(s)){
       liveSteps[i] = s; replaceStep(s);                  // 同一步内容更新（截图后到等）
     }
-    $('#liveCount').textContent = '共 ' + liveSteps.length + ' 步';
+    $('#liveCount').textContent = '第 ' + (d.stats?.total_steps || 0) + ' 步 · ' + liveSteps.length + ' 条事件';
   }
   showCard(true);
 }
@@ -953,8 +983,8 @@ async function loadLiveHistory(dir){
     liveSteps = d.steps.slice();
     liveStatus = d.status || 'running';
     const list = $('#liveList'); if(!list) return;
-    list.innerHTML = liveSteps.map(liveItemHTML).join('');
-    const c = $('#liveCount'); if(c) c.textContent = '共 ' + liveSteps.length + ' 步';
+    list.innerHTML = liveSteps.map((item, i) => liveItemHTML(item, i === 0 || liveSteps[i-1].step !== item.step)).join('');
+    const c = $('#liveCount'); if(c) c.textContent = '第 ' + (d.stats?.total_steps || 0) + ' 步 · ' + liveSteps.length + ' 条事件';
     const t = $('#liveTask'); if(t) t.textContent = d.task || '';
     showCard(true);                       // 必须先显示：面板带 hidden 时是 display:none，
     list.scrollTop = list.scrollHeight;   // scrollHeight 为 0，此时赋 scrollTop 是空操作，
@@ -985,11 +1015,11 @@ async function tick(){
       const cur = liveSteps.length ? liveSteps[liveSteps.length - 1] : null;
       const lastPhase = cur && cur.action ? cur.action.action : '';
       const lastGraphStep = cur ? cur.step : null;
-      setLive('🔴 运行中 · 已记录 ' + liveSteps.length + ' 条'
-              + (cur ? ' · 最新 ' + lastPhase + (lastGraphStep != null ? '（graph step ' + lastGraphStep + '）' : '') : ''));
+      setLive('🔴 运行中 · ' + me.total_steps + ' 步 · 已记录 ' + liveSteps.length + ' 条事件'
+              + (cur ? ' · 最新 ' + lastPhase + (lastGraphStep != null ? '（' + graphStepLabel(lastGraphStep) + '）' : '') : ''));
     });
-    staleTicks = (me.total_steps === lastSteps) ? staleTicks + 1 : 0;
-    lastSteps = me.total_steps;
+    staleTicks = (me.event_count === lastSteps) ? staleTicks + 1 : 0;
+    lastSteps = me.event_count;
     if(staleTicks >= 15){                // 30s 步数没动：不假装还在跑
       setMascot('idle');
       setLive('⏸ 30 秒无新动作，任务可能已中断（去任务日志确认）');
@@ -1098,7 +1128,7 @@ async function loadTasks(prefer){
   list.forEach(t => {
     const o = document.createElement('option');
     o.value = t.task_dir;
-    o.textContent = `${t.task_dir} | ${t.task||'(无)'} | ${t.status==='done'?'✅':'⏳'} ${t.total_steps}步`;
+    o.textContent = `${t.task_dir} | ${t.task||'(无)'} | ${t.status==='done'?'✅':'⏳'} ${t.total_steps}步 · ${t.total_time}s`;
     sel.appendChild(o);
   });
   const pick = (prefer && list.find(t => t.task_dir === prefer)) ? prefer
@@ -1116,13 +1146,22 @@ async function loadTask(dir, animate){
     <div class="stat"><div class="k">任务</div><div class="v" style="font-size:14px">${esc(d.task)}</div></div>
     <div class="stat"><div class="k">状态</div><div class="v"><span class="badge ${d.status}">${d.status==='done'?'已完成':(d.status==='aborted'?'已中止':'运行中')}</span></div></div>
     <div class="stat"><div class="k">步数</div><div class="v">${d.stats.total_steps}</div></div>
+    <div class="stat"><div class="k">任务总耗时</div><div class="v">${d.stats.total_time}s</div></div>
     <div class="stat"><div class="k">平均步耗时</div><div class="v">${d.stats.avg_step}s</div></div>
     <div class="stat"><div class="k">总 Token</div><div class="v">${d.stats.total_tokens}</div></div>
   `;
   // 时间线
   const tl = $('#timeline'); tl.innerHTML = '';
   if(!d.steps.length){ tl.innerHTML = '<div class="empty">暂无步骤数据</div>'; }
+  let previousGraphStep = null;
   d.steps.forEach(s => {
+    if(previousGraphStep !== s.step){
+      const heading = document.createElement('div');
+      heading.className = 'phase-group';
+      heading.textContent = graphStepLabel(s.step);
+      tl.appendChild(heading);
+      previousGraphStep = s.step;
+    }
     const a = s.action || {};
     const explain = a.explain ? `<div class="meta"><b>说明：</b>${esc(a.explain)}</div>` : '';
     const detail = Object.entries(a).filter(([k]) => !['action','summary','explain','decision_source','_tool_call_id','_from_tool','chinese_resolved','typed_value'].includes(k))
@@ -1130,11 +1169,11 @@ async function loadTask(dir, animate){
     const ev = s.evidence ? `<div class="evidence">✅ 完成证据：${esc(s.evidence)}</div>` : '';
     const noop = s.noop ? `<div class="noop">⚠️ 上一步点击后界面无变化（控件树+画面均未变）</div>` : '';
     const card = document.createElement('div');
-    card.className = 'card';
+    card.className = 'card p-' + String(a.action || 'log').replace(/[^a-z_]/gi, '');
     card.innerHTML = `
       <div class="body">
         <div class="row1">
-          <span class="step-no">#${s.idx}</span>
+          <span class="step-no">事件 ${s.substep}</span>
           <span class="atype a-${esc(a.action||'')}">${esc(a.action||'?')}</span>
           ${a.decision_source?`<span class="badge" style="background:#e0e7ff;color:#3730a3">${esc(a.decision_source)}</span>`:''}
         </div>
