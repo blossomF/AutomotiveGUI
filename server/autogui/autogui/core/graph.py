@@ -129,6 +129,8 @@ class Runner:
             self.glm._log = self.log
         tools.dev().trace_log = self.log
         tools.dev()._dump_137_diagnosed = False
+        tools.dev()._dump_timeout_streak = 0
+        tools.dev()._dump_skip_once = False
         self.device_serial = tools.dev().serial
         if self.executor is None:
             self.executor, note = make_executor(self.cfg.exec_mode)
@@ -620,13 +622,19 @@ class Runner:
 
     def _wait_for_launch_ad(self, obs: Observation, screen: ScreenGeometry
                             ) -> tuple[Observation, ScreenGeometry]:
-        if not self._is_launch_ad(obs.xml):
+        identified_ad = self._is_launch_ad(obs.xml)
+        # QQ Music's splash ad can expose an unlabeled XML tree. On the first
+        # post-launch observation, retry once before paying for a VLM call.
+        suspected_unlabeled_ad = (self.context.launch_note == "QQ音乐"
+                                  and not obs.tree_usable and not identified_ad)
+        if not identified_ad and not suspected_unlabeled_ad:
             return obs, screen
         if getattr(self.log, "debug", False):
             self.log.save_image(f"step{self.log.step:02d}_ad_before", obs.png)
         elapsed = time.monotonic() - self.launch_monotonic
         remaining = max(0.0, 6.0 - elapsed)
-        self.log.phase("ad", f"启动广告已识别；距启动 {elapsed:.1f}s，等待 {remaining:.1f}s 后重抓")
+        reason = "启动广告已识别" if identified_ad else "QQ音乐启动首帧无可用控件，补抓以排除无标签广告"
+        self.log.phase("ad", f"{reason}；距启动 {elapsed:.1f}s，等待 {remaining:.1f}s 后重抓")
         if remaining:
             time.sleep(remaining)
         try:
@@ -648,8 +656,10 @@ class Runner:
                            shot_ms=getattr(refreshed, "shot_ms", None),
                            dump_ms=getattr(refreshed, "tree_ms", None))
         else:
-            self.log.phase("ad", "广告已消失，进入正式决策" if not self._is_launch_ad(refreshed.xml)
-                           else "6 秒后仍有广告，交由模型处理",
+            cleared = not self._is_launch_ad(refreshed.xml) and (
+                identified_ad or getattr(refreshed, "tree_usable", False))
+            self.log.phase("ad", "广告已消失，进入正式决策" if cleared
+                           else "重抓后仍无可用控件或仍有广告，交由模型处理",
                            shot_ms=getattr(refreshed, "shot_ms", None),
                            dump_ms=getattr(refreshed, "tree_ms", None))
         return refreshed, new_screen
