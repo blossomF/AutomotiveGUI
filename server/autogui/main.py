@@ -54,7 +54,8 @@ def _run_skill_direct(args, cfg, tools) -> int:
     """显式 --skill-only 调试入口：跳过模型直接执行配方。"""
     from autogui.skills.base import SkillBook, SkillMiss
 
-    book = SkillBook(Path(__file__).resolve().parent / cfg.skills.directory, tools.dev(), tools.text_input())
+    book = SkillBook(Path(__file__).resolve().parent / cfg.skills.directory, tools.dev(), tools.text_input(),
+                     app_packages={a.name: a.package for a in (cfg.apps or []) if a.package})
     print("可用配方：\n" + "\n".join(sorted(book.by_id)) + "\n")
 
     key, _, param = args.task.partition("=")

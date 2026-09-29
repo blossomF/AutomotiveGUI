@@ -133,7 +133,8 @@ class Runner:
             if note:
                 print(f"  ⚠ {note}")
         if self.cfg.skills.enabled and self.book is None:
-            self.book = SkillBook(PROJECT_ROOT / self.cfg.skills.directory, tools.dev(), tools.text_input())
+            self.book = SkillBook(PROJECT_ROOT / self.cfg.skills.directory, tools.dev(), tools.text_input(),
+                                  app_packages={a.name: a.package for a in (self.cfg.apps or []) if a.package})
             self.context.skill_index = self.book.index()
         self.page_hint_book = PageHintBook(PROJECT_ROOT / self.cfg.skills.directory)
         # 把 config.yaml 的 apps 段接进提示词。此前这个初始化配置只被

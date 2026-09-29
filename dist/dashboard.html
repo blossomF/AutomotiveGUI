@@ -156,6 +156,14 @@ function buildSummary(stem, evs, lineCount){
 // 决策链明细：每条事件一张卡片（finish 只用于汇总，不单独成卡）
 function buildDetail(stem, evs){
   let status = 'running', finishUsage = {}, finishSteps = 0, steps = [], prevT = 0;
+  // 任务开始墙钟时刻（文件名末尾 -YYYYMMDD-HHMMSS）：旧日志无 wall 字段时用 t 偏移还原 HH:MM:SS
+  const stampM = String(stem).match(/-(\d{8})-(\d{6})$/);
+  let startMs = 0;
+  if(stampM){
+    const d = stampM[1], c = stampM[2];
+    startMs = new Date(+d.slice(0,4), +d.slice(4,6)-1, +d.slice(6,8),
+                       +c.slice(0,2), +c.slice(2,4), +c.slice(4,6)).getTime();
+  }
 
   evs.forEach((ev, idx) => {
     const phase = ev.phase || 'log';
@@ -173,7 +181,7 @@ function buildDetail(stem, evs){
     // 事件自带指标（路由 / 屏幕指纹 / 调用次数 …）-> 卡片 detail
     const metrics = {};
     Object.keys(ev).forEach(k => {
-      if(k !== 't' && k !== 'step' && k !== 'phase' && k !== 'msg') metrics[k] = ev[k];
+      if(k !== 't' && k !== 'wall' && k !== 'step' && k !== 'phase' && k !== 'msg') metrics[k] = ev[k];
     });
 
     // token 兼容 int 或 {input,output}
@@ -189,8 +197,13 @@ function buildDetail(stem, evs){
     const dt = prevT ? Math.round((t - prevT) * 100) / 100 : 0;
     prevT = t;
 
+    // 每步墙钟时间（HH:MM:SS）：优先事件自带 wall（新版日志），否则 起始时刻 + t 还原
+    let wallTime = (typeof ev.wall === 'string' && ev.wall) ? ev.wall : '';
+    if(!wallTime && startMs) wallTime = new Date(startMs + t * 1000).toTimeString().slice(0, 8);
+
     steps.push({
       step: stepNo,
+      wall_time: wallTime || null,
       action: Object.assign({action: phase, summary: msg, explain: msg}, metrics),
       inference_time: 0, execution_time: 0, total_time: dt,
       tokens: tokenD, evidence: null, image: null, noop: false
@@ -297,7 +310,7 @@ function renderTask(stem){
         <div class="row1">
           <span class="step-no">#${s.step}</span>
           <span class="atype a-${esc(a.action||'')}">${esc(a.action||'?')}</span>
-          <span class="timing">t+${s.total_time}s</span>
+          <span class="timing">${s.wall_time ? s.wall_time + '  cost:' + s.total_time + 's' : 't+' + s.total_time + 's'}</span>
           ${a.decision_source?`<span class="badge" style="background:#e0e7ff;color:#3730a3">${esc(a.decision_source)}</span>`:''}
         </div>
         ${detail?`<div class="meta">${detail}</div>`:''}

@@ -74,8 +74,11 @@ class DecisionLog:
     # ── 输出 ─────────────────────────────────────────────────────────────────
 
     def phase(self, phase: str, message: str, *, step: int | None = None, **metrics) -> None:
-        """输出一行：``[Step 3] [decide] 点击搜索框 (glms=1 in=3120 out=96)``。"""
-        self.events.append({"t": round(time.time() - self.started, 3), "step": step if step is not None else self.step,
+        """输出一行：``[19:11:51] [Step 3] [decide] 点击搜索框 (glms=1 in=3120 out=96)``。"""
+        now = time.time()
+        wall = time.strftime("%H:%M:%S")
+        self.events.append({"t": round(now - self.started, 3), "wall": wall,
+                            "step": step if step is not None else self.step,
                             "phase": phase, "msg": message, **metrics})
         self._write_jsonl()
         if not self.verbose:
@@ -83,7 +86,7 @@ class DecisionLog:
         n = self.step if step is None else step
         tail = "".join(f" {k}={v}" for k, v in metrics.items() if v is not None and v != "")
         label = _c(f"{phase:<9}", _PHASE_COLOR.get(phase, "0"))
-        print(f"[Step {n}] {label} {message}{tail}")
+        print(f"[{wall}] [Step {n}] {label} {message}{tail}")
 
     def step_begin(self, step: int) -> None:
         self.step = step
@@ -189,7 +192,8 @@ class DecisionLog:
         text = "\n".join(lines)
         if self.verbose:
             print(text)
-        self.events.append({"t": round(elapsed, 3), "phase": "finish", "msg": status, "success": success,
+        self.events.append({"t": round(elapsed, 3), "wall": time.strftime("%H:%M:%S"),
+                            "phase": "finish", "msg": status, "success": success,
                             "steps": steps, "usage": usage, "routes": route_counts})
         self._write_jsonl()
         self.close()

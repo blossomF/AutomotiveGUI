@@ -31,6 +31,7 @@ import sys
 import threading
 import time
 import urllib.parse
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -172,6 +173,15 @@ def get_task_detail(task_dir: str) -> dict:
     finish_steps = 0
     steps = []
     prev_t = 0.0
+    # 任务开始墙钟时刻：文件名末尾 -YYYYMMDD-HHMMSS（DecisionLog 落盘时写入）。
+    # 旧日志事件无 wall 字段时，用它 + 相对时间 t 还原每步的 HH:MM:SS。
+    start_dt = None
+    _m = re.search(r"-(\d{8})-(\d{6})$", task_dir)
+    if _m:
+        try:
+            start_dt = datetime.strptime(_m.group(1) + _m.group(2), "%Y%m%d%H%M%S")
+        except ValueError:
+            start_dt = None
     for idx, ev in enumerate(events):
         phase = ev.get("phase", "log")
         msg = ev.get("msg", "")
@@ -187,7 +197,7 @@ def get_task_detail(task_dir: str) -> dict:
             continue
         # 事件自带的指标（路由/屏幕指纹/调用次数等），用于卡片 detail
         metrics = {k: v for k, v in ev.items()
-                   if k not in ("t", "step", "phase", "msg")}
+                   if k not in ("t", "wall", "step", "phase", "msg")}
         # token 解析（兼容 int 或 {input,output}）
         tok = metrics.get("tokens")
         if isinstance(tok, dict):
@@ -200,10 +210,15 @@ def get_task_detail(task_dir: str) -> dict:
         t = float(ev.get("t", 0.0) or 0.0)
         dt = round(t - prev_t, 2) if prev_t else 0.0
         prev_t = t
+        # 每步墙钟时间（HH:MM:SS）：优先事件自带 wall（新版日志），否则 起始时刻 + t 还原
+        wall = ev.get("wall") if isinstance(ev.get("wall"), str) and ev.get("wall") else None
+        if wall is None and start_dt is not None:
+            wall = (start_dt + timedelta(seconds=t)).strftime("%H:%M:%S")
         action = {"action": phase, "summary": msg, "explain": msg, **metrics}
         steps.append({
             "idx": idx,              # 唯一事件序号：前端用它做 key，避免同 graph step 下多事件互相覆盖
             "step": step_no,         # graph step 编号（JSONL 里的 step 字段）
+            "wall_time": wall,       # 该步发生的系统时间 HH:MM:SS（可为 None）
             "action": action,
             "inference_time": 0,
             "execution_time": 0,
@@ -247,7 +262,7 @@ def get_live(task_dir: str) -> dict:
     if steps:
         s = steps[-1]
         last = {k: s.get(k) for k in (
-            "idx", "step", "action", "image", "total_time", "execution_time",
+            "idx", "step", "wall_time", "action", "image", "total_time", "execution_time",
             "inference_time", "tokens", "noop", "evidence",
         )}
     return {
@@ -884,7 +899,7 @@ function liveItemHTML(s){
   const tk = s.tokens || {}, tok = (tk.input || 0) + (tk.output || 0);
   const extra = Object.entries(a).filter(([k]) => !['action','summary','explain'].includes(k))
     .map(([k,v]) => k + '=' + (typeof v === 'object' ? JSON.stringify(v) : v)).join(' · ');
-  const meta = 't+' + (s.total_time || 0) + 's' + (tok ? ' · ' + tok + ' tok' : '');
+  const meta = (s.wall_time ? s.wall_time + '  cost:' + (s.total_time || 0) + 's' : 't+' + (s.total_time || 0) + 's') + (tok ? ' · ' + tok + ' tok' : '');
   return '<div class="live-item" data-step="' + esc(stepKey(s)) + '">'
     + '<div class="mini-body">'
     +   '<div class="mini-head">'
@@ -1133,7 +1148,7 @@ async function loadTask(dir, animate){
         </div>
         ${detail?`<div class="meta">${detail}</div>`:''}
         ${explain}
-        <div class="timing">推理 ${s.inference_time}s · 执行 ${s.execution_time}s · 总 ${s.total_time}s · token ${ (s.tokens.input||0)+(s.tokens.output||0) }</div>
+        <div class="timing">${s.wall_time ? s.wall_time + '  ' : ''}推理 ${s.inference_time}s · 执行 ${s.execution_time}s · 总 ${s.total_time}s · token ${ (s.tokens.input||0)+(s.tokens.output||0) }</div>
         ${ev}${noop}
       </div>`;
     tl.appendChild(card);

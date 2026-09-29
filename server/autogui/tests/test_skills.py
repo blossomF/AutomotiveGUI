@@ -71,6 +71,26 @@ def test_missing_skill_dir_is_not_an_error(tmp_path):
     assert empty.index() == "（无）"
 
 
+def test_configured_app_package_overrides_yaml_package(tmp_path):
+    """包名以页面配置（config.yaml apps 段）为准：已绑定技能的配置包名覆盖 YAML。"""
+    (tmp_path / "music").mkdir()
+    (tmp_path / "music" / "skill.yaml").write_text(
+        MUSIC_YAML + "configured_app: 音乐\n", encoding="utf-8")
+    book = SkillBook(tmp_path, device=None, text_input=None,
+                     app_packages={"音乐": "com.car.music2"})   # type: ignore[arg-type]
+    assert book.get("music.play_song").package == "com.car.music2"
+
+
+def test_yaml_package_kept_when_app_not_in_config(tmp_path):
+    """绑定应用不在配置里时，回退 YAML 包名。"""
+    (tmp_path / "music").mkdir()
+    (tmp_path / "music" / "skill.yaml").write_text(
+        MUSIC_YAML + "configured_app: 音乐\n", encoding="utf-8")
+    book = SkillBook(tmp_path, device=None, text_input=None,
+                     app_packages={"别的App": "com.other"})   # type: ignore[arg-type]
+    assert book.get("music.play_song").package == "com.car.music"
+
+
 def test_malformed_yaml_is_skipped_not_fatal(tmp_path):
     (tmp_path / "broken").mkdir()
     (tmp_path / "broken" / "skill.yaml").write_text("name: [unclosed", encoding="utf-8")

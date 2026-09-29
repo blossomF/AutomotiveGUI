@@ -1,7 +1,7 @@
 # 哔哩哔哩车机版
 name: bilibili
-app:
-  package: com.bilibili.bilithings   # 车机版真身（2026-09-21 adb 实测；原 tv.danmaku.bili 是手机版，车机无此包）
+configured_app: 哔哩哔哩
+# 包名不写在这里：统一取 config.yaml apps 段（设置页设备探测）中「哔哩哔哩」的 package
 
 popups:
   - { detect: "青少年模式", button: "以后再说" }

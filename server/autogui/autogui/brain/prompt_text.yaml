@@ -76,36 +76,48 @@ json_retry_user: 上一回复无法解析为 JSON（$error）。$output_rule 重
 
 context_task: 任务：$task
 context_action_types: 动作类型：$action_names
+
 context_app_index: |-
   已缓存直启应用（仅供 LAUNCH 填包名；不是设备应用全集，未列出的应用可从 HOME 界面寻找）：
   $app_index
+
 context_skill_index: |-
   可用技能：
   $skill_index
 context_active_skill: |-
   当前已加载的技能指导（不要再次选择同一 SKILL）：
   $guide
+
 context_input_guide: |-
   当前中文输入问题：
   $guide
+
 context_launch_note: |-
-  【应用刚启动：$app】若看到几秒后自动消失的倒计时广告，优先 WAIT 2~3 秒再观察，不要抢点“跳过”。广告消失只代表无需跳过；继续依据新界面完成主任务。协议、通知和位置权限按任务与界面内容判断。
+  【应用刚启动：$app】若看到几秒后自动消失的倒计时广告，优先 WAIT 1.5秒再观察，不要抢点“跳过”。广告消失只代表无需跳过；继续依据新界面完成主任务。协议、通知和位置权限按任务与界面内容判断。
+
 context_entities: |-
   已确认的关键信息（后续步骤直接使用，不要重新推断）：
   $entities
+
 context_history: |-
   历史：
   $history
+
 context_empty_history: （第一步，尚无历史）
+
 context_progress: 进度：$progress
+
 context_candidates: |-
   当前屏幕可寻址候选（#编号 = node_ref，回复时用 node_ref，不要复制坐标）：
   $candidates
+
 picker_guide: |-
   当前有可读数值滚轮。要设定目标值时用 ROLL_TO(node_ref,target,delta_units?)；target 保留单位，如 19时、00分。根据候选当前值计算 delta_units=目标值-当前值，不要猜像素或用 DRAG 跨越滚轮边界。执行器会短滑、读取新值并修正；达标后另行点击确认，并核对表单。
+
 context_page_hints: |-
   当前页面提示（仅依据本次控件树标记匹配）：
   $page_hints
+
 context_trimmed: （上下文因预算已裁剪：保留最近 $history_window 步、$candidate_count 个候选）
 
 skill_guide_wrapper: |-
