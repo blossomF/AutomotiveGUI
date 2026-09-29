@@ -197,7 +197,13 @@ def _replace_apps_section(source: str, apps: list) -> str:
         lines[pos:pos] = [f"{l}{newline}" for l in block]
         return "".join(lines)
     if lines[head][len("apps:"):].strip():
-        lines[head:head + 1] = (["apps:"] + entries) if entries else [f"apps: []{newline}"]
+        # head 行是 "apps: []" 之类的占位（非裸 "apps:"）：整行替换时必须补回
+        # 行尾换行符，否则 entries 会拼到同一行产出非法 YAML（safe_load 校验报
+        # "sequence entries are not allowed here"）。
+        if entries:
+            lines[head:head + 1] = [f"{l}{newline}" for l in ["apps:"] + entries]
+        else:
+            lines[head] = f"apps: []{newline}"
         return "".join(lines)
     tail = next((i for i in range(head + 1, len(lines))
                  if lines[i].strip() and not lines[i][0].isspace()
