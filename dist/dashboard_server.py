@@ -58,6 +58,19 @@ LOGS_ROOT = AUTOGUI_DIR / "artifacts" / "logs"   # 决策链日志（扁平 *.js
 CONFIG_PATH = AUTOGUI_DIR / "config.yaml"
 _SETTINGS_LOCK = threading.Lock()
 
+
+def task_xml_artifact(task_dir: str, filename: str) -> Path | None:
+    """只允许读取已有任务 debug 目录下的单个 XML 文件。"""
+    if not task_dir or not filename or Path(task_dir).name != task_dir or Path(filename).name != filename:
+        return None
+    if Path(filename).suffix.lower() != ".xml" or not (LOGS_ROOT / f"{task_dir}.jsonl").is_file():
+        return None
+    task_path = (LOGS_ROOT / task_dir).resolve()
+    if task_path.parent != LOGS_ROOT.resolve():
+        return None
+    artifact = (task_path / filename).resolve()
+    return artifact if artifact.parent == task_path and artifact.is_file() else None
+
 # 当前由面板拉起的运行进程（同一时刻最多一个）
 _RUN_LOCK = threading.Lock()
 _RUNNING_PROC = None
@@ -456,6 +469,14 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json({"error": "task not found"}, 404)
                 else:
                     self._send_json(detail)
+            elif path == "/api/artifact":
+                task_dir = qs.get("task", [""])[0]
+                filename = qs.get("file", [""])[0]
+                artifact = task_xml_artifact(task_dir, filename)
+                if artifact is None:
+                    self._send(404, b"not found", "text/plain; charset=utf-8")
+                else:
+                    self._send(200, artifact.read_bytes(), "application/xml; charset=utf-8")
             elif path == "/api/live":
                 task_dir = qs.get("task", [""])[0]
                 self._send_json(get_live(task_dir))
@@ -724,20 +745,23 @@ BASE_CSS = r"""
   .a-SCROLL { background:#0891b2; } .a-AWAKE { background:#ca8a04; }
   .a-COMPLETE { background:#059669; }
   /* AutomotiveGUI 决策链 phase 配色（无截图，靠颜色区分阶段） */
-  .a-perceive { background:#0891b2; } .a-route { background:#7c3aed; }
-  .a-decide { background:#2563eb; } .a-act { background:#059669; }
-  .a-verify { background:#0891b2; } .a-recovery { background:#ca8a04; }
-  .a-guard { background:#64748b; } .a-finish { background:#059669; }
-  .a-skill { background:#7c3aed; } .a-error { background:#dc2626; } .a-log { background:#475569; }
+  .a-perceive { background:#0369a1; } .a-route { background:#6d28d9; }
+  .a-decide { background:#1d4ed8; } .a-act { background:#047857; }
+  .a-verify { background:#0f766e; } .a-recovery { background:#c2410c; }
+  .a-guard { background:#334155; } .a-finish { background:#15803d; }
+  .a-skill { background:#7e22ce; } .a-error { background:#b91c1c; } .a-log { background:#475569; }
   .a-setup { background:#475569; } .a-xml { background:#0e7490; }
-  .a-glm_request { background:#4f46e5; } .a-glm_response { background:#9333ea; }
-  .a-input { background:#b45309; } .a-ad { background:#d97706; }
+  .a-glm_request { background:#be185d; } .a-glm_response { background:#db2777; }
+  .a-input { background:#a16207; } .a-ad { background:#b45309; }
   .card.p-setup { border-left:4px solid #475569; } .card.p-xml { border-left:4px solid #0e7490; }
-  .card.p-glm_request { border-left:4px solid #4f46e5; } .card.p-glm_response { border-left:4px solid #9333ea; }
-  .card.p-perceive { border-left:4px solid #0891b2; } .card.p-route { border-left:4px solid #7c3aed; }
-  .card.p-decide { border-left:4px solid #2563eb; } .card.p-act { border-left:4px solid #059669; }
-  .card.p-verify { border-left:4px solid #0891b2; } .card.p-ad { border-left:4px solid #d97706; }
-  .card.p-input { border-left:4px solid #b45309; } .card.p-error { border-left:4px solid #dc2626; }
+  .card.p-glm_request { border-left:4px solid #be185d; } .card.p-glm_response { border-left:4px solid #db2777; }
+  .card.p-perceive { border-left:4px solid #0369a1; } .card.p-route { border-left:4px solid #6d28d9; }
+  .card.p-decide { border-left:4px solid #1d4ed8; } .card.p-act { border-left:4px solid #047857; }
+  .card.p-verify { border-left:4px solid #0f766e; } .card.p-recovery { border-left:4px solid #c2410c; }
+  .card.p-guard { border-left:4px solid #334155; } .card.p-finish { border-left:4px solid #15803d; }
+  .card.p-skill { border-left:4px solid #7e22ce; } .card.p-ad { border-left:4px solid #b45309; }
+  .card.p-input { border-left:4px solid #a16207; } .card.p-error { border-left:4px solid #b91c1c; }
+  .card.p-log { border-left:4px solid #475569; }
   .step-no { color:#7b8794; font-weight:600; }
   .meta { margin:8px 0; font-size:13px; color:#3e4c59; line-height:1.6; word-break:break-all; }
   .meta b { color:#1f2933; }
@@ -911,12 +935,22 @@ function clearLive(){
 function stepKey(s){ return (s && s.idx != null) ? String(s.idx) : (s && s.step != null ? String(s.step) : ''); }
 function graphStepLabel(n){ return Number(n) === 0 ? '任务准备' : '第 ' + n + ' 步'; }
 
+function xmlSummary(a){
+  if(a.action !== 'xml') return '';
+  const chars = Number(a.chars || 0).toLocaleString('zh-CN');
+  const time = Number.isFinite(Number(a.dump_ms)) ? ' · ' + (Number(a.dump_ms) / 1000).toFixed(2) + ' 秒' : '';
+  return a.status === 'ok' ? 'XML 获取成功 · ' + chars + ' 字符' + time
+       : a.status === 'empty' ? 'XML 内容为空' + time
+       : 'XML 获取失败（' + (a.status || '状态未知') + '）' + time;
+}
+
 function liveItemHTML(s, firstInStep){
   const a = s.action || {};
   const phase = a.action || 'log';
-  const msg = a.summary || a.explain || '';
+  const msg = xmlSummary(a) || a.summary || a.explain || '';
   const tk = s.tokens || {}, tok = (tk.input || 0) + (tk.output || 0);
-  const extra = Object.entries(a).filter(([k]) => !['action','summary','explain'].includes(k))
+  const extra = Object.entries(a).filter(([k,v]) => !['action','summary','explain'].includes(k)
+      && (phase !== 'xml' || (a.status !== 'ok' && v !== '' && v != null)))
     .map(([k,v]) => k + '=' + (typeof v === 'object' ? JSON.stringify(v) : v)).join(' · ');
   const meta = (s.wall_time ? s.wall_time + '  cost:' + (s.total_time || 0) + 's' : 't+' + (s.total_time || 0) + 's') + (tok ? ' · ' + tok + ' tok' : '');
   return '<div class="live-item" data-step="' + esc(stepKey(s)) + '">'
@@ -1122,6 +1156,29 @@ try { window.name = 'lg_logs'; } catch(e){}
 
 let currentDir = null, timer = null;
 
+function xmlLogView(a, taskDir){
+  if(a.action !== 'xml') return null;
+  const elapsed = Number.isFinite(Number(a.dump_ms)) ? ' · ' + (Number(a.dump_ms) / 1000).toFixed(2) + ' 秒' : '';
+  const count = Number(a.chars || 0).toLocaleString('zh-CN');
+  const title = a.status === 'ok' ? 'XML 获取成功 · ' + count + ' 字符' + elapsed
+              : a.status === 'empty' ? 'XML 内容为空' + elapsed
+              : 'XML 获取失败（' + (a.status || '状态未知') + '）' + elapsed;
+  const url = '/api/artifact?task=' + encodeURIComponent(taskDir)
+            + '&file=' + encodeURIComponent(a.artifact || '');
+  const link = a.artifact ? `<a href="${url}" target="_blank" rel="noopener">查看原始 XML</a>` : '';
+  const labels = {status:'状态', adb_detail:'ADB 错误', command:'ADB 命令',
+    dump_exit:'生成退出码', dump_stdout:'生成输出', dump_stderr:'生成错误',
+    read_exit:'读取退出码', remote_file:'设备文件检查', stage:'失败阶段',
+    adb_exit:'ADB 退出码', dump_ms:'耗时（毫秒）', chars:'字符数'};
+  const fields = Object.entries(a).filter(([k,v]) =>
+    !['action','summary','explain','artifact'].includes(k) && v !== '' && v != null)
+    .map(([k,v]) => `<b>${esc(labels[k] || k)}：</b>${esc(typeof v === 'object' ? JSON.stringify(v) : v)}`)
+    .join(' · ');
+  const diagnostics = a.status === 'ok' ? ''
+    : `<details class="meta"><summary>诊断详情</summary>${fields}</details>`;
+  return {summary: title, detail: link, diagnostics};
+}
+
 async function loadTasks(prefer){
   const r = await fetch('/api/tasks'); const list = await r.json();
   const sel = $('#taskSel'); sel.innerHTML = '';
@@ -1163,8 +1220,11 @@ async function loadTask(dir, animate){
       previousGraphStep = s.step;
     }
     const a = s.action || {};
-    const explain = a.explain ? `<div class="meta"><b>说明：</b>${esc(a.explain)}</div>` : '';
-    const detail = Object.entries(a).filter(([k]) => !['action','summary','explain','decision_source','_tool_call_id','_from_tool','chinese_resolved','typed_value'].includes(k))
+    const xml = xmlLogView(a, dir);
+    const explain = xml ? `<div class="meta"><b>${esc(xml.summary)}</b></div>`
+      : (a.explain ? `<div class="meta"><b>说明：</b>${esc(a.explain)}</div>` : '');
+    const detail = xml ? xml.detail : Object.entries(a)
+      .filter(([k]) => !['action','summary','explain','decision_source','_tool_call_id','_from_tool','chinese_resolved','typed_value'].includes(k))
       .map(([k,v]) => `<b>${esc(k)}:</b> ${esc(v)}`).join(' · ');
     const ev = s.evidence ? `<div class="evidence">✅ 完成证据：${esc(s.evidence)}</div>` : '';
     const noop = s.noop ? `<div class="noop">⚠️ 上一步点击后界面无变化（控件树+画面均未变）</div>` : '';
@@ -1179,6 +1239,7 @@ async function loadTask(dir, animate){
         </div>
         ${detail?`<div class="meta">${detail}</div>`:''}
         ${explain}
+        ${xml ? xml.diagnostics : ''}
         <div class="timing">${s.wall_time ? s.wall_time + '  ' : ''}推理 ${s.inference_time}s · 执行 ${s.execution_time}s · 总 ${s.total_time}s · token ${ (s.tokens.input||0)+(s.tokens.output||0) }</div>
         ${ev}${noop}
       </div>`;

@@ -55,25 +55,26 @@
   .a-SCROLL { background:#0891b2; } .a-AWAKE { background:#ca8a04; }
   .a-COMPLETE { background:#059669; }
   /* AutomotiveGUI 决策链 phase 配色（无截图，靠颜色区分阶段） */
-  .a-perceive { background:#0891b2; } .a-route { background:#7c3aed; }
-  .a-decide { background:#2563eb; } .a-act { background:#059669; }
-  .a-verify { background:#0891b2; } .a-recovery { background:#ca8a04; }
-  .a-guard { background:#64748b; } .a-finish { background:#059669; }
-  .a-skill { background:#7c3aed; } .a-error { background:#dc2626; } .a-log { background:#475569; }
+  .a-perceive { background:#0369a1; } .a-route { background:#6d28d9; }
+  .a-decide { background:#1d4ed8; } .a-act { background:#047857; }
+  .a-verify { background:#0f766e; } .a-recovery { background:#c2410c; }
+  .a-guard { background:#334155; } .a-finish { background:#15803d; }
+  .a-skill { background:#7e22ce; } .a-error { background:#b91c1c; } .a-log { background:#475569; }
   .a-setup { background:#475569; } .a-xml { background:#0e7490; }
-  .a-glm_request { background:#4f46e5; } .a-glm_response { background:#9333ea; }
-  .a-input { background:#b45309; } .a-ad { background:#d97706; }
+  .a-glm_request { background:#be185d; } .a-glm_response { background:#db2777; }
+  .a-input { background:#a16207; } .a-ad { background:#b45309; }
   .phase-group { margin:14px 0 7px; padding:8px 10px; border-radius:8px;
                  background:#eaf2ff; color:#174ea6; font-weight:700; font-size:14px; }
   /* 卡片左侧色条跟 phase 联动 */
-  .card.p-perceive { border-left-color:#0891b2; } .card.p-route { border-left-color:#7c3aed; }
-  .card.p-decide { border-left-color:#2563eb; } .card.p-act { border-left-color:#059669; }
-  .card.p-verify { border-left-color:#0891b2; } .card.p-recovery { border-left-color:#ca8a04; }
-  .card.p-guard { border-left-color:#64748b; } .card.p-finish { border-left-color:#059669; }
-  .card.p-skill { border-left-color:#7c3aed; } .card.p-error { border-left-color:#dc2626; }
-  .card.p-xml { border-left-color:#0e7490; } .card.p-glm_request { border-left-color:#4f46e5; }
-  .card.p-glm_response { border-left-color:#9333ea; } .card.p-ad { border-left-color:#d97706; }
-  .card.p-input { border-left-color:#b45309; }
+  .card.p-perceive { border-left-color:#0369a1; } .card.p-route { border-left-color:#6d28d9; }
+  .card.p-decide { border-left-color:#1d4ed8; } .card.p-act { border-left-color:#047857; }
+  .card.p-verify { border-left-color:#0f766e; } .card.p-recovery { border-left-color:#c2410c; }
+  .card.p-guard { border-left-color:#334155; } .card.p-finish { border-left-color:#15803d; }
+  .card.p-skill { border-left-color:#7e22ce; } .card.p-error { border-left-color:#b91c1c; }
+  .card.p-setup { border-left-color:#475569; } .card.p-xml { border-left-color:#0e7490; }
+  .card.p-glm_request { border-left-color:#be185d; }
+  .card.p-glm_response { border-left-color:#db2777; } .card.p-ad { border-left-color:#b45309; }
+  .card.p-input { border-left-color:#a16207; }
   .card.p-log { border-left-color:#475569; }
   .step-no { color:#7b8794; font-weight:600; }
   .meta { margin:8px 0; font-size:13px; color:#3e4c59; line-height:1.6; word-break:break-all; }
@@ -262,6 +263,31 @@ const $ = (s) => document.querySelector(s);
 const FILES  = [];   // [{stem, file}]  保留 File 句柄，便于「重新读取」
 const TASKS  = [];   // 概要列表（按名字倒序）
 const DETAIL = {};   // stem -> detail
+const ARTIFACTS = {}; // 选择整个日志文件夹时，按「任务名/文件名」索引 XML
+
+function xmlLogView(a, stem){
+  if(a.action !== 'xml') return null;
+  const elapsed = Number.isFinite(Number(a.dump_ms)) ? ' · ' + (Number(a.dump_ms) / 1000).toFixed(2) + ' 秒' : '';
+  const count = Number(a.chars || 0).toLocaleString('zh-CN');
+  const title = a.status === 'ok' ? 'XML 获取成功 · ' + count + ' 字符' + elapsed
+              : a.status === 'empty' ? 'XML 内容为空' + elapsed
+              : 'XML 获取失败（' + (a.status || '状态未知') + '）' + elapsed;
+  const key = stem + '/' + (a.artifact || '');
+  const link = a.artifact && ARTIFACTS[key]
+    ? `<a href="#" data-xml-key="${encodeURIComponent(key)}">查看原始 XML</a>`
+    : (a.artifact ? `原始 XML：${esc(a.artifact)}（选择整个日志文件夹可打开）` : '');
+  const labels = {status:'状态', adb_detail:'ADB 错误', command:'ADB 命令',
+    dump_exit:'生成退出码', dump_stdout:'生成输出', dump_stderr:'生成错误',
+    read_exit:'读取退出码', remote_file:'设备文件检查', stage:'失败阶段',
+    adb_exit:'ADB 退出码', dump_ms:'耗时（毫秒）', chars:'字符数'};
+  const fields = Object.entries(a).filter(([k,v]) =>
+    !['action','summary','explain','artifact'].includes(k) && v !== '' && v != null)
+    .map(([k,v]) => `<b>${esc(labels[k] || k)}：</b>${esc(typeof v === 'object' ? JSON.stringify(v) : v)}`)
+    .join(' · ');
+  const diagnostics = a.status === 'ok' ? ''
+    : `<details class="meta"><summary>诊断详情</summary>${fields}</details>`;
+  return {summary: title, detail: link, diagnostics};
+}
 
 function setInfo(t){ $('#pickInfo').textContent = t; }
 
@@ -323,8 +349,10 @@ function renderTask(stem){
       previousGraphStep = s.step;
     }
     const a = s.action || {};
-    const explain = a.explain ? `<div class="meta"><b>说明：</b>${esc(a.explain)}</div>` : '';
-    const detail = Object.entries(a)
+    const xml = xmlLogView(a, stem);
+    const explain = xml ? `<div class="meta"><b>${esc(xml.summary)}</b></div>`
+      : (a.explain ? `<div class="meta"><b>说明：</b>${esc(a.explain)}</div>` : '');
+    const detail = xml ? xml.detail : Object.entries(a)
       .filter(([k]) => !['action','summary','explain','decision_source','_tool_call_id','_from_tool','chinese_resolved','typed_value'].includes(k))
       .map(([k,v]) => `<b>${esc(k)}:</b> ${esc(typeof v === 'object' ? JSON.stringify(v) : v)}`)
       .join(' · ');
@@ -341,6 +369,7 @@ function renderTask(stem){
         </div>
         ${detail?`<div class="meta">${detail}</div>`:''}
         ${explain}
+        ${xml ? xml.diagnostics : ''}
         <div class="timing">token ${ (s.tokens.input||0)+(s.tokens.output||0) }（入 ${s.tokens.input} / 出 ${s.tokens.output}）</div>
         ${noop}
       </div>`;
@@ -359,6 +388,13 @@ async function loadFromFiles(fileList){
   FILES.length = 0;
   TASKS.length = 0;
   Object.keys(DETAIL).forEach(k => delete DETAIL[k]);
+  Object.keys(ARTIFACTS).forEach(k => delete ARTIFACTS[k]);
+
+  for(const f of fileList){
+    if(!/\.xml$/i.test(f.name)) continue;
+    const parts = String(f.webkitRelativePath || f.relativePath || '').split(/[\\/]/);
+    if(parts.length >= 3) ARTIFACTS[parts[parts.length - 2] + '/' + f.name] = f;
+  }
 
   for(const f of jls){
     const stem = f.name.replace(/\.jsonl$/i, '');
@@ -392,6 +428,16 @@ $('#fileInput').onchange  = e => loadFromFiles(e.target.files);
 $('#loadBtn').onclick     = () => renderTask($('#taskSel').value);
 $('#reloadBtn').onclick   = () => { if(FILES.length) parseAll(); else setInfo('还没选文件'); };
 $('#taskSel').onchange    = e => renderTask(e.target.value);
+$('#timeline').addEventListener('click', e => {
+  const link = e.target.closest('[data-xml-key]');
+  if(!link) return;
+  e.preventDefault();
+  const file = ARTIFACTS[decodeURIComponent(link.dataset.xmlKey)];
+  if(!file) return;
+  const url = URL.createObjectURL(file);
+  window.open(url, '_blank', 'noopener');
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+});
 
 // 拖拽（支持拖文件夹）
 function readAllEntries(reader){
