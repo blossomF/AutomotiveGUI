@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
 from autogui.bridge.adb import node_attr, node_bounds, node_class, node_clickable, node_desc, node_rid, node_text, nodes
@@ -45,6 +46,7 @@ class Candidate:
     focused: bool = False
     scroll_axis: str = ""
     search_text: str = ""  # full XML text for ranking; never sent to the model
+    clickable_via_parent: bool = False
 
     def as_dict(self) -> dict:
         return {
@@ -55,6 +57,7 @@ class Candidate:
             "selected": self.selected, "long_clickable": self.long_clickable,
             "editable": self.editable, "focused": self.focused,
             "scroll_axis": self.scroll_axis,
+            "clickable_via_parent": self.clickable_via_parent,
         }
 
 
@@ -159,6 +162,47 @@ def _estimated_tokens(value: str) -> int:
     return cjk + (len(value) - cjk + 3) // 4
 
 
+def _clickable_row_for_labels(xml: str, screen: tuple[int, int]) -> list[bool]:
+    """Identify labels inside bounded clickable items, excluding page wrappers.
+
+    The existing flat ``nodes()`` parser remains the source for candidates.
+    If hierarchy parsing fails or its order differs, no label is promoted.
+    """
+    sw, sh = screen
+    found: list[bool] = []
+
+    def walk(element: ET.Element, ancestors: tuple[ET.Element, ...]) -> None:
+        if element.tag == "node":
+            own = element.attrib
+            bounds = node_bounds(f'<node bounds="{own.get("bounds", "")}" />')
+            eligible = False
+            if bounds and own.get("clickable") != "true" and own.get("enabled") != "false":
+                for parent in reversed(ancestors):
+                    attrs = parent.attrib
+                    if attrs.get("clickable") != "true" or attrs.get("enabled") == "false":
+                        continue
+                    parent_bounds = node_bounds(f'<node bounds="{attrs.get("bounds", "")}" />')
+                    if not parent_bounds:
+                        continue
+                    px1, py1, px2, py2 = parent_bounds
+                    x1, y1, x2, y2 = bounds
+                    width, height = px2 - px1, py2 - py1
+                    if (px1 <= x1 < x2 <= px2 and py1 <= y1 < y2 <= py2
+                            and height <= sh * 0.25 and width * height <= sw * sh * 0.20):
+                        eligible = True
+                        break
+            found.append(eligible)
+            ancestors += (element,)
+        for child in element:
+            walk(child, ancestors)
+
+    try:
+        walk(ET.fromstring(xml), ())
+    except ET.ParseError:
+        return []
+    return found if len(found) == len(nodes(xml)) else []
+
+
 def select_candidates(cands: list[Candidate], limit: int, screen_height: int,
                       focus_terms: list[str] | None = None) -> list[Candidate]:
     """Keep task evidence, its nearby controls and navigational anchors, then spread the rest."""
@@ -252,9 +296,10 @@ def extract(
             stats.update(eligible=0, unique=0, selected=0, omitted_actionable=0)
         return []
     sw, sh = screen or (1920, 1080)
+    parent_rows = _clickable_row_for_labels(xml, (sw, sh))
 
     raw: list[Candidate] = []
-    for n in nodes(xml):
+    for node_index, n in enumerate(nodes(xml)):
         b = node_bounds(n)
         if not b:
             continue
@@ -273,6 +318,7 @@ def extract(
         desc = _clip(node_desc(n))
         rid = _rid_tail(node_rid(n))
         clickable = node_clickable(n)
+        clickable_via_parent = bool(parent_rows and parent_rows[node_index] and not clickable)
         scrollable = node_attr(n, "scrollable") == "true"
         cls = node_class(n)
         tail = cls.rsplit(".", 1)[-1]
@@ -283,6 +329,12 @@ def extract(
         label = text or desc or rid or (tail if scrollable or editable or checkable or tail in ("SeekBar", "Slider") else "")
         if not label:
             continue
+        # Tap at the visible label, inside its clickable row, rather than at
+        # the row centre where an independent trailing button may sit.
+        if clickable_via_parent and (text or desc) and not (scrollable or editable):
+            clickable = True
+        else:
+            clickable_via_parent = False
 
         w, h = x2 - x1, y2 - y1
         if w >= sw * _CONTAINER_W and h >= sh * _CONTAINER_H and not (
@@ -301,6 +353,7 @@ def extract(
             editable=editable, focused=node_attr(n, "focused") == "true",
             scroll_axis=_scroll_axis(cls, b) if scrollable else "",
             search_text=f"{node_text(n)} {node_desc(n)}",
+            clickable_via_parent=clickable_via_parent,
         ))
 
     if not raw:
@@ -328,6 +381,7 @@ def extract(
                 best.label = other.desc
         # Wrapper and child can carry different parts of one control's state.
         best.clickable |= other.clickable
+        best.clickable_via_parent |= other.clickable_via_parent
         best.scrollable |= other.scrollable
         best.scroll_axis = best.scroll_axis or other.scroll_axis
         best.checkable |= other.checkable
@@ -383,7 +437,7 @@ def render_candidates(cands: list[Candidate]) -> str:
     for c in cands:
         flags = []
         if c.clickable:
-            flags.append("可点")
+            flags.append("可点·父行" if c.clickable_via_parent else "可点")
         if c.long_clickable:
             flags.append("长按")
         if c.editable:

@@ -5,10 +5,22 @@
 """
 
 import textwrap
+from pathlib import Path
 
 import pytest
 
 from autogui.skills.base import DEFAULT_POPUPS, GENERIC_DISMISS, SkillBook, SkillMiss
+
+
+def test_qq_music_has_one_play_song_entry():
+    root = Path(__file__).resolve().parents[1] / "skills"
+    book = SkillBook(root, device=None, text_input=None)  # type: ignore[arg-type]
+    matches = [skill for skill in book.for_configured_app("QQ音乐")
+               if skill.name == "play_song"]
+    assert len(matches) == 1
+    assert matches[0].app == "music"
+    assert "添加到播放队列" in book.guidance("music.play_song", {"song": "晴天"})
+    assert matches[0].steps[-2] == {"act": "wait_for", "text": "暂停", "timeout": 8}
 
 MUSIC_YAML = textwrap.dedent(
     """

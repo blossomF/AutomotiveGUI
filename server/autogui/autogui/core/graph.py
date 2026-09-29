@@ -33,7 +33,7 @@ import io
 from dataclasses import dataclass, field
 from PIL import Image
 
-from autogui.actions import MUTATING, TERMINAL
+from autogui.actions import MUTATING, TERMINAL, image_point_to_device
 from autogui.bridge import tools
 from autogui.bridge.adb import ADBError, node_attr, node_class, node_desc, node_text, nodes
 from autogui.bridge.input import UnicodeInputUnavailable, to_pinyin_syllables
@@ -388,6 +388,19 @@ class Runner:
                 self.context.record(state.get("step", 0), route, "CLICK", "图片坐标越界；请按本轮图片尺寸重新定位", failed=True)
                 return {"action": {}, "retry_decision": False, "no_progress": state.get("no_progress", 0) + 1}
             action["image_size"] = image_size
+        if route == "vlm" and action.get("type") == "DRAG":
+            try:
+                if not image_size:
+                    raise ValueError("缺少所发送截图的尺寸")
+                for endpoint in ("from", "to"):
+                    image_point_to_device(action[endpoint], image_size,
+                                          (self.obs.width, self.obs.height))
+            except ValueError as e:
+                self.log.phase("decide", f"拖拽图片坐标无效：{e}")
+                self.context.record(state.get("step", 0), route, "DRAG", str(e), failed=True)
+                return {"action": {}, "retry_decision": False,
+                        "no_progress": state.get("no_progress", 0) + 1}
+            action["image_size"] = image_size
         if self.pending_unicode and action.get("type") == "COMPLETE":
             # XML can be absent indefinitely on WebView-heavy pages. This
             # decision already saw the current screenshot on the forced VLM
@@ -485,7 +498,7 @@ class Runner:
             action = refreshed
 
         try:
-            result = self._dispatch(action)
+            result = self._dispatch(action, route=state.get("route", "tree"))
         except UnicodeInputUnavailable as e:
             self.pending_unicode = e.text
             pinyin = to_pinyin_syllables(e.text)
@@ -514,7 +527,7 @@ class Runner:
         time.sleep(self.cfg.agent.delay_after_action)
         return {"last_action": action}
 
-    def _dispatch(self, action: dict) -> str:
+    def _dispatch(self, action: dict, route: str = "tree") -> str:
         """动作类型 → 执行器调用映射：tap/long_press/input_text/swipe/press_back/press_home/launch_app/sleep。"""
         a_type = action["type"]
         ex = self.executor
@@ -568,7 +581,7 @@ class Runner:
                 report=lambda message, **metrics: self.log.phase("roll", message, **metrics),
             )
         if a_type == "DRAG":
-            (x1, y1), (x2, y2) = self._resolve_drag(action)
+            (x1, y1), (x2, y2) = self._resolve_drag(action, route=route)
             return ex.call("swipe", x1=x1, y1=y1, x2=x2, y2=y2, ms=action.get("duration", 400))
         if a_type == "BACK":
             return ex.call("press_back")
@@ -747,8 +760,18 @@ class Runner:
         w, h = self.obs.width, self.obs.height
         return max(0, min(int(x), w - 1)), max(0, min(int(y), h - 1))
 
-    def _resolve_drag(self, action: dict) -> tuple[tuple[int, int], tuple[int, int]]:
-        """DRAG 的起/止像素点，各自按屏幕夹紧。"""
+    def _resolve_drag(self, action: dict, route: str = "tree") -> tuple[tuple[int, int], tuple[int, int]]:
+        """Tree uses device pixels; VLM uses transmitted-image pixels."""
+        if route == "vlm":
+            image_size = action.get("image_size")
+            if not image_size:
+                raise ValueError("VLM DRAG 缺少所发送截图的尺寸")
+            screen = (self.obs.width, self.obs.height)
+            start = image_point_to_device(action["from"], image_size, screen)
+            end = image_point_to_device(action["to"], image_size, screen)
+            self.log.phase("act", f"拖拽图片坐标 {action['from']}→{action['to']} / {image_size} "
+                                  f"→ 设备坐标 {start}→{end} / {screen}")
+            return start, end
         return self._clamp_xy(*action["from"]), self._clamp_xy(*action["to"])
 
     def _scroll(self, direction: str, node_ref: int | None = None, amount: float = 0.6) -> str:

@@ -40,6 +40,19 @@ def parse_coord(value) -> tuple[int, int] | None:
     return None
 
 
+def image_point_to_device(point: tuple[int, int], image_size: tuple[int, int],
+                          screen_size: tuple[int, int]) -> tuple[int, int]:
+    """Map a point on the transmitted VLM image to device pixels."""
+    iw, ih = image_size
+    sw, sh = screen_size
+    if min(iw, ih, sw, sh) <= 0:
+        raise ValueError("image and screen dimensions must be positive")
+    x, y = point
+    if not (0 <= x < iw and 0 <= y < ih):
+        raise ValueError(f"image point {point} outside {image_size}")
+    return (min(sw - 1, round(x * sw / iw)), min(sh - 1, round(y * sh / ih)))
+
+
 @dataclass(frozen=True)
 class ActionSpec:
     name: str
