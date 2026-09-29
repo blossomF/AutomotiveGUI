@@ -6,6 +6,7 @@ from autogui.brain import prompts
 from autogui.bridge.input import TextInput, UnicodeInputUnavailable
 from autogui.config import Config
 from autogui.core.graph import Runner
+from autogui.perception.capture import Observation
 
 
 class FakeDevice:
@@ -65,6 +66,44 @@ def test_unicode_submission_requires_exact_edittext_readback(monkeypatch):
     with pytest.raises(UnicodeInputUnavailable):
         runner._dispatch({"type": "TYPE", "text": "会议", "submit": True})
     assert calls == ["input_text"]  # No ENTER on an unverified value.
+
+
+def test_empty_xml_after_unicode_input_uses_next_screenshot_instead_of_failing(monkeypatch):
+    runner = Runner(cfg=Config(), task="搜索晴天")
+    calls = []
+    runner.executor = SimpleNamespace(call=lambda name, **kw: calls.append(name) or "OK")
+    runner.log = SimpleNamespace(phase=lambda *args, **kw: None, debug=False)
+    monkeypatch.setattr("autogui.core.graph.tools.dev", lambda: SimpleNamespace(dump_xml=lambda: ""))
+    monkeypatch.setattr("autogui.core.graph.time.sleep", lambda seconds: None)
+
+    action = {"type": "TYPE", "text": "晴天", "submit": True}
+    result = runner.act({"step": 2, "route": "vlm", "action": action})
+    assert result["last_action"] == action
+    assert runner.pending_unicode == ""
+    assert calls == ["input_text"]  # Wait for visual evidence before ENTER.
+    assert runner.verify({"last_action": action}) == {"recover_depth": 0, "no_progress": 0}
+    assert not runner.unicode_xml_unavailable_this_step
+
+
+def test_visual_completion_is_allowed_when_unicode_readback_is_unavailable(monkeypatch):
+    runner = Runner(cfg=Config(), task="搜索晴天")
+    runner.pending_unicode = "晴天"
+    runner.context.input_guide = "等待视觉确认"
+    runner.obs = Observation(b"screenshot", "", 1080, 2400, "sig", [])
+    runner.grid = SimpleNamespace(cols=10, rows=20, annotate=lambda *args: object())
+    runner.log = SimpleNamespace(phase=lambda *args, **kw: None, debug=False)
+    runner.glm = SimpleNamespace(decide=lambda *args, **kw: (
+        {"type": "COMPLETE", "result": "已显示晴天搜索结果"},
+        SimpleNamespace(calls=1, prompt_tokens=10, completion_tokens=10)))
+    monkeypatch.setattr("autogui.core.graph.grid_mod.encode_jpeg", lambda *args: b"jpeg")
+
+    result = runner.decide({"step": 4, "route": "vlm"})
+    assert result["action"]["type"] == "COMPLETE"
+    assert runner.pending_unicode == ""
+    assert runner.context.input_guide == ""
+    acted = runner.act({"action": result["action"]})
+    settled = runner.verify({"last_action": acted["last_action"]})
+    assert settled["success"] is True and settled["status"] == "complete"
 
 
 def test_app_cache_is_not_described_as_installed_app_catalog():

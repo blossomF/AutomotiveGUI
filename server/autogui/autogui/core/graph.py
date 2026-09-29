@@ -95,6 +95,7 @@ class Runner:
     decide_attempts: int = 0
     pending_unicode: str = ""
     blocked_unicode_attempts: int = 0
+    unicode_xml_unavailable_this_step: bool = False
     launch_note_decisions: int = 0
     skip_waited_targets: set[str] = field(default_factory=set)
 
@@ -344,11 +345,16 @@ class Runner:
             glms=usage.calls, in_tok=usage.prompt_tokens, out_tok=usage.completion_tokens,
         )
         if self.pending_unicode and action.get("type") == "COMPLETE":
-            self.log.phase("input", "目标中文尚未从输入框读回，拒绝 COMPLETE")
-            self.context.record(state.get("step", 0), route, "COMPLETE",
-                                "目标中文尚未确认，请继续操作屏幕键盘", failed=True)
-            return {"action": {}, "route": route, "retry_decision": False,
-                    "no_progress": state.get("no_progress", 0) + 1}
+            # XML can be absent indefinitely on WebView-heavy pages. This
+            # decision already saw the current screenshot on the forced VLM
+            # route; an unavailable EditText readback must not veto visible
+            # completion of the user's actual task.
+            if route != "vlm":
+                self.log.phase("input", "目标中文未从控件树确认，改用当前截图复核")
+                return {"route": "vlm", "action": {}, "retry_decision": True}
+            self.log.phase("input", "模型依据当前截图确认任务结果；XML 字段读回未完成，不再阻断 COMPLETE")
+            self.pending_unicode = ""
+            self.context.input_guide = ""
         if (self.pending_unicode and action.get("type") == "TYPE"
                 and action.get("text") == self.pending_unicode):
             self.blocked_unicode_attempts += 1
@@ -440,13 +446,14 @@ class Runner:
             self.pending_unicode = e.text
             pinyin = to_pinyin_syllables(e.text)
             self.context.input_guide = (
-                f"目标是原文 {e.text!r}。当前 ADB 操作未能确认中文已写入；不要再次 TYPE 这段中文，"
-                f"也不要把拼音首字母或全拼当成已完成。请依据截图点击系统输入法按键、选中准确的中文候选，"
-                f"然后在控件树确认字段实际文字。全拼参考：{pinyin or '不可用'}。"
+                f"目标是原文 {e.text!r}。当前 ADB 操作未能从控件树确认中文；不要再次 TYPE 这段中文，"
+                f"也不要把拼音首字母或全拼当成已完成。先看最新截图：若已出现准确目标文字和任务结果，"
+                f"可继续或 COMPLETE；否则再通过系统输入法按键、候选词完成输入。不必无限等待 XML。"
+                f"全拼参考：{pinyin or '不可用'}。"
             )
-            self.log.phase("input", f"中文直输不可用，转屏幕键盘：{e}", target=e.text, pinyin=pinyin)
+            self.log.phase("input", f"中文未获控件树确认，转屏幕观察：{e}", target=e.text, pinyin=pinyin)
             self.context.record(state.get("step", 0), state.get("route", "?"), a_type,
-                                "中文未写入，转屏幕键盘观察", failed=True)
+                                "中文未获 XML 确认，转屏幕观察", failed=True)
             return {"last_action": {}, "no_progress": 0}
         except ADBError as e:
             self.log.phase("act", f"ADB 失败：{e}")
@@ -474,9 +481,17 @@ class Runner:
                 raise ValueError(f"cannot resolve target for {a_type}")
             return ex.call("tap", x=x, y=y) if a_type == "CLICK" else ex.call("long_press", x=x, y=y, ms=800)
         if a_type == "TYPE":
+            self.unicode_xml_unavailable_this_step = False
             r = ex.call("input_text", text=action["text"], clear_first=action.get("clear_first", False))
-            if not action["text"].isascii() and not self._field_contains(tools.dev().dump_xml(), action["text"]):
-                raise UnicodeInputUnavailable(action["text"], "输入命令已发送，但控件树未读到目标中文")
+            if not action["text"].isascii():
+                xml = tools.dev().dump_xml()
+                if xml and not self._field_contains(xml, action["text"]):
+                    raise UnicodeInputUnavailable(action["text"], "输入命令已发送，但可用控件树未读到目标中文")
+                if not xml:
+                    self.unicode_xml_unavailable_this_step = True
+                    self.log.phase("input", "中文输入命令已发送；XML 超时或为空，留待下一轮截图确认",
+                                   target=action["text"])
+                    r = "[中文已发送，XML 不可用；下轮看图确认] " + r
             if action.get("submit"):
                 # 搜索类输入框：输完补发 ENTER 触发提交并收起遮挡结果的软键盘
                 # （车机实测 KEYCODE_ENTER 同时完成两件事；普通表单不带 submit）。
@@ -484,7 +499,9 @@ class Runner:
                 # （会把搜索框残留文本提交出去，制造错误搜索结果）。
                 from autogui.bridge import tools as _tools
                 lr = _tools.last_input_result()
-                if lr is None or not (lr.typed or "").strip():
+                if self.unicode_xml_unavailable_this_step:
+                    r += " [ENTER skipped: XML unavailable; inspect screenshot first]"
+                elif lr is None or not (lr.typed or "").strip():
                     r = r + " [ENTER skipped: nothing actually typed]"
                 else:
                     ex.call("keyevent", key="KEYCODE_ENTER")
@@ -759,6 +776,11 @@ class Runner:
             self.log.phase("verify", f"终止动作 {a_type}", vlm=0)
             return {"done": True, "success": ok, "status": "complete" if ok else "failed",
                     "result_text": action.get("result") or action.get("reason", "")}
+
+        if a_type == "TYPE" and self.unicode_xml_unavailable_this_step:
+            self.unicode_xml_unavailable_this_step = False
+            self.log.phase("verify", "中文已发送但 XML 不可用；下一轮截图确认，不按滞后帧触发恢复", vlm=0)
+            return {"recover_depth": 0, "no_progress": 0}
 
         changed = bool(self.obs) and bool(self.prev_obs) and self.obs.signature != self.prev_obs.signature
         mode = self.cfg.agent.reflection
