@@ -1179,7 +1179,7 @@ class Runner:
                         self.skill_focus_params.update(initial.skill_params or {})
                         self.activated_skills.add(initial.skill_key)
                         self.route_counts["skill_guide"] = self.route_counts.get("skill_guide", 0) + 1
-                        self.log.phase("skill", f"首次模型同时选中 {initial.skill_key}，已加载指导（{len(guide)} 字）；未执行 ADB")
+                        self.log.phase("skill", f"选中 {initial.skill_key}，已加载指导（{len(guide)} 字）。")
                     except SkillMiss as e:
                         self.log.phase("skill", f"首次技能指导不可用：{e}")
                 if initial.finish_after_launch:

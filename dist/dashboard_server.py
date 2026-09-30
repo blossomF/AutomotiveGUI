@@ -1797,7 +1797,7 @@ PAGE_RUN_TPL = r"""<!DOCTYPE html>
     <div class="dock-inner">
       <div id="beanDock">/*__MASCOT__*/</div>
       <input id="taskInput" placeholder="输入任务，如：播放哔哩哔哩西部世界第一季第一集" autofocus />
-      <button id="voiceBtn" type="button" title="语音录入（边说边识别，再点一次结束）" aria-label="语音录入">
+      <button id="voiceBtn" type="button" title="语音录入" aria-label="语音录入">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
              stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <rect x="9" y="2.5" width="6" height="11" rx="3"/>
