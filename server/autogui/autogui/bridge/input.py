@@ -16,6 +16,8 @@
 from __future__ import annotations
 
 import time
+import re
+import shlex
 
 from autogui.bridge.adb import ADBError, Device, input_text_arg
 
@@ -154,6 +156,8 @@ class TextInput:
             # 硬性的 adb 失败（设备掉线）——直接暴露，不要伪装成
             # “输入降级”。
             raise
+        except UnicodeInputUnavailable:
+            raise
         except Exception as e:  # 某个策略中途炸掉；只能在 ASCII 内容上降级
             if self.verbose:
                 print(f"  [input] {self.strategy} failed ({e}), degrading to ascii")
@@ -183,12 +187,17 @@ class TextInput:
         # 未显式设置 IME 时 settings get 返回 "null"。
         restore_to = before if before and before != "null" else None
         try:
-            self.device.adb_soft("shell", "ime", "enable", ADBKEYBOARD_ID, timeout=5)
-            self.device.adb_soft("shell", "ime", "set", ADBKEYBOARD_ID, timeout=5)
+            enabled = self.device.adb_soft("shell", "ime", "enable", ADBKEYBOARD_ID, timeout=5)
+            selected = self.device.adb_soft("shell", "ime", "set", ADBKEYBOARD_ID, timeout=5)
+            if not enabled.ok or not selected.ok or self._original_ime() != ADBKEYBOARD_ID:
+                raise UnicodeInputUnavailable(text, "ADBKeyboard 未能成为当前输入法")
             time.sleep(0.3)
-            self.device.adb(
-                "shell", "am", "broadcast", "-a", "ADB_INPUT_TEXT", "--es", "msg", text, timeout=10
+            broadcast = self.device.adb(
+                "shell", "am", "broadcast", "-a", "ADB_INPUT_TEXT", "--es", "msg",
+                shlex.quote(text), timeout=10
             )
+            if re.search(r"\bpkg=", broadcast):
+                raise UnicodeInputUnavailable(text, "广播参数被拆分成包名；ADBKeyboard 未收到完整文本")
             time.sleep(delay)
         finally:
             # 即使广播抛异常也要执行——把 ADBKeyboard 留在*选中*状态

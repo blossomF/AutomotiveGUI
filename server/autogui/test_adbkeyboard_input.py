@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import time
@@ -38,11 +39,15 @@ def output(result: dict) -> str:
     return (result["stdout"] + b"\n" + result["stderr"]).decode("utf-8", "replace").strip()
 
 
-def screenshot(adb: str, serial: str | None, path: Path) -> dict:
-    result = command(adb, serial, 15, "exec-out", "screencap", "-p")
+def screenshot(adb: str, serial: str | None, path: Path, display_id: str | None = None) -> dict:
+    args = ["exec-out", "screencap", "-p"]
+    if display_id is not None:
+        args.extend(["-d", display_id])
+    result = command(adb, serial, 15, *args)
     data = result["stdout"]
-    if result["exit"] == 0 and data.startswith(b"\x89PNG\r\n\x1a\n"):
-        path.write_bytes(data)
+    png_start = data.find(b"\x89PNG\r\n\x1a\n")
+    if result["exit"] == 0 and png_start >= 0:
+        path.write_bytes(data[png_start:])
     else:
         result["error"] = output(result)[:300] or "未返回 PNG"
     return result
@@ -73,6 +78,7 @@ def main() -> None:
     parser.add_argument("--text", default="王菲 红豆", help="测试中文；默认：王菲 红豆")
     parser.add_argument("--adb", help="adb.exe 路径；默认使用 PATH 或项目 env/platform-tools")
     parser.add_argument("--serial", help="设备序列号；连接多台设备时必须填写")
+    parser.add_argument("--display-id", help="多屏车机的目标 display ID；默认使用系统默认屏")
     parser.add_argument("--output-dir", type=Path, help="保存截图和报告的目录")
     args = parser.parse_args()
     if not args.text or args.text.isascii():
@@ -98,7 +104,7 @@ def main() -> None:
     selected = command(adb, serial, 5, "shell", "settings", "get", "secure", "default_input_method")
     original_ime = output(selected)
     report["original_ime"] = original_ime
-    before = screenshot(adb, serial, destination / "before.png")
+    before = screenshot(adb, serial, destination / "before.png", args.display_id)
     report["before_screenshot"] = "ok" if "error" not in before else before["error"]
     remote = f"/sdcard/autogui_input_probe_{os.getpid()}.xml"
     try:
@@ -117,11 +123,12 @@ def main() -> None:
             raise RuntimeError(f"输入法切换后实际为 {current!r}")
         time.sleep(0.3)
         sent = command(adb, serial, 10, "shell", "am", "broadcast", "-a",
-                       "ADB_INPUT_TEXT", "--es", "msg", args.text)
+                       "ADB_INPUT_TEXT", "--es", "msg", shlex.quote(args.text))
         report["broadcast"] = {"exit": sent["exit"], "output": output(sent),
-                               "seconds": sent["seconds"]}
+                               "seconds": sent["seconds"],
+                               "argument_split": bool(re.search(r"\bpkg=", output(sent)))}
         time.sleep(0.5)
-        after = screenshot(adb, serial, destination / "after.png")
+        after = screenshot(adb, serial, destination / "after.png", args.display_id)
         report["after_screenshot"] = "ok" if "error" not in after else after["error"]
         command(adb, serial, 5, "shell", "rm", "-f", remote)
         report["xml"] = xml_readback(adb, serial, args.text, remote)
@@ -138,6 +145,7 @@ def main() -> None:
     print(f"设备：{serial} | ADB：{report['adb_version'].splitlines()[0]}")
     print(f"输入法：{original_ime} → {report.get('ime_after_set', '切换失败')} → 已尝试恢复")
     print(f"广播：{report.get('broadcast', {}).get('output', report.get('error', '未执行'))}")
+    print(f"广播参数被拆开：{report.get('broadcast', {}).get('argument_split', '未知')}")
     print(f"XML：{report.get('xml', {}).get('status', '未执行')}；"
           f"精确读回={report.get('xml', {}).get('exact_match', '未知')}")
     print(f"前后截图及完整报告：{destination}")

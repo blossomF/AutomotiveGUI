@@ -1,3 +1,4 @@
+import shlex
 from types import SimpleNamespace
 
 import pytest
@@ -39,6 +40,55 @@ def test_ascii_channel_sends_exact_ascii():
     result = text_input.type("Meeting", delay=0)
     assert result.typed == "Meeting" and result.payload_exact
     assert device.calls == [("shell", "input", "text", "Meeting")]
+
+
+def test_adbkeyboard_keeps_chinese_with_spaces_in_one_device_shell_argument():
+    class Device:
+        current_ime = "com.example/.Ime"
+        broadcast_args = None
+
+        def adb_soft(self, *args, **kwargs):
+            if args[:4] == ("shell", "settings", "get", "secure"):
+                return SimpleNamespace(ok=True, stdout=self.current_ime)
+            if args[:3] == ("shell", "ime", "set"):
+                self.current_ime = args[3]
+            return SimpleNamespace(ok=True, stdout="")
+
+        def adb(self, *args, **kwargs):
+            self.broadcast_args = args
+            return "Broadcasting: Intent { act=ADB_INPUT_TEXT (has extras) }\nBroadcast completed: result=0"
+
+    device = Device()
+    sender = TextInput(device)
+    sender.strategy = "adbkeyboard"
+    sender._probed = True
+    result = sender.type("王菲 红豆", delay=0)
+    assert shlex.split(device.broadcast_args[-1]) == ["王菲 红豆"]
+    assert result.payload_exact
+    assert device.current_ime == "com.example/.Ime"
+
+
+def test_adbkeyboard_does_not_report_split_broadcast_as_success():
+    class Device:
+        current_ime = "com.example/.Ime"
+
+        def adb_soft(self, *args, **kwargs):
+            if args[:4] == ("shell", "settings", "get", "secure"):
+                return SimpleNamespace(ok=True, stdout=self.current_ime)
+            if args[:3] == ("shell", "ime", "set"):
+                self.current_ime = args[3]
+            return SimpleNamespace(ok=True, stdout="")
+
+        def adb(self, *args, **kwargs):
+            return "Broadcasting: Intent { act=ADB_INPUT_TEXT pkg=红豆 (has extras) }"
+
+    device = Device()
+    sender = TextInput(device)
+    sender.strategy = "adbkeyboard"
+    sender._probed = True
+    with pytest.raises(UnicodeInputUnavailable, match="参数被拆分"):
+        sender.type("王菲 红豆", delay=0)
+    assert device.current_ime == "com.example/.Ime"
 
 
 def test_failed_chinese_type_forces_keyboard_screenshot_without_repeating():
