@@ -127,6 +127,9 @@ context_candidates: |-
 picker_guide: |-
   当前有可读数值滚轮。要设定目标值时用 ROLL_TO(node_ref,target,delta_units?)；target 保留单位，如 19时、00分。根据候选当前值计算 delta_units=目标值-当前值，不要猜像素或用 DRAG 跨越滚轮边界。执行器会短滑、读取新值并修正；达标后另行点击确认，并核对表单。
 
+custom_wheel_guide: |-
+  当前有自定义滚轮：XML 只有滚动区域，没有选中值。先看截图辨认日期、小时、分钟分别在哪一列，再对目标列用 SCROLL(node_ref, direction, amount)。这类滚轮即使区域很宽也是竖向滚动；先用较小 amount，下一轮看截图中的选中值是否变化，按变化方向修正。不要对自定义滚轮用 ROLL_TO，也不要对未变化的手势反复重试。
+
 context_page_hints: |-
   当前页面提示（仅依据本次控件树标记匹配）：
   $page_hints
