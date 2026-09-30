@@ -23,6 +23,7 @@ DecisionLog（``artifacts/logs/<任务>-<时间戳>.jsonl``，每行一条
 """
 
 import argparse
+import base64
 import json
 import os
 import re
@@ -81,6 +82,44 @@ _RUNNING_PROC = None
 _CFG = None
 _CFG_LOCK = threading.Lock()
 _VOICE_LOCK = threading.Lock()
+
+# —— 流式语音（浏览器边录边发 → 转发讯飞 IAT，识别与录音并行）——
+_VOICE_STREAMS = {}
+_VOICE_STREAMS_LOCK = threading.Lock()
+_VOICE_STREAM_TTL = 180.0   # 会话空闲超过该时长自动回收
+
+
+def _voice_stream_cleanup():
+    """回收超时/已结束的流式会话，防止泄漏。"""
+    now = time.time()
+    with _VOICE_STREAMS_LOCK:
+        dead = [s for s, v in _VOICE_STREAMS.items()
+                if now - v["t0"] > _VOICE_STREAM_TTL or v.get("done")]
+        for sid in dead:
+            item = _VOICE_STREAMS.pop(sid, None)
+            if item is not None:
+                try:
+                    item["session"].close()
+                except Exception:
+                    pass
+
+
+def _voice_stream_get(sid):
+    with _VOICE_STREAMS_LOCK:
+        return _VOICE_STREAMS.get(sid)
+
+
+def _voice_stream_create(cfg) -> str:
+    """建立讯飞 IAT 流式会话，返回会话 ID。"""
+    from autogui.voice.asr import VoiceSession, resolve_credentials
+    appid, api_key, api_secret, url = resolve_credentials(cfg)
+    sess = VoiceSession(appid, api_key, api_secret, url)
+    sid = f"vs{int(time.time() * 1000)}"
+    with _VOICE_STREAMS_LOCK:
+        _VOICE_STREAMS[sid] = {"session": sess, "t0": time.time(), "done": False,
+                               "frames": 0, "bytes": 0}
+    print(f"🎤 流式会话 {sid} 已建立（连接 {sess.conn_seconds:.2f}s）")
+    return sid
 
 # —— 空闲自动退出（供启动器实现「关掉网页 = 关掉服务」）——
 # 页面每 3 秒发一次 /api/heartbeat；看门狗发现心跳停了就退出。
@@ -332,12 +371,16 @@ def launch_voice():
     """录音 + 讯飞 ASR，返回 (text, error)。阻塞约 3~20s（录音+识别）。"""
     cfg = _load_cfg()
     from autogui.voice.asr import VoiceError, transcribe_from_mic
+    t0 = time.time()
     try:
         text = transcribe_from_mic(cfg).strip()
     except VoiceError as e:
+        print(f"   ✗ 语音链路失败（{time.time() - t0:.1f}s）：{e}")
         return None, str(e)
     except Exception as e:  # noqa: BLE001
+        print(f"   ✗ 语音链路异常（{time.time() - t0:.1f}s）：{type(e).__name__}: {e}")
         return None, f"语音识别失败：{e}"
+    print(f"   ✓ 语音识别完成（{time.time() - t0:.1f}s，{len(text)} 字）：{text[:80]}")
     return text, None
 
 
@@ -546,6 +589,52 @@ class Handler(BaseHTTPRequestHandler):
                         self._send_json({"ok": True, "text": text or ""})
                 finally:
                     _VOICE_LOCK.release()
+            elif path == "/api/voice/stream/start":
+                # 流式语音：建立讯飞 IAT 会话（浏览器随后边录边发）
+                _voice_stream_cleanup()
+                try:
+                    sid = _voice_stream_create(_load_cfg())
+                    self._send_json({"ok": True, "session": sid})
+                except Exception as e:  # noqa: BLE001
+                    self._send_json({"ok": False, "error": str(e)}, 400)
+            elif path in ("/api/voice/stream/chunk", "/api/voice/stream/stop", "/api/voice/stream/abort"):
+                _voice_stream_cleanup()
+                item = _voice_stream_get(payload.get("sid", ""))
+                if item is None:
+                    self._send_json({"ok": False, "error": "流式会话不存在或已过期"}, 404)
+                    return
+                sess = item["session"]
+                if path == "/api/voice/stream/chunk":
+                    try:
+                        pcm = base64.b64decode(payload.get("audio", ""))
+                    except Exception:
+                        pcm = b""
+                    if len(pcm) > 32768:
+                        self._send_json({"ok": False, "error": "音频帧过大"}, 413)
+                        return
+                    item["frames"] += 1
+                    item["bytes"] += len(pcm)
+                    if item["frames"] == 1:
+                        print(f"   首帧到达 {payload.get('sid','')}：{len(pcm)} 字节")
+                    sess.send_audio(pcm)
+                    self._send_json({"ok": True, "partial": sess.partial})
+                elif path == "/api/voice/stream/stop":
+                    try:
+                        text = sess.finish(timeout=10.0)
+                    except Exception as e:  # noqa: BLE001
+                        self._send_json({"ok": False, "error": str(e)}, 400)
+                        return
+                    finally:
+                        with _VOICE_STREAMS_LOCK:
+                            _VOICE_STREAMS.pop(payload.get("sid", ""), None)
+                    print(f"   ✓ 流式识别完成：{item['frames']} 帧/{item['bytes']} 字节 | {len(text)} 字 | {text[:80]}")
+                    self._send_json({"ok": True, "text": text})
+                else:  # abort
+                    sess.close()
+                    with _VOICE_STREAMS_LOCK:
+                        _VOICE_STREAMS.pop(payload.get("sid", ""), None)
+                    print(f"   ✗ 流式会话中止：{item['frames']} 帧/{item['bytes']} 字节")
+                    self._send_json({"ok": True})
             elif path == "/api/settings":
                 try:
                     with _SETTINGS_LOCK:
@@ -1156,22 +1245,126 @@ function fillTaskText(text, autoRun){
   inp.focus();
   if(autoRun && inp.value) $('#runBtn').click();
 }
-async function startVoiceInput(){
-  const btn = $('#voiceBtn'); if(!btn) return;
-  btn.classList.add('recording');
+// —— 流式语音：浏览器麦克风边录边发 → 服务端转发讯飞 IAT → 实时出字 ——
+let voiceStream = null;   // {sid, stream, ctx, node, rec, startedAt, silentSince}
+
+function f32to16(buf){
+  const out = new Int16Array(buf.length);
+  for(let i = 0; i < buf.length; i++){
+    const s = Math.max(-1, Math.min(1, buf[i]));
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  return out;
+}
+function resampleTo16k(buf, fromRate){
+  if(fromRate === 16000) return buf;
+  const n = Math.round(buf.length * 16000 / fromRate);
+  const out = new Float32Array(n);
+  for(let i = 0; i < n; i++){
+    const pos = i * (buf.length - 1) / Math.max(1, n - 1);
+    const i0 = Math.floor(pos), i1 = Math.min(buf.length - 1, i0 + 1), f = pos - i0;
+    out[i] = buf[i0] * (1 - f) + buf[i1] * f;
+  }
+  return out;
+}
+function fillTaskTextLive(text){
+  const inp = $('#taskInput'); if(!inp) return;
+  if(document.activeElement !== inp) inp.value = text || '';
+}
+function releaseMedia(vs){
+  try { vs.node && vs.node.disconnect(); } catch(e){}
+  try { vs.stream && vs.stream.getTracks().forEach(t => t.stop()); } catch(e){}
+  try { vs.ctx && vs.ctx.close(); } catch(e){}
+  const btn = $('#voiceBtn'); if(btn) btn.classList.remove('recording');
+}
+async function endVoiceStream(final){
+  const vs = voiceStream; voiceStream = null;
+  if(!vs) return;
+  releaseMedia(vs);
+  if(!final){
+    setMascot('idle');
+    try { await fetch('/api/voice/stream/abort', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({sid: vs.sid})}); } catch(e){}
+    return;
+  }
   setMascot('thinking');
-  toast('🎤 录音中…说完停顿自动停止');
+  toast('🎤 说话结束，识别收尾中…');
   try {
-    const r = await fetch('/api/voice', {method:'POST'});
+    const r = await fetch('/api/voice/stream/stop', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({sid: vs.sid})});
     const j = await r.json();
-    if(!j.ok){ toast('✗ ' + (j.error || '未知错误')); setMascot('idle'); return; }
-    fillTaskText(j.text || '');
-    toast(j.text ? '✓ 已识别，确认后启动' : '✗ 未识别到内容');
+    if(j.ok){ fillTaskText(j.text || ''); toast(j.text ? '✓ 已识别，确认后启动' : '✗ 未识别到内容'); }
+    else toast('✗ ' + (j.error || '识别失败'));
     setMascot('idle');
   } catch(e){
     toast('✗ 请求出错：' + e); setMascot('idle');
-  } finally {
-    btn.classList.remove('recording');
+  }
+}
+async function startVoiceInput(){
+  if(voiceStream){ endVoiceStream(true); return; }   // 录音中再点一次麦克风 = 结束
+  const btn = $('#voiceBtn'); if(!btn) return;
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({audio: {echoCancellation: true, noiseSuppression: true}});
+  } catch(e){
+    toast('✗ 无法访问麦克风：' + e); setMascot('idle'); return;
+  }
+  btn.classList.add('recording');
+  setMascot('thinking');
+  toast('🎤 录音中，实时出字…');
+  try {
+    const r0 = await fetch('/api/voice/stream/start', {method:'POST', headers:{'Content-Type':'application/json'}, body: '{}'});
+    const j0 = await r0.json();
+    if(!j0.ok){
+      toast('✗ ' + (j0.error || '启动识别失败'));
+      stream.getTracks().forEach(t => t.stop());
+      btn.classList.remove('recording'); setMascot('idle');
+      return;
+    }
+    const AC = window.AudioContext || window.webkitAudioContext;
+    const ctx = new AC({sampleRate: 16000});
+    if(ctx.state === 'suspended'){ await ctx.resume(); }
+    const src = ctx.createMediaStreamSource(stream);
+    const node = ctx.createScriptProcessor(1024, 1, 1);   // ~64ms/帧 @16k
+    const vs = {sid: j0.session, stream, ctx, node, rec: true, startedAt: Date.now(), silentSince: 0, started: false};
+    voiceStream = vs;
+    node.onaudioprocess = async (ev) => {
+      if(!vs.rec) return;
+      let f32 = resampleTo16k(ev.inputBuffer.getChannelData(0), ctx.sampleRate);
+      if(!f32.length) return;
+      let sum = 0;
+      for(let i = 0; i < f32.length; i++) sum += f32[i] * f32[i];
+      const rms = Math.sqrt(sum / f32.length);
+      const now = Date.now();
+      if(rms >= 0.003){ vs.started = true; vs.silentSince = 0; }
+      else if(vs.started && !vs.silentSince){ vs.silentSince = now; }
+      if((vs.started && vs.silentSince && now - vs.silentSince > 800) ||
+         now - vs.startedAt > 15000){
+        vs.rec = false;
+        endVoiceStream(true);
+        return;
+      }
+      try {
+        const pcm = new Uint8Array(f32to16(f32).buffer);
+        let b64 = '';
+        for(let i = 0; i < pcm.length; i += 8192){
+          b64 += btoa(String.fromCharCode.apply(null, pcm.subarray(i, i + 8192)));
+        }
+        const r = await fetch('/api/voice/stream/chunk', {method:'POST', headers:{'Content-Type':'application/json'},
+                                                           body: JSON.stringify({sid: vs.sid, audio: b64})});
+        const j = await r.json();
+        if(j.partial) fillTaskTextLive(j.partial);
+      } catch(e){ /* 单帧失败不打断录音 */ }
+    };
+    const mute = ctx.createGain(); mute.gain.value = 0;   // 防回授
+    src.connect(node); node.connect(mute); mute.connect(ctx.destination);
+  } catch(e){
+    toast('✗ ' + e);
+    stream.getTracks().forEach(t => t.stop());
+    const cur = voiceStream; voiceStream = null;
+    if(cur){
+      releaseMedia(cur);
+      try { await fetch('/api/voice/stream/abort', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({sid: cur.sid})}); } catch(_){}
+    }
+    btn.classList.remove('recording'); setMascot('idle');
   }
 }
 $('#voiceBtn').onclick = startVoiceInput;
@@ -1575,7 +1768,7 @@ PAGE_RUN_TPL = r"""<!DOCTYPE html>
     <div class="dock-inner">
       <div id="beanDock">/*__MASCOT__*/</div>
       <input id="taskInput" placeholder="输入任务，如：播放哔哩哔哩西部世界第一季第一集" autofocus />
-      <button id="voiceBtn" type="button" title="语音录入（开发中）" aria-label="语音录入">
+      <button id="voiceBtn" type="button" title="语音录入（边说边识别，再点一次结束）" aria-label="语音录入">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
              stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <rect x="9" y="2.5" width="6" height="11" rx="3"/>

@@ -26,6 +26,7 @@ import hashlib
 import hmac
 import json
 import os
+import threading
 import time
 from array import array
 from email.utils import formatdate
@@ -147,7 +148,9 @@ def recognize(audio: bytes, appid: str, api_key: str, api_secret: str, iat_url: 
     """把 16kHz/mono/int16 PCM 音频流经讯飞 IAT，返回识别文本。"""
     import websocket
 
+    t0 = time.time()
     ws = websocket.create_connection(_sign_url(appid, api_key, api_secret, iat_url), timeout=15)
+    t_conn = time.time() - t0
 
     try:
         business = {"language": "zh_cn", "domain": "iat", "accent": "mandarin"}
@@ -163,6 +166,7 @@ def recognize(audio: bytes, appid: str, api_key: str, api_secret: str, iat_url: 
             },
         }))
         rest = audio[CHUNK:]
+        frames = 0
         for i in range(0, len(rest), CHUNK):
             ws.send(json.dumps({
                 "common": {"app_id": appid},
@@ -173,7 +177,9 @@ def recognize(audio: bytes, appid: str, api_key: str, api_secret: str, iat_url: 
                     "audio": base64.b64encode(rest[i : i + CHUNK]).decode("ascii"),
                 },
             }))
+            frames += 1
             time.sleep(0.08)
+        t_send = time.time() - t0
         ws.send(json.dumps({
             "common": {"app_id": appid},
             "data": {"status": 2, "format": f"audio/L16;rate={SAMPLE_RATE}", "encoding": "raw", "audio": ""},
@@ -187,9 +193,109 @@ def recognize(audio: bytes, appid: str, api_key: str, api_secret: str, iat_url: 
             text += _frame_text(data)
             if (data.get("data") or {}).get("status") == 2:
                 break
+        audio_s = len(audio) / 2 / SAMPLE_RATE
+        print(f"   识别拆解：音频{audio_s:.1f}s | 连接{t_conn:.2f}s | 发送{t_send:.1f}s({frames}帧) | "
+              f"总耗时{time.time() - t0:.1f}s | 结果{len(text)}字")
         return text
     finally:
         ws.close()
+
+
+class VoiceSession:
+    """讯飞 IAT 流式会话：先开会话、由外部按实时节奏喂帧、最后 finish 取终值。
+
+    用于页面流式语音输入（浏览器边录边发）。与 recognize() 不同：
+    不在发送端 sleep 模拟实时，节奏由调用方（真实录音）决定。
+    """
+
+    def __init__(self, appid: str, api_key: str, api_secret: str, iat_url: str = DEFAULT_IAT_URL):
+        import websocket
+
+        self._appid = appid
+        self._lock = threading.Lock()
+        self._closed = False
+        self._done = threading.Event()
+        self._partial = ""
+        self._final_text = ""
+        self._error: str | None = None
+        t0 = time.time()
+        self._ws = websocket.create_connection(_sign_url(appid, api_key, api_secret, iat_url), timeout=15)
+        self.conn_seconds = time.time() - t0
+        self._reader = threading.Thread(target=self._read_loop, daemon=True)
+        self._reader.start()
+        self._send_frame(
+            {"status": 0, "format": f"audio/L16;rate={SAMPLE_RATE}", "encoding": "raw", "audio": ""},
+            business={"language": "zh_cn", "domain": "iat", "accent": "mandarin"},
+        )
+
+    def _send_frame(self, data: dict, business: dict | None = None) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            frame: dict = {"common": {"app_id": self._appid}, "data": data}
+            if business:
+                frame["business"] = business
+            self._ws.send(json.dumps(frame))
+
+    def _read_loop(self) -> None:
+        try:
+            while not self._done.is_set():
+                data = json.loads(self._ws.recv())
+                if data.get("code") != 0:
+                    self._error = f"ASR 接口错误 code={data.get('code')} message={data.get('message')}"
+                    self._done.set()
+                    return
+                self._partial += _frame_text(data)
+                if (data.get("data") or {}).get("status") == 2:
+                    self._final_text = self._partial
+                    self._done.set()
+                    return
+        except Exception as e:  # noqa: BLE001
+            if not self._done.is_set():
+                self._error = f"ASR 连接中断：{type(e).__name__}: {e}"
+                self._done.set()
+
+    @property
+    def partial(self) -> str:
+        """当前累计识别文本（部分结果）。"""
+        return self._partial
+
+    def send_audio(self, pcm: bytes) -> None:
+        """发送一帧 int16 PCM；节奏由调用方控制（实时采集即实时节奏）。"""
+        if not pcm or self._closed or self._done.is_set():
+            return
+        self._send_frame({
+            "status": 1,
+            "format": f"audio/L16;rate={SAMPLE_RATE}",
+            "encoding": "raw",
+            "audio": base64.b64encode(pcm).decode("ascii"),
+        })
+
+    def finish(self, timeout: float = 10.0) -> str:
+        """发送结束帧并等待最终结果；失败抛 VoiceError。"""
+        with self._lock:
+            if not self._closed and not self._done.is_set():
+                self._closed = True
+                self._ws.send(json.dumps({
+                    "common": {"app_id": self._appid},
+                    "data": {"status": 2, "format": f"audio/L16;rate={SAMPLE_RATE}", "encoding": "raw", "audio": ""},
+                }))
+        if not self._done.wait(timeout):
+            raise VoiceError(f"ASR 未返回最终结果（{timeout:.0f}s 超时）")
+        if self._error:
+            raise VoiceError(self._error)
+        return self._final_text
+
+    def close(self) -> None:
+        """放弃会话（不等终值）。"""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        try:
+            self._ws.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # ── 对外入口 ─────────────────────────────────────────────────────────────────
