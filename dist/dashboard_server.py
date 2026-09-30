@@ -154,6 +154,18 @@ def _idle_monitor(server) -> None:
 # ============================================================================
 # 数据解析
 # ============================================================================
+def task_label(session_id: str, task: str) -> str:
+    """以启动时间和原始指令显示任务，旧日志回退到文件名中的任务片段。"""
+    match = re.search(r"-(\d{8})-(\d{6})$", session_id)
+    if not match:
+        return task
+    try:
+        stamp = datetime.strptime(match.group(1) + match.group(2), "%Y%m%d%H%M%S")
+    except ValueError:
+        return task
+    return f"{stamp:%m-%d %H:%M:%S} {task}"
+
+
 def list_tasks() -> list:
     """列出所有任务日志（扁平 *.jsonl），返回概要列表（按时间倒序）。
 
@@ -166,6 +178,7 @@ def list_tasks() -> list:
     out = []
     for jl in sorted(LOGS_ROOT.glob("*.jsonl"), reverse=True):
         sid = jl.stem
+        task = re.sub(r"-\d{8}-\d{6}$", "", sid)
         status = "running"
         total_steps = 0
         total_tokens = 0
@@ -180,6 +193,8 @@ def list_tasks() -> list:
                 except Exception:
                     continue
                 event_count += 1
+                if isinstance(ev.get("task"), str) and ev["task"].strip():
+                    task = ev["task"]
                 if ev.get("phase") == "finish":
                     status = "done" if ev.get("success", True) else "aborted"
                     total_time = float(ev.get("elapsed", ev.get("t", 0.0)) or 0.0)
@@ -198,7 +213,8 @@ def list_tasks() -> list:
             {
                 "task_dir": sid,
                 "session_id": sid,
-                "task": sid,
+                "task": task,
+                "title": task_label(sid, task),
                 "status": status,
                 "total_steps": total_steps,
                 "event_count": event_count,
@@ -227,6 +243,9 @@ def get_task_detail(task_dir: str) -> dict:
             except Exception:
                 pass
 
+    task = next((ev["task"] for ev in events
+                 if isinstance(ev.get("task"), str) and ev["task"].strip()),
+                re.sub(r"-\d{8}-\d{6}$", "", task_dir))
     status = "running"
     finish_usage = {}
     finish_steps = 0
@@ -302,7 +321,8 @@ def get_task_detail(task_dir: str) -> dict:
     return {
         "task_dir": task_dir,
         "session_id": task_dir,
-        "task": task_dir,
+        "task": task,
+        "title": task_label(task_dir, task),
         "status": status,
         "stats": {
             "total_steps": graph_steps,
@@ -314,12 +334,8 @@ def get_task_detail(task_dir: str) -> dict:
     }
 
 
-def get_live(task_dir: str) -> dict:
-    """轻量版：只回「最新一步 + 计数」，供下指令页每 2 秒轮询刷实时卡片。
-
-    为什么不直接复用 /api/task/<dir>：那个会把整条轨迹（每步 action / evidence /
-    图片 URL）全序列化，步骤一多响应就是几十 KB，2 秒一次纯属白耗。这里只切最后一步。
-    """
+def get_live(task_dir: str, after_idx: int | None = None) -> dict:
+    """按事件序号增量返回，避免两次轮询之间的事件丢失。"""
     detail = get_task_detail(task_dir)
     if not detail:
         return {"ok": False, "error": "task not found"}
@@ -331,6 +347,12 @@ def get_live(task_dir: str) -> dict:
             "idx", "step", "substep", "wall_time", "action", "image", "total_time", "execution_time",
             "inference_time", "tokens", "noop", "evidence",
         )}
+    updates = []
+    if after_idx is not None:
+        updates = [{k: s.get(k) for k in (
+            "idx", "step", "substep", "wall_time", "action", "image", "total_time",
+            "execution_time", "inference_time", "tokens", "noop", "evidence",
+        )} for s in steps if s["idx"] > after_idx]
     return {
         "ok": True,
         "task_dir": detail["task_dir"],
@@ -338,6 +360,7 @@ def get_live(task_dir: str) -> dict:
         "status": detail["status"],
         "stats": detail["stats"],
         "last": last,
+        "updates": updates,
     }
 
 
@@ -522,7 +545,11 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(200, artifact.read_bytes(), "application/xml; charset=utf-8")
             elif path == "/api/live":
                 task_dir = qs.get("task", [""])[0]
-                self._send_json(get_live(task_dir))
+                try:
+                    after_idx = int(qs["after"][0]) if "after" in qs else None
+                except (ValueError, IndexError):
+                    after_idx = None
+                self._send_json(get_live(task_dir, after_idx))
             elif path == "/api/heartbeat":
                 # 页面心跳：仅刷新活跃时间（_touch 已在 do_GET 开头做过）
                 self._send_json({"ok": True})
@@ -991,7 +1018,7 @@ function eventTechnical(a){
     adb_exit:'ADB 退出码', shot_ms:'截图耗时（毫秒）'};
   const kinds = {initial_app_route:'启动应用与技能选择', decide:'下一步决策'};
   return Object.entries(a).filter(([k,v]) =>
-    !['action','summary','explain','call_id'].includes(k) && v !== '' && v != null)
+    !['action','summary','explain','call_id','task'].includes(k) && v !== '' && v != null)
     .map(([k,v]) => '<b>' + esc(labels[k] || k) + '：</b>'
       + esc(k === 'request_kind' ? (kinds[v] || v) : (typeof v === 'object' ? JSON.stringify(v) : v)))
     .join(' · ');
@@ -1088,7 +1115,7 @@ function liveItemHTML(s, firstInStep){
     +     '<span class="atype a-' + esc(phase) + '">' + esc(phase) + '</span>'
     +     '<span class="mini-msg">' + esc(msg) + '</span>'
     +   '</div>'
-    +   (extra ? '<details class="mini-explain"><summary>技术详情</summary>' + extra + '</details>' : '')
+    +   (extra ? '<div class="mini-explain">' + extra + '</div>' : '')
     +   '<div class="mini-meta">' + esc(meta) + '</div>'
     + '</div></div>';
 }
@@ -1122,15 +1149,15 @@ function renderLive(d){
   const b = BADGE[liveStatus] || BADGE.running;
   setBadge(b[0], b[1]);
   $('#liveTask').textContent = d.task || '';
-  const s = d.last;
-  if(s){
+  const updates = Array.isArray(d.updates) ? d.updates : (d.last ? [d.last] : []);
+  updates.forEach(s => {
     const key = stepKey(s), i = liveSteps.findIndex(x => stepKey(x) === key);
     if(i < 0){ liveSteps.push(s); appendStep(s); }       // 新的一步：往列表尾部追加
     else if(JSON.stringify(liveSteps[i]) !== JSON.stringify(s)){
       liveSteps[i] = s; replaceStep(s);                  // 同一步内容更新（截图后到等）
     }
-    $('#liveCount').textContent = '第 ' + (d.stats?.total_steps || 0) + ' 步 · ' + liveSteps.length + ' 条事件';
-  }
+  });
+  $('#liveCount').textContent = '第 ' + (d.stats?.total_steps || 0) + ' 步 · ' + liveSteps.length + ' 条事件';
   showCard(true);
 }
 
@@ -1156,7 +1183,8 @@ async function loadLiveHistory(dir){
 async function fetchLive(){
   if(!curDir) return;
   try {
-    const r = await fetch('/api/live?task=' + encodeURIComponent(curDir));
+    const after = liveSteps.length ? Math.max(...liveSteps.map(s => Number(s.idx) || 0)) : -1;
+    const r = await fetch('/api/live?task=' + encodeURIComponent(curDir) + '&after=' + after);
     renderLive(await r.json());
   } catch(e){}
 }
@@ -1417,7 +1445,8 @@ async function loadTasks(prefer){
   list.forEach(t => {
     const o = document.createElement('option');
     o.value = t.task_dir;
-    o.textContent = `${t.task_dir} | ${t.task||'(无)'} | ${t.status==='done'?'✅':'⏳'} ${t.total_steps}步 · ${t.total_time}s`;
+    o.textContent = t.title || t.task;
+    o.title = o.textContent;
     sel.appendChild(o);
   });
   const pick = (prefer && list.find(t => t.task_dir === prefer)) ? prefer
@@ -1432,7 +1461,7 @@ async function loadTask(dir, animate){
   if(d.error){ $('#timeline').innerHTML = `<div class="empty">${esc(d.error)}</div>`; return; }
   // 统计卡
   $('#stats').innerHTML = `
-    <div class="stat"><div class="k">任务</div><div class="v" style="font-size:14px">${esc(d.task)}</div></div>
+    <div class="stat"><div class="k">任务</div><div class="v" style="font-size:14px;white-space:normal;overflow-wrap:anywhere">${esc(d.title || d.task)}</div></div>
     <div class="stat"><div class="k">状态</div><div class="v"><span class="badge ${d.status}">${d.status==='done'?'已完成':(d.status==='aborted'?'已中止':'运行中')}</span></div></div>
     <div class="stat"><div class="k">步数</div><div class="v">${d.stats.total_steps}</div></div>
     <div class="stat"><div class="k">任务总耗时</div><div class="v">${d.stats.total_time}s</div></div>
@@ -1455,7 +1484,7 @@ async function loadTask(dir, animate){
     const xml = xmlLogView(a, dir);
     const explain = `<div class="meta"><b>${esc(xml ? xml.summary : eventSummary(a))}</b></div>`;
     const tech = xml ? xml.diagnostics : eventTechnical(a);
-    const detail = xml ? xml.detail : (tech ? `<details class="meta"><summary>技术详情</summary>${tech}</details>` : '');
+    const detail = xml ? xml.detail : tech;
     const ev = s.evidence ? `<div class="evidence">✅ 完成证据：${esc(s.evidence)}</div>` : '';
     const noop = s.noop ? `<div class="noop">⚠️ 上一步点击后界面无变化（控件树+画面均未变）</div>` : '';
     const card = document.createElement('div');

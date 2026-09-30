@@ -152,6 +152,7 @@ class Runner:
         self.log.kv("任务", self.task)
         self.log.kv("设备", tools.dev().serial)
         self.log.kv("技能", f"{len(self.book.by_id) if self.book else 0} 个可用")
+        self.log.phase("setup", "任务开始", task=self.task)
         if self.log.debug:
             self.log.phase("setup", f"debug 目录 {self.log.debug_dir}",
                            reflection=self.cfg.agent.reflection)
