@@ -1155,6 +1155,7 @@ LOGS_JS = r"""
 try { window.name = 'lg_logs'; } catch(e){}
 
 let currentDir = null, timer = null;
+function graphStepLabel(n){ return Number(n) === 0 ? '任务准备' : '第 ' + n + ' 步'; }
 
 function xmlLogView(a, taskDir){
   if(a.action !== 'xml') return null;
