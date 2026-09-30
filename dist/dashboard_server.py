@@ -868,6 +868,46 @@ COMMON_JS = r"""
 const $ = (s) => document.querySelector(s);
 function esc(s){ return String(s==null?'':s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 
+// 两个页面共用同一套解释；阶段名和原始事件仍保留，便于定位源码与日志。
+function eventSummary(a){
+  const phase = a.action || 'log', msg = a.summary || a.explain || '';
+  if(phase === 'glm_request') return a.request_kind === 'initial_app_route'
+    ? '请求模型选择启动应用和技能' : '请求模型判断下一步操作';
+  if(phase === 'glm_response') return a.request_kind === 'initial_app_route'
+    ? '模型已返回启动应用和技能的选择' : '模型已返回下一步决策';
+  if(phase === 'perceive') return '已观察屏幕：' + msg;
+  if(phase === 'act'){
+    let m = /^OK tap\((\d+),(\d+)\)/.exec(msg);
+    if(m) return '点击屏幕（' + m[1] + '，' + m[2] + '）成功';
+    if(msg === 'OK back') return '返回上一页成功';
+    if(msg === 'OK home') return '返回桌面成功';
+  }
+  if(phase === 'decide'){
+    const m = /^([A-Z_]+)(?:\s+([^—]*?))?\s*—\s*(.*)$/.exec(msg);
+    if(m){
+      const names = {CLICK:'点击', LONG_PRESS:'长按', TYPE:'输入', SCROLL:'滚动',
+        ROLL_TO:'调整滚轮', DRAG:'拖动', BACK:'返回', HOME:'回桌面',
+        LAUNCH:'启动应用', SKILL:'加载技能', WAIT:'等待', COMPLETE:'完成任务', FAIL:'任务失败'};
+      return '模型决定' + (names[m[1]] || m[1]) + (m[3] ? '：' + m[3] : '');
+    }
+  }
+  return msg;
+}
+function eventTechnical(a){
+  const labels = {artifact:'原始文件', chars:'字符数', request_kind:'模型请求用途',
+    attempt:'尝试次数', latency_ms:'模型耗时（毫秒）', in_tok:'输入 token',
+    out_tok:'输出 token', status:'状态', adb_detail:'ADB 错误', command:'ADB 命令',
+    dump_ms:'获取 XML 耗时（毫秒）', dump_exit:'生成退出码', dump_stdout:'生成输出',
+    dump_stderr:'生成错误', remote_file:'设备文件检查', stage:'失败阶段',
+    adb_exit:'ADB 退出码', shot_ms:'截图耗时（毫秒）'};
+  const kinds = {initial_app_route:'启动应用与技能选择', decide:'下一步决策'};
+  return Object.entries(a).filter(([k,v]) =>
+    !['action','summary','explain','call_id'].includes(k) && v !== '' && v != null)
+    .map(([k,v]) => '<b>' + esc(labels[k] || k) + '：</b>'
+      + esc(k === 'request_kind' ? (kinds[v] || v) : (typeof v === 'object' ? JSON.stringify(v) : v)))
+    .join(' · ');
+}
+
 // 大圣喵状态机：idle 呼吸 / receiving 弹一下 / thinking 摇尾思考 / happy 眯眼大笑
 const MOUTH = {
   'idle':'M27.5 40.5 Q32 43.6 36.5 40.5', 'receiving':'M27.5 40.5 Q32 43.6 36.5 40.5',
@@ -947,21 +987,19 @@ function xmlSummary(a){
 function liveItemHTML(s, firstInStep){
   const a = s.action || {};
   const phase = a.action || 'log';
-  const msg = xmlSummary(a) || a.summary || a.explain || '';
+  const msg = xmlSummary(a) || eventSummary(a);
   const tk = s.tokens || {}, tok = (tk.input || 0) + (tk.output || 0);
-  const extra = Object.entries(a).filter(([k,v]) => !['action','summary','explain'].includes(k)
-      && (phase !== 'xml' || (a.status !== 'ok' && v !== '' && v != null)))
-    .map(([k,v]) => k + '=' + (typeof v === 'object' ? JSON.stringify(v) : v)).join(' · ');
+  const extra = eventTechnical(a);
   const meta = (s.wall_time ? s.wall_time + '  cost:' + (s.total_time || 0) + 's' : 't+' + (s.total_time || 0) + 's') + (tok ? ' · ' + tok + ' tok' : '');
   return '<div class="live-item" data-step="' + esc(stepKey(s)) + '">'
     + (firstInStep ? '<div class="phase-group">' + esc(graphStepLabel(s.step)) + '</div>' : '')
     + '<div class="mini-body">'
     +   '<div class="mini-head">'
-    +     '<span class="idx-no">事件 ' + esc(s.substep != null ? s.substep : '') + '</span>'
+    +     '<span class="idx-no">' + esc(s.substep != null ? s.substep : '') + '</span>'
     +     '<span class="atype a-' + esc(phase) + '">' + esc(phase) + '</span>'
     +     '<span class="mini-msg">' + esc(msg) + '</span>'
     +   '</div>'
-    +   (extra ? '<div class="mini-explain">' + esc(extra) + '</div>' : '')
+    +   (extra ? '<details class="mini-explain"><summary>技术详情</summary>' + extra + '</details>' : '')
     +   '<div class="mini-meta">' + esc(meta) + '</div>'
     + '</div></div>';
 }
@@ -1172,7 +1210,7 @@ function xmlLogView(a, taskDir){
     read_exit:'读取退出码', remote_file:'设备文件检查', stage:'失败阶段',
     adb_exit:'ADB 退出码', dump_ms:'耗时（毫秒）', chars:'字符数'};
   const fields = Object.entries(a).filter(([k,v]) =>
-    !['action','summary','explain','artifact'].includes(k) && v !== '' && v != null)
+    !['action','summary','explain','artifact','call_id'].includes(k) && v !== '' && v != null)
     .map(([k,v]) => `<b>${esc(labels[k] || k)}：</b>${esc(typeof v === 'object' ? JSON.stringify(v) : v)}`)
     .join(' · ');
   const diagnostics = a.status === 'ok' ? ''
@@ -1222,11 +1260,9 @@ async function loadTask(dir, animate){
     }
     const a = s.action || {};
     const xml = xmlLogView(a, dir);
-    const explain = xml ? `<div class="meta"><b>${esc(xml.summary)}</b></div>`
-      : (a.explain ? `<div class="meta"><b>说明：</b>${esc(a.explain)}</div>` : '');
-    const detail = xml ? xml.detail : Object.entries(a)
-      .filter(([k]) => !['action','summary','explain','decision_source','_tool_call_id','_from_tool','chinese_resolved','typed_value'].includes(k))
-      .map(([k,v]) => `<b>${esc(k)}:</b> ${esc(v)}`).join(' · ');
+    const explain = `<div class="meta"><b>${esc(xml ? xml.summary : eventSummary(a))}</b></div>`;
+    const tech = xml ? xml.diagnostics : eventTechnical(a);
+    const detail = xml ? xml.detail : (tech ? `<details class="meta"><summary>技术详情</summary>${tech}</details>` : '');
     const ev = s.evidence ? `<div class="evidence">✅ 完成证据：${esc(s.evidence)}</div>` : '';
     const noop = s.noop ? `<div class="noop">⚠️ 上一步点击后界面无变化（控件树+画面均未变）</div>` : '';
     const card = document.createElement('div');
@@ -1234,13 +1270,12 @@ async function loadTask(dir, animate){
     card.innerHTML = `
       <div class="body">
         <div class="row1">
-          <span class="step-no">事件 ${s.substep}</span>
+          <span class="step-no">${s.substep}</span>
           <span class="atype a-${esc(a.action||'')}">${esc(a.action||'?')}</span>
           ${a.decision_source?`<span class="badge" style="background:#e0e7ff;color:#3730a3">${esc(a.decision_source)}</span>`:''}
         </div>
         ${detail?`<div class="meta">${detail}</div>`:''}
         ${explain}
-        ${xml ? xml.diagnostics : ''}
         <div class="timing">${s.wall_time ? s.wall_time + '  ' : ''}推理 ${s.inference_time}s · 执行 ${s.execution_time}s · 总 ${s.total_time}s · token ${ (s.tokens.input||0)+(s.tokens.output||0) }</div>
         ${ev}${noop}
       </div>`;
