@@ -219,7 +219,14 @@ class VoiceSession:
         self._final_text = ""
         self._error: str | None = None
         t0 = time.time()
-        self._ws = websocket.create_connection(_sign_url(appid, api_key, api_secret, iat_url), timeout=15)
+        try:
+            self._ws = websocket.create_connection(_sign_url(appid, api_key, api_secret, iat_url), timeout=15)
+        except Exception:
+            time.sleep(0.3)
+            try:
+                self._ws = websocket.create_connection(_sign_url(appid, api_key, api_secret, iat_url), timeout=15)
+            except Exception as e2:  # noqa: BLE001
+                raise VoiceError(f"ASR 服务连接失败：{type(e2).__name__}: {e2}")
         self.conn_seconds = time.time() - t0
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
@@ -259,6 +266,14 @@ class VoiceSession:
     def partial(self) -> str:
         """当前累计识别文本（部分结果）。"""
         return self._partial
+
+    def state(self) -> tuple[str, str | None]:
+        """返回 (状态, 错误)：live=正常 / done=已出终值 / dead=连接出错。"""
+        if self._error:
+            return "dead", self._error
+        if self._done.is_set():
+            return "done", None
+        return "live", None
 
     def send_audio(self, pcm: bytes) -> None:
         """发送一帧 int16 PCM；节奏由调用方控制（实时采集即实时节奏）。"""
