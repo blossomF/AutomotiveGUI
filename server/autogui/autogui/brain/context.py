@@ -145,6 +145,9 @@ class Context:
             wheel_guide = prompts.render("picker_guide") if any(
                 tree_mod.is_value_wheel(item) for item in body
             ) else ""
+            custom_wheel_guide = prompts.render("custom_wheel_guide") if any(
+                item.cls.rsplit(".", 1)[-1] == "WheelView" for item in body
+            ) else ""
             text = "\n\n".join(p for p in (
                 c.permanent_block(),
                 (c.entities_block() + "\n\n") if c.entities else "",
@@ -152,6 +155,7 @@ class Context:
                 prompts.render("context_progress", progress=self.progress) if self.progress else "",
                 prompts.render("context_candidates", candidates=c.observation_text(body)),
                 wheel_guide,
+                custom_wheel_guide,
                 prompts.render("context_page_hints", page_hints="\n".join(c.page_hints)) if c.page_hints else "",
             ) if p)
             return text, estimate_tokens(text)

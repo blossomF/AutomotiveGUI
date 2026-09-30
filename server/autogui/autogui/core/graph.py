@@ -255,6 +255,10 @@ class Runner:
         if self.pending_unicode:
             self.log.phase("route", "中文输入需观察屏幕键盘 → vlm")
             return {"route": "vlm"}
+        if self.obs and any(c.cls.rsplit(".", 1)[-1] == "WheelView"
+                            for c in self.obs.candidates):
+            self.log.phase("route", "自定义滚轮的选中值不在 XML 中 → vlm 截图读数")
+            return {"route": "vlm"}
         if self.obs and getattr(self.obs, "candidate_stats", {}).get("target_lost"):
             self.log.phase("route", "XML 中有任务目标但候选裁剪未保留 → vlm")
             return {"route": "vlm"}
@@ -317,7 +321,12 @@ class Runner:
         if self.log.debug and self.context.page_hints:
             self.log.detail("decide", f"页面提示命中: {len(self.context.page_hints)}")
         self.context.focus_terms = self.focus_terms
-        text, kept, counts = self.context.trim(self.obs.candidates if route == "tree" else [])
+        wheel_on_screen = route == "vlm" and any(
+            c.cls.rsplit(".", 1)[-1] == "WheelView" for c in self.obs.candidates
+        )
+        text, kept, counts = self.context.trim(
+            self.obs.candidates if route == "tree" or wheel_on_screen else []
+        )
         if self.launch_note_decisions:
             self.launch_note_decisions -= 1
             if not self.launch_note_decisions:
@@ -573,6 +582,8 @@ class Runner:
             candidate = tree_mod.by_ref(self.obs.candidates, action["node_ref"]) if self.obs else None
             if candidate is None:
                 raise ValueError(f"ROLL_TO node_ref={action['node_ref']} 不在当前候选中")
+            if not tree_mod.is_value_wheel(candidate):
+                raise ValueError(f"#{candidate.ref} 不是可读数值滚轮；自定义滚轮请看截图并用 SCROLL 指定列")
             return roll_to(
                 candidate, action["target"], delta_hint=action.get("delta_units"),
                 screen=(self.obs.width, self.obs.height),

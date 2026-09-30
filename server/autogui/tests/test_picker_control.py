@@ -10,6 +10,7 @@ from autogui.core.picker import PickerError, roll_to
 from autogui.core.graph import Runner
 from autogui.config import Config
 from autogui.perception.capture import Observation
+from autogui.perception import tree as tree_mod
 from autogui.perception.tree import Candidate, is_value_wheel
 
 
@@ -198,6 +199,33 @@ def test_wide_date_wheel_is_still_vertical_scroll_target():
     runner.obs = Observation(b"", xml, 1080, 2400, "", [date])
     x1, y1, x2, y2 = runner._target_scroll_vector("down", 3, 0.4)
     assert x1 == x2 == 312 and 1388 < y2 < y1 < 1857
+
+
+def test_custom_wide_wheels_use_vertical_scroll_and_visual_readback(monkeypatch):
+    xml = (
+        '<hierarchy><node class="com.ss.android.lark.calendar.WheelView" '
+        'resource-id="com.ss.android.lark:id/wheel_left" '
+        'bounds="[16,325][1120,525]" scrollable="true" />'
+        '<node class="com.ss.android.lark.calendar.WheelView" '
+        'resource-id="com.ss.android.lark:id/wheel_middle" '
+        'bounds="[1120,325][1672,525]" scrollable="true" /></hierarchy>'
+    )
+    candidates = tree_mod.candidates_from_xml(xml, limit=20, screen=(2240, 1260))
+    left = next(c for c in candidates if c.rid == "wheel_left")
+    hour = next(c for c in candidates if c.rid == "wheel_middle")
+    assert left.scroll_axis == hour.scroll_axis == "vertical"
+    assert not is_value_wheel(hour)
+    assert "自定义滚轮·值需看图" in tree_mod.render_candidates(candidates)
+    runner = Runner(cfg=Config(), task="设为19点")
+    runner.obs = Observation(b"", xml, 2240, 1260, "", candidates)
+    runner.log = SimpleNamespace(debug=False, phase=lambda *args, **kwargs: None)
+    assert runner.route({})["route"] == "vlm"
+    x1, y1, x2, y2 = runner._target_scroll_vector("down", hour.ref, 0.4)
+    assert x1 == x2 == hour.cx and y1 > y2
+    monkeypatch.setattr("autogui.core.graph.tools.dev", lambda: SimpleNamespace(
+        dump_xml=lambda: pytest.fail("自定义滚轮的 ROLL_TO 不应再抓 XML")))
+    with pytest.raises(ValueError, match="自定义滚轮"):
+        runner._dispatch({"type": "ROLL_TO", "node_ref": hour.ref, "target": "19"})
 
 
 def test_runner_dispatches_roll_to_through_existing_swipe_tool(monkeypatch):

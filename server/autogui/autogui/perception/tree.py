@@ -82,7 +82,7 @@ def _scroll_axis(cls: str, bounds: tuple[int, int, int, int]) -> str:
     tail = cls.rsplit(".", 1)[-1]
     if tail == "HorizontalScrollView" or "ViewPager" in tail:
         return "horizontal"
-    if tail in ("ScrollView", "RecyclerView", "ListView", "NumberPicker"):
+    if tail in ("ScrollView", "RecyclerView", "ListView", "NumberPicker", "WheelView"):
         return "vertical"
     return "horizontal" if bounds[2] - bounds[0] >= bounds[3] - bounds[1] else "vertical"
 
@@ -460,7 +460,9 @@ def render_candidates(cands: list[Candidate]) -> str:
         detail = "" if not c.desc or c.desc == c.label else f" 描述:{c.desc}"
         ident = f" id:{c.rid}" if c.rid and c.rid != c.label and (c.clickable or c.scrollable or c.editable) else ""
         bounds = f" 范围:{c.bounds}" if c.scrollable or c.cls.rsplit(".", 1)[-1] in ("SeekBar", "Slider") else ""
-        lines.append(f"#{c.ref} {c.label} [{c.cx},{c.cy}] ({','.join(flags)}){' [滚轮]' if wheel else ''}{detail}{ident}{bounds}")
+        custom_wheel = c.cls.rsplit(".", 1)[-1] == "WheelView"
+        wheel_hint = " [自定义滚轮·值需看图；不用 ROLL_TO]" if custom_wheel else (" [滚轮]" if wheel else "")
+        lines.append(f"#{c.ref} {c.label} [{c.cx},{c.cy}] ({','.join(flags)}){wheel_hint}{detail}{ident}{bounds}")
     return "\n".join(lines)
 
 

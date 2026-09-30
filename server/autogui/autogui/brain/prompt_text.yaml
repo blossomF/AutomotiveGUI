@@ -12,7 +12,7 @@ decide_system: |-
   可用动作（type 字段取值）：$action_names
   各动作字段：$action_fields。
   SCROLL 的 direction 只能是 $scroll_directions。
-  SCROLL 用于普通列表；可用 node_ref 指定滚动容器，amount 为其可滑动范围的 0.1~0.9。数值滚轮用 ROLL_TO。
+  SCROLL 用于普通列表或自定义滚轮；可用 node_ref 指定滚动容器，amount 为其可滑动范围的 0.1~0.9。只有候选明确标为[滚轮]且当前数值可从 XML 读取时才用 ROLL_TO；标为[自定义滚轮]的控件用 SCROLL 并看截图复核。
   SKILL 只加载一份操作指导，不会自动点击或完成任务。只有任务的应用和目标都与「可用技能」摘要明确匹配，且参数能从用户任务中确定时才选 SKILL；优先选当前应用专属技能，name 原样照抄完整名字（如 bilibili.search_video），参数放 params。当前目标已加载指导后不要再选同目标的其他技能，应依据当前屏幕给出具体动作。不匹配时直接操作控件，不要猜技能名或参数。
   LAUNCH 的 app 填包名，只从下方「已缓存直启应用」取（如 com.bilibili.bilithings），不要填中文名。该列表不是设备应用全集；目标应用未缓存时用 HOME 回桌面，再根据控件树或截图寻找入口。不得仅因缓存没有包名就判定任务无法完成。
   写法示例：{"type":"CLICK","node_ref":7} / {"type":"TYPE","text":"钢铁侠 第一季","submit":true} / {"type":"SKILL","name":"bilibili.search_video","params":{"keyword":"钢铁侠 第一季"}} / {"type":"COMPLETE","result":"已播放"}
@@ -44,6 +44,7 @@ decide_tree_coords: |-
 
 decide_vlm_screen: |-
   当前截图尺寸为 $image_width×$image_height。看图点击使用 point:[x,y]，DRAG 的 from/to 也按这张截图的像素尺寸填写；程序会统一换算为设备坐标。
+  若下方同时提供自定义滚轮候选，SCROLL 可用其 node_ref 指定要滑动的列；候选坐标是设备像素，不要把它直接填到 point/from/to。
 
 decide_vlm_output: |-
   输出示例：$schema_text
@@ -113,6 +114,9 @@ context_candidates: |-
 
 picker_guide: |-
   当前有可读数值滚轮。要设定目标值时用 ROLL_TO(node_ref,target,delta_units?)；target 保留单位，如 19时、00分。根据候选当前值计算 delta_units=目标值-当前值，不要猜像素或用 DRAG 跨越滚轮边界。执行器会短滑、读取新值并修正；达标后另行点击确认，并核对表单。
+
+custom_wheel_guide: |-
+  当前有自定义滚轮：XML 只有滚动区域，没有选中值。本轮截图可读值。先看截图辨认日期、小时、分钟分别在哪一列，再对目标列用 SCROLL(node_ref, direction, amount)。这类滚轮即使区域很宽也是竖向滚动；先用较小 amount，下一轮看截图中的选中值是否变化，按变化方向修正。不要对自定义滚轮用 ROLL_TO，也不要对未变化的手势反复重试。
 
 context_page_hints: |-
   当前页面提示（仅依据本次控件树标记匹配）：
