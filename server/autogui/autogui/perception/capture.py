@@ -24,7 +24,12 @@ from PIL import Image
 
 from autogui.bridge.adb import Device
 from autogui.perception import tree as tree_mod
-from autogui.perception.grid import Grid, grid_dimensions
+
+
+@dataclass(frozen=True)
+class ScreenGeometry:
+    width: int
+    height: int
 
 
 @dataclass
@@ -48,7 +53,7 @@ class Observation:
         """可寻址且有标签的节点足够多，可以走 B 路径。
 
         dump 可以很大却没用——一个全是 FrameLayout、没有任何文本的树
-        会产生零个候选，这就是回退到网格的信号。
+        会产生零个候选，这就是回退到视觉定位的信号。
         """
         return len(self.candidates) >= 3
 
@@ -74,13 +79,13 @@ def compute_signature(xml: str, png: bytes) -> str:
 def observe(
     device: Device,
     *,
-    grid_cols: int = 20,
-    grid_rows: int = 10,
-    grid_mode: str = "manual",
     candidate_limit: int = 40,
+    candidate_token_budget: int = 900,
+    focus_terms: list[str] | None = None,
     last_size: tuple[int, int] | None = None,
-) -> tuple[Observation, Grid]:
-    """并行抓取帧 + 树，并为当前屏幕构建网格。"""
+    shot_after_dump: bool = False,
+) -> tuple[Observation, ScreenGeometry]:
+    """通常并行抓帧与树；广告等待后可先 dump 再截最新画面。"""
     import time
 
     timings: dict[str, float] = {}
@@ -95,18 +100,21 @@ def observe(
         x = device.dump_xml()
         return x, (time.perf_counter() - t) * 1000
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        f_shot = pool.submit(shot)
-        f_dump = pool.submit(dump)
-        png, timings["shot"] = f_shot.result()
-        xml, timings["dump"] = f_dump.result()
+    if shot_after_dump:
+        xml, timings["dump"] = dump()
+        png, timings["shot"] = shot()
+    else:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            f_shot = pool.submit(shot)
+            f_dump = pool.submit(dump)
+            png, timings["shot"] = f_shot.result()
+            xml, timings["dump"] = f_dump.result()
 
     width, height = _resolve_size(png, last_size or device.screen_size())
     candidate_stats: dict[str, int] = {}
     cands = tree_mod.candidates_from_xml(xml, limit=candidate_limit, screen=(width, height),
-                                         stats=candidate_stats)
-    cols, rows = grid_dimensions(width, height, mode=grid_mode, cols=grid_cols, rows=grid_rows)
-    grid = Grid(width=width, height=height, cols=cols, rows=rows)
+                                         stats=candidate_stats, focus_terms=focus_terms,
+                                         token_budget=candidate_token_budget)
 
     return (
         Observation(
@@ -120,7 +128,7 @@ def observe(
             shot_ms=round(timings["shot"], 1),
             tree_ms=round(timings["dump"], 1),
         ),
-        grid,
+        ScreenGeometry(width, height),
     )
 
 

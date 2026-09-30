@@ -107,7 +107,8 @@ class GLMClient:
                 raise GLMError(f"{cfg.api_key_env} is not set — cannot call GLM")
             from openai import OpenAI
 
-            self._client = OpenAI(api_key=cfg.api_key, base_url=cfg.base_url, timeout=cfg.timeout)
+            self._client = OpenAI(api_key=cfg.api_key, base_url=cfg.base_url,
+                                  timeout=cfg.timeout, max_retries=0)
 
     # ── 原始 chat ────────────────────────────────────────────────────────────
 
@@ -124,7 +125,7 @@ class GLMClient:
         self._call_seq += 1
         call_id = self._call_seq
         if self._log and self._log.debug:
-            # 原始 base64 已单独保存为网格图；请求文件保留全部文本和图片位置，
+            # 原始 base64 已单独保存为截图；请求文件保留全部文本和图片位置，
             # 避免把数 MB 的编码重复写入 JSONL/文本，仍可逐条核对模型看到了什么。
             def readable(value):
                 if isinstance(value, list):
@@ -144,21 +145,41 @@ class GLMClient:
         for attempt in range(self.cfg.max_retries + 1):
             started = time.perf_counter()
             try:
+                # 流式接收：ts-glm-53-flash 是思维链模型，复杂步思考可达数分钟。
+                # 非流式下网关整体生成完才回包，60s 读超时内无任何字节 → 必然超时；
+                # 流式下思考 token 持续到达，读超时只约束块间静默，长思考可正常完成。
+                # SDK 内部重试已关闭（max_retries=0），重试统一走下方循环（带退避+日志）。
+                extra: dict = {}
+                effort = getattr(self.cfg, "reasoning_effort", "")
+                if effort:
+                    extra["reasoning_effort"] = effort
                 resp = self._client.chat.completions.create(
                     model=self.cfg.model,
                     messages=messages,
                     temperature=self.cfg.temperature,
                     max_tokens=self.cfg.max_tokens,
+                    stream=True,
+                    stream_options={"include_usage": True},
+                    extra_body=extra,
                 )
                 call.calls += 1
                 call.retries += attempt
+                content_parts: list[str] = []
+                final_usage = None
+                for ev in resp:
+                    if getattr(ev, "usage", None):
+                        final_usage = ev.usage
+                    if ev.choices:
+                        piece = getattr(ev.choices[0].delta, "content", None)
+                        if piece:
+                            content_parts.append(piece)
                 call.latency_ms += (time.perf_counter() - started) * 1000
-                if getattr(resp, "usage", None):
-                    call.prompt_tokens += int(resp.usage.prompt_tokens or 0)
-                    call.completion_tokens += int(resp.usage.completion_tokens or 0)
+                if final_usage:
+                    call.prompt_tokens += int(final_usage.prompt_tokens or 0)
+                    call.completion_tokens += int(final_usage.completion_tokens or 0)
                 self.usage.merge(call)
                 self.last_call = call
-                content = (resp.choices[0].message.content or "").strip()
+                content = "".join(content_parts).strip()
 
                 if self._log and self._log.debug:
                     self._log.trace_text("glm_response", content, call_id=call_id, request_kind=kind,
@@ -221,8 +242,8 @@ class GLMClient:
         context_text: str,
         *,
         jpeg_b64: str | None = None,
-        grid_spec: str = "20x10",
         screen_size: tuple[int, int] | None = None,
+        image_size: tuple[int, int] | None = None,
     ) -> tuple[dict, Usage]:
         """请求下一个动作。返回归一化后的动作 dict。
 
@@ -231,7 +252,7 @@ class GLMClient:
         绝不崩溃。
         """
         messages = prompts.build_decide_messages(
-            context_text, jpeg_b64, grid_spec, screen=screen_size
+            context_text, jpeg_b64, screen=screen_size, image_size=image_size
         )
         raw = self.chat_json(messages, kind="decide")
         try:

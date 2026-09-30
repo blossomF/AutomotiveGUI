@@ -8,7 +8,7 @@ from autogui.brain.glm_client import Usage
 from autogui.config import AppConfig, Config, PROJECT_ROOT
 from autogui.core.decision_log import DecisionLog
 from autogui.core.graph import Runner
-from autogui.perception.grid import Grid
+from autogui.perception.capture import ScreenGeometry
 from autogui.perception.tree import Candidate
 from autogui.skills.base import SkillBook
 from autogui.skills.ui_hints import PageHintBook
@@ -43,7 +43,7 @@ def _runner(tmp_path, responses):
     candidate = Candidate(1, "搜索", 50, 50, (0, 0, 100, 100), True, "", "")
     runner.obs = SimpleNamespace(candidates=[candidate, candidate, candidate], tree_usable=True,
                                  width=100, height=100, png=b"")
-    runner.grid = Grid(width=100, height=100, cols=10, rows=10)
+    runner.screen = ScreenGeometry(width=100, height=100)
     return runner, seen
 
 

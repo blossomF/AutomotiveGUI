@@ -6,6 +6,7 @@ from autogui.brain import prompts
 from autogui.bridge.input import TextInput, UnicodeInputUnavailable
 from autogui.config import Config
 from autogui.core.graph import Runner
+from autogui.perception.capture import Observation
 
 
 class FakeDevice:
@@ -51,8 +52,8 @@ def test_failed_chinese_type_forces_keyboard_screenshot_without_repeating():
     assert runner.pending_unicode == "会议"
     assert "不要再次 TYPE" in runner.context.permanent_block()
     assert runner.route({})["route"] == "vlm"
-    assert "屏幕键盘" in prompts.render("decide_vlm_screen", grid_spec="10x20") or "看图" in prompts.render(
-        "decide_vlm_screen", grid_spec="10x20")
+    assert "看图" in prompts.render("decide_vlm_screen", grid_spec="10x20",
+                                image_width=1080, image_height=2400)
 
 
 def test_unicode_submission_requires_exact_edittext_readback(monkeypatch):
@@ -65,6 +66,53 @@ def test_unicode_submission_requires_exact_edittext_readback(monkeypatch):
     with pytest.raises(UnicodeInputUnavailable):
         runner._dispatch({"type": "TYPE", "text": "会议", "submit": True})
     assert calls == ["input_text"]  # No ENTER on an unverified value.
+
+
+def test_empty_xml_after_unicode_input_uses_next_screenshot_instead_of_failing(monkeypatch):
+    runner = Runner(cfg=Config(), task="搜索晴天")
+    calls = []
+    runner.executor = SimpleNamespace(call=lambda name, **kw: calls.append(name) or "OK")
+    runner.log = SimpleNamespace(phase=lambda *args, **kw: None, debug=False)
+    monkeypatch.setattr("autogui.core.graph.tools.dev", lambda: SimpleNamespace(dump_xml=lambda: ""))
+    monkeypatch.setattr("autogui.core.graph.time.sleep", lambda seconds: None)
+
+    action = {"type": "TYPE", "text": "晴天", "submit": True}
+    result = runner.act({"step": 2, "route": "vlm", "action": action})
+    assert result["last_action"] == action
+    assert runner.pending_unicode == ""
+    assert calls == ["input_text"]  # Wait for visual evidence before ENTER.
+    assert runner.verify({"last_action": action}) == {"recover_depth": 0, "no_progress": 0}
+    assert not runner.unicode_xml_unavailable_this_step
+
+
+def test_visual_completion_is_allowed_when_unicode_readback_is_unavailable(monkeypatch):
+    runner = Runner(cfg=Config(), task="搜索晴天")
+    runner.pending_unicode = "晴天"
+    runner.context.input_guide = "等待视觉确认"
+    import io
+    from PIL import Image
+    image = io.BytesIO()
+    Image.new("RGB", (1080, 2400), "white").save(image, format="PNG")
+    runner.obs = Observation(image.getvalue(), "", 1080, 2400, "sig", [])
+    runner.screen = SimpleNamespace(width=1080, height=2400)
+    runner.log = SimpleNamespace(phase=lambda *args, **kw: None, debug=False)
+    seen = []
+    def decide(*args, **kw):
+        import base64
+        sent = Image.open(io.BytesIO(base64.b64decode(kw["jpeg_b64"])))
+        seen.append(sent.getpixel((sent.width // 2, sent.height // 2)))
+        return ({"type": "COMPLETE", "result": "已显示晴天搜索结果"},
+                SimpleNamespace(calls=1, prompt_tokens=10, completion_tokens=10))
+    runner.glm = SimpleNamespace(decide=decide)
+
+    result = runner.decide({"step": 4, "route": "vlm"})
+    assert result["action"]["type"] == "COMPLETE"
+    assert min(seen[0]) > 245  # 原始白图，没有红色格线或标签覆盖
+    assert runner.pending_unicode == ""
+    assert runner.context.input_guide == ""
+    acted = runner.act({"action": result["action"]})
+    settled = runner.verify({"last_action": acted["last_action"]})
+    assert settled["success"] is True and settled["status"] == "complete"
 
 
 def test_app_cache_is_not_described_as_installed_app_catalog():

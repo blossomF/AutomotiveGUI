@@ -5,9 +5,9 @@
   permanent   任务 + 动作 schema + 技能索引/已选指南
   sliding     最近 N 步纯文本，含失败步                          ~500 tok
   entities    跨步骤关键事实（时间 / 地点 / 歌曲 / 商品）         ~150 tok
-  observation 候选列表（文本）或网格图（二选一，绝不都要）        1-2k / 图
+  observation 候选列表（文本）或截图（二选一，绝不都要）        1-2k / 图
 
-最大的杠杆是 **tree 模式从不发截图**。一张 1920x1080 带网格标注的帧
+最大的杠杆是 **tree 模式从不发截图**。一张 1920x1080 的帧
 每步约耗 1.5k 视觉 token；40 行候选列表只花几百。这就是“每个 token
 都挣到”的分数来源，而且 tree 模式也是*更快*的路径，所以 Context 分
 和性能分方向一致。
@@ -49,7 +49,9 @@ class Context:
     active_skill_guide: str = ""
     app_index: str = ""
     input_guide: str = ""
+    launch_note: str = ""
     page_hints: list[str] = field(default_factory=list)
+    focus_terms: list[str] = field(default_factory=list)
 
     history_window: int = 5
     token_budget: int = 8000
@@ -70,6 +72,8 @@ class Context:
             lines.append(prompts.render("context_active_skill", guide=self.active_skill_guide))
         if self.input_guide:
             lines.append(prompts.render("context_input_guide", guide=self.input_guide))
+        if self.launch_note:
+            lines.append(prompts.render("context_launch_note", app=self.launch_note))
         return "\n".join(lines)
 
     # ── 滑动块 ───────────────────────────────────────────────────────────────
@@ -132,12 +136,17 @@ class Context:
                 entities=self.entities, skill_index=self.skill_index,
                 active_skill_guide=self.active_skill_guide, app_index=self.app_index,
                 input_guide=self.input_guide,
+                launch_note=self.launch_note,
                 page_hints=self.page_hints,
+                focus_terms=self.focus_terms,
                 history_window=w, candidate_limit=k,
             )
             body = kept[:k]
             wheel_guide = prompts.render("picker_guide") if any(
                 tree_mod.is_value_wheel(item) for item in body
+            ) else ""
+            custom_wheel_guide = prompts.render("custom_wheel_guide") if any(
+                item.cls.rsplit(".", 1)[-1] == "WheelView" for item in body
             ) else ""
             text = "\n\n".join(p for p in (
                 c.permanent_block(),
@@ -146,6 +155,7 @@ class Context:
                 prompts.render("context_progress", progress=self.progress) if self.progress else "",
                 prompts.render("context_candidates", candidates=c.observation_text(body)),
                 wheel_guide,
+                custom_wheel_guide,
                 prompts.render("context_page_hints", page_hints="\n".join(c.page_hints)) if c.page_hints else "",
             ) if p)
             return text, estimate_tokens(text)
@@ -159,6 +169,7 @@ class Context:
             else:
                 kept = tree_mod.select_candidates(
                     kept, max(6, len(kept) - 6), max((c.cy for c in kept), default=1) + 1,
+                    self.focus_terms,
                 )
             text, tokens = build(window, len(kept))
 

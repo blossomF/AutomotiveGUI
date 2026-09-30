@@ -5,10 +5,22 @@
 """
 
 import textwrap
+from pathlib import Path
 
 import pytest
 
 from autogui.skills.base import DEFAULT_POPUPS, GENERIC_DISMISS, SkillBook, SkillMiss
+
+
+def test_qq_music_has_one_play_song_entry():
+    root = Path(__file__).resolve().parents[1] / "skills"
+    book = SkillBook(root, device=None, text_input=None)  # type: ignore[arg-type]
+    matches = [skill for skill in book.for_configured_app("QQ音乐")
+               if skill.name == "play_song"]
+    assert len(matches) == 1
+    assert matches[0].app == "music"
+    assert "添加到播放队列" in book.guidance("music.play_song", {"song": "晴天"})
+    assert matches[0].steps[-2] == {"act": "wait_for", "text": "暂停", "timeout": 8}
 
 MUSIC_YAML = textwrap.dedent(
     """
@@ -69,6 +81,26 @@ def test_missing_skill_dir_is_not_an_error(tmp_path):
     empty = SkillBook(tmp_path / "absent", device=None, text_input=None)  # type: ignore[arg-type]
     assert empty.by_id == {}
     assert empty.index() == "（无）"
+
+
+def test_configured_app_package_overrides_yaml_package(tmp_path):
+    """包名以页面配置（config.yaml apps 段）为准：已绑定技能的配置包名覆盖 YAML。"""
+    (tmp_path / "music").mkdir()
+    (tmp_path / "music" / "skill.yaml").write_text(
+        MUSIC_YAML + "configured_app: 音乐\n", encoding="utf-8")
+    book = SkillBook(tmp_path, device=None, text_input=None,
+                     app_packages={"音乐": "com.car.music2"})   # type: ignore[arg-type]
+    assert book.get("music.play_song").package == "com.car.music2"
+
+
+def test_yaml_package_kept_when_app_not_in_config(tmp_path):
+    """绑定应用不在配置里时，回退 YAML 包名。"""
+    (tmp_path / "music").mkdir()
+    (tmp_path / "music" / "skill.yaml").write_text(
+        MUSIC_YAML + "configured_app: 音乐\n", encoding="utf-8")
+    book = SkillBook(tmp_path, device=None, text_input=None,
+                     app_packages={"别的App": "com.other"})   # type: ignore[arg-type]
+    assert book.get("music.play_song").package == "com.car.music"
 
 
 def test_malformed_yaml_is_skipped_not_fatal(tmp_path):

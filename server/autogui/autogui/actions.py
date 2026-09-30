@@ -13,14 +13,10 @@ dock 的横屏车机上这个提示是错的，模型会白白烧掉步数找按
 from __future__ import annotations
 
 import re
+import math
 from dataclasses import dataclass
 
-# tree（纯文本）模式没有网格图，模型无法回答 E5 这类格号；当它需要点中一个
-# 长条控件的特定比例位置（典型：把播放进度条跳到约 70%——node_ref 只能点中
-# 控件中心）时，会直接给屏幕像素坐标。实测 GLM 写出 grid='[880, 885]'，旧代码
-# 只认字母格号，动作直接 ValueError 报废。下面两个小工具把这种"显式像素坐标"
-# 识别出来；字母格号（"E5"/"J10"）仍走 grid 标签路径。
-_GRID_LABEL_RE = re.compile(r"^[A-Za-z]\d+$")
+# tree 模式允许给进度条等控件指定设备像素位置。
 _COORD_NUM_RE = re.compile(r"-?\d+")
 
 
@@ -28,7 +24,7 @@ def parse_coord(value) -> tuple[int, int] | None:
     """把显式像素坐标 CLICK 目标解析成 ``(x, y)``；不是坐标对时返回 ``None``。
 
     接受 ``[880, 885]`` / ``"(880,885)"`` / ``"880 885"`` 字符串，以及两个
-    数字的 list/tuple。字母格号或取不出恰好两个整数的一律返回 ``None``。
+    数字的 list/tuple。取不出恰好两个整数时返回 ``None``。
     """
     if isinstance(value, (list, tuple)) and len(value) == 2:
         try:
@@ -38,12 +34,23 @@ def parse_coord(value) -> tuple[int, int] | None:
     if not isinstance(value, str):
         return None
     s = value.strip()
-    if _GRID_LABEL_RE.match(s):
-        return None
     nums = _COORD_NUM_RE.findall(s)
     if len(nums) == 2:
         return int(nums[0]), int(nums[1])
     return None
+
+
+def image_point_to_device(point: tuple[int, int], image_size: tuple[int, int],
+                          screen_size: tuple[int, int]) -> tuple[int, int]:
+    """Map a point on the transmitted VLM image to device pixels."""
+    iw, ih = image_size
+    sw, sh = screen_size
+    if min(iw, ih, sw, sh) <= 0:
+        raise ValueError("image and screen dimensions must be positive")
+    x, y = point
+    if not (0 <= x < iw and 0 <= y < ih):
+        raise ValueError(f"image point {point} outside {image_size}")
+    return (min(sw - 1, round(x * sw / iw)), min(sh - 1, round(y * sh / ih)))
 
 
 @dataclass(frozen=True)
@@ -54,8 +61,8 @@ class ActionSpec:
 
 
 ACTIONS: tuple[ActionSpec, ...] = (
-    ActionSpec("CLICK", ("node_ref | grid",), "Tap one on-screen candidate"),
-    ActionSpec("LONG_PRESS", ("node_ref | grid",), "Hold ~0.8s — context menus, drag handles"),
+    ActionSpec("CLICK", ("node_ref | point | coord", "target_label?"), "Tap one on-screen candidate"),
+    ActionSpec("LONG_PRESS", ("node_ref | point | coord",), "Hold ~0.8s — context menus, drag handles"),
     ActionSpec("TYPE", ("text", "clear_first?", "submit?"),
                "Type into the focused field; submit=true presses ENTER after typing (search boxes)"),
     ActionSpec("SCROLL", ("direction", "node_ref?", "amount?"),
@@ -92,33 +99,33 @@ def parse_action(raw: dict) -> dict:
     if not isinstance(raw, dict):
         raise ValueError(f"action must be an object, got {type(raw).__name__}")
     name = str(raw.get("type") or raw.get("action") or "").strip().upper()
-    # 容错：旧版 prompt 曾示范 {"type":"grid",...}，模型偶发沿用。GRID 不是
-    # 独立动作，实质就是 CLICK 一个 grid 标签/像素坐标目标，归一到 CLICK。
-    if name == "GRID":
-        name = "CLICK"
     if name not in ACTION_NAMES:
         raise ValueError(f"unknown action {name!r}; valid: {', '.join(ACTION_NAMES)}")
 
     out: dict = {"type": name, "explain": str(raw.get("explain", ""))[:200]}
 
     if name in ("CLICK", "LONG_PRESS"):
+        if name == "CLICK" and raw.get("target_label") is not None:
+            out["target_label"] = str(raw["target_label"]).strip()[:60]
         if "node_ref" in raw and raw["node_ref"] is not None:
             try:
                 out["node_ref"] = int(str(raw["node_ref"]).lstrip("#"))
             except (TypeError, ValueError):
                 raise ValueError(f"node_ref must be an integer, got {raw['node_ref']!r}")
-        elif raw.get("grid") is not None:
-            coord = parse_coord(raw["grid"])
-            if coord is not None:
-                # tree 模式给的显式像素坐标；越界夹紧在执行侧（那里才知道屏幕尺寸）。
-                out["coord"] = coord
-            else:
-                g = str(raw["grid"]).strip().upper()
-                if not g:
-                    raise ValueError(f"{name} needs node_ref or grid")
-                out["grid"] = g
+        elif raw.get("point") is not None:
+            point = raw["point"]
+            if (not isinstance(point, (list, tuple)) or len(point) != 2
+                    or any(isinstance(v, bool) or not isinstance(v, (int, float))
+                           or not math.isfinite(v) for v in point)):
+                raise ValueError("point must be two finite image coordinates [x,y]")
+            out["point"] = tuple(float(v) for v in point)
+        elif raw.get("coord") is not None:
+            coord = parse_coord(raw["coord"])
+            if coord is None:
+                raise ValueError("coord must be device pixel coordinates [x,y]")
+            out["coord"] = coord
         else:
-            raise ValueError(f"{name} needs node_ref or grid")
+            raise ValueError(f"{name} needs node_ref, point or coord")
     elif name == "TYPE":
         if "text" not in raw:
             raise ValueError("TYPE needs text")

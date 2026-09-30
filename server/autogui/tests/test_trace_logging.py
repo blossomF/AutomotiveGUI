@@ -14,10 +14,11 @@ def test_glm_trace_keeps_prompt_response_and_call_id_without_base64(tmp_path):
     log = DecisionLog("trace", tmp_path, verbose=False, debug=True)
     log.step_begin(2)
 
-    response = SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content='{"type":"BACK"}'))],
-        usage=SimpleNamespace(prompt_tokens=12, completion_tokens=4),
-    )
+    response = [
+        SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content='{"type":"BACK"}'))],
+                        usage=None),
+        SimpleNamespace(choices=[], usage=SimpleNamespace(prompt_tokens=12, completion_tokens=4)),
+    ]
 
     class Completions:
         def create(self, **kwargs):
@@ -64,6 +65,58 @@ def test_every_device_xml_dump_has_own_artifact(tmp_path, monkeypatch):
     assert events[0]["artifact"] != events[1]["artifact"]
     assert (log.debug_dir / events[0]["artifact"]).read_text(encoding="utf-8") == "<hierarchy>first</hierarchy>"
     assert (log.debug_dir / events[1]["artifact"]).read_text(encoding="utf-8") == "<hierarchy>second</hierarchy>"
+    log.close()
+
+
+def test_empty_xml_records_dump_output_and_remote_file(tmp_path, monkeypatch):
+    log = DecisionLog("empty xml", tmp_path, verbose=False, debug=True)
+    device = Device("fake")
+    device.trace_log = log
+
+    def fake_soft(*args, **kwargs):
+        if args[1] == "uiautomator":
+            return ADBResult(0, "UI hierarchy dumped to: /sdcard/autogui_ui.xml", "")
+        if args[1] == "ls":
+            return ADBResult(0, "-rw-rw---- 1 shell sdcard_rw 0 autogui_ui.xml", "")
+        return ADBResult(0, "", "")
+
+    monkeypatch.setattr(device, "adb_soft", fake_soft)
+    monkeypatch.setattr(device, "adb", lambda *args, **kwargs: "")
+
+    assert device.dump_xml() == ""
+    event = next(e for e in log.events if e["phase"] == "xml")
+    assert event["status"] == "empty"
+    assert event["dump_exit"] == 0
+    assert "UI hierarchy dumped" in event["dump_stdout"]
+    assert " 0 autogui_ui.xml" in event["remote_file"]
+    log.close()
+
+
+def test_dump_exit_137_captures_device_evidence_once(tmp_path, monkeypatch):
+    log = DecisionLog("dump 137", tmp_path, verbose=False, debug=True)
+    device = Device("fake")
+    device.trace_log = log
+    calls = []
+
+    def fake_soft(*args, **kwargs):
+        calls.append(args)
+        if args[1] == "uiautomator":
+            return ADBResult(137, "", "")
+        if args[1] == "ls":
+            return ADBResult(1, "", "No such file")
+        if args[1] == "logcat":
+            return ADBResult(0, "lmkd: Killing uiautomator\nother line", "")
+        return ADBResult(0, "", "")
+
+    monkeypatch.setattr(device, "adb_soft", fake_soft)
+    assert device.dump_xml() == device.dump_xml() == ""
+    events = [e for e in log.events if e["phase"] == "xml"]
+    assert len(events) == 2
+    assert events[0]["dump_exit"] == 137
+    assert events[0]["logcat_matches"] == 1
+    assert "logcat_artifact" in events[0]
+    assert "logcat_matches" not in events[1]
+    assert sum(args[1] == "logcat" for args in calls) == 1
     log.close()
 
 

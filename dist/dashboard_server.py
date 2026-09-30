@@ -32,6 +32,7 @@ import sys
 import threading
 import time
 import urllib.parse
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -57,6 +58,19 @@ PROJECT_ROOT = AUTOGUI_DIR          # 启动 main.py 时的 CWD（= server/autog
 LOGS_ROOT = AUTOGUI_DIR / "artifacts" / "logs"   # 决策链日志（扁平 *.jsonl）
 CONFIG_PATH = AUTOGUI_DIR / "config.yaml"
 _SETTINGS_LOCK = threading.Lock()
+
+
+def task_xml_artifact(task_dir: str, filename: str) -> Path | None:
+    """只允许读取已有任务 debug 目录下的单个 XML 文件。"""
+    if not task_dir or not filename or Path(task_dir).name != task_dir or Path(filename).name != filename:
+        return None
+    if Path(filename).suffix.lower() != ".xml" or not (LOGS_ROOT / f"{task_dir}.jsonl").is_file():
+        return None
+    task_path = (LOGS_ROOT / task_dir).resolve()
+    if task_path.parent != LOGS_ROOT.resolve():
+        return None
+    artifact = (task_path / filename).resolve()
+    return artifact if artifact.parent == task_path and artifact.is_file() else None
 
 # 当前由面板拉起的运行进程（同一时刻最多一个）
 _RUN_LOCK = threading.Lock()
@@ -140,6 +154,18 @@ def _idle_monitor(server) -> None:
 # ============================================================================
 # 数据解析
 # ============================================================================
+def task_label(session_id: str, task: str) -> str:
+    """以启动时间和原始指令显示任务，旧日志回退到文件名中的任务片段。"""
+    match = re.search(r"-(\d{8})-(\d{6})$", session_id)
+    if not match:
+        return task
+    try:
+        stamp = datetime.strptime(match.group(1) + match.group(2), "%Y%m%d%H%M%S")
+    except ValueError:
+        return task
+    return f"{stamp:%m-%d %H:%M:%S} {task}"
+
+
 def list_tasks() -> list:
     """列出所有任务日志（扁平 *.jsonl），返回概要列表（按时间倒序）。
 
@@ -152,10 +178,13 @@ def list_tasks() -> list:
     out = []
     for jl in sorted(LOGS_ROOT.glob("*.jsonl"), reverse=True):
         sid = jl.stem
+        task = re.sub(r"-\d{8}-\d{6}$", "", sid)
         status = "running"
         total_steps = 0
         total_tokens = 0
         total_time = 0.0
+        seen_steps = set()
+        event_count = 0
         try:
             lines = [ln for ln in jl.read_text(encoding="utf-8").splitlines() if ln.strip()]
             for line in lines:
@@ -163,24 +192,32 @@ def list_tasks() -> list:
                     ev = json.loads(line)
                 except Exception:
                     continue
+                event_count += 1
+                if isinstance(ev.get("task"), str) and ev["task"].strip():
+                    task = ev["task"]
                 if ev.get("phase") == "finish":
                     status = "done" if ev.get("success", True) else "aborted"
-                    total_time = float(ev.get("elapsed", 0.0) or 0.0)
+                    total_time = float(ev.get("elapsed", ev.get("t", 0.0)) or 0.0)
                     usage = ev.get("usage") or {}
                     total_tokens = int(usage.get("total_tokens", 0) or 0)
                     total_steps = int(ev.get("steps", 0) or 0)
+                else:
+                    total_time = max(total_time, float(ev.get("t", 0.0) or 0.0))
+                    if isinstance(ev.get("step"), int) and ev["step"] > 0:
+                        seen_steps.add(ev["step"])
             if status == "running":
-                # 没有 finish 事件：用事件条数近似步数
-                total_steps = len(lines)
+                total_steps = len(seen_steps)
         except Exception:
             pass
         out.append(
             {
                 "task_dir": sid,
                 "session_id": sid,
-                "task": sid,
+                "task": task,
+                "title": task_label(sid, task),
                 "status": status,
                 "total_steps": total_steps,
+                "event_count": event_count,
                 "total_time": round(total_time, 1),
                 "total_cost": 0.0,
                 "total_tokens": total_tokens,
@@ -206,11 +243,25 @@ def get_task_detail(task_dir: str) -> dict:
             except Exception:
                 pass
 
+    task = next((ev["task"] for ev in events
+                 if isinstance(ev.get("task"), str) and ev["task"].strip()),
+                re.sub(r"-\d{8}-\d{6}$", "", task_dir))
     status = "running"
     finish_usage = {}
     finish_steps = 0
+    finish_time = None
     steps = []
+    step_counts = {}
     prev_t = 0.0
+    # 任务开始墙钟时刻：文件名末尾 -YYYYMMDD-HHMMSS（DecisionLog 落盘时写入）。
+    # 旧日志事件无 wall 字段时，用它 + 相对时间 t 还原每步的 HH:MM:SS。
+    start_dt = None
+    _m = re.search(r"-(\d{8})-(\d{6})$", task_dir)
+    if _m:
+        try:
+            start_dt = datetime.strptime(_m.group(1) + _m.group(2), "%Y%m%d%H%M%S")
+        except ValueError:
+            start_dt = None
     for idx, ev in enumerate(events):
         phase = ev.get("phase", "log")
         msg = ev.get("msg", "")
@@ -223,10 +274,12 @@ def get_task_detail(task_dir: str) -> dict:
             # 真实步数取自 finish 的顶层 steps（与 list_tasks 口径一致）；
             # 注意 usage 里没有 steps 字段，别去 usage 里找。
             finish_steps = int(ev.get("steps", 0) or 0)
+            finish_time = float(ev.get("elapsed", ev.get("t", 0.0)) or 0.0)
             continue
+        step_counts[step_no] = step_counts.get(step_no, 0) + 1
         # 事件自带的指标（路由/屏幕指纹/调用次数等），用于卡片 detail
         metrics = {k: v for k, v in ev.items()
-                   if k not in ("t", "step", "phase", "msg")}
+                   if k not in ("t", "wall", "step", "phase", "msg")}
         # token 解析（兼容 int 或 {input,output}）
         tok = metrics.get("tokens")
         if isinstance(tok, dict):
@@ -239,10 +292,16 @@ def get_task_detail(task_dir: str) -> dict:
         t = float(ev.get("t", 0.0) or 0.0)
         dt = round(t - prev_t, 2) if prev_t else 0.0
         prev_t = t
+        # 每步墙钟时间（HH:MM:SS）：优先事件自带 wall（新版日志），否则 起始时刻 + t 还原
+        wall = ev.get("wall") if isinstance(ev.get("wall"), str) and ev.get("wall") else None
+        if wall is None and start_dt is not None:
+            wall = (start_dt + timedelta(seconds=t)).strftime("%H:%M:%S")
         action = {"action": phase, "summary": msg, "explain": msg, **metrics}
         steps.append({
             "idx": idx,              # 唯一事件序号：前端用它做 key，避免同 graph step 下多事件互相覆盖
             "step": step_no,         # graph step 编号（JSONL 里的 step 字段）
+            "substep": step_counts[step_no],
+            "wall_time": wall,       # 该步发生的系统时间 HH:MM:SS（可为 None）
             "action": action,
             "inference_time": 0,
             "execution_time": 0,
@@ -256,15 +315,18 @@ def get_task_detail(task_dir: str) -> dict:
     total_tokens = int(finish_usage.get("total_tokens", 0) or 0)
     if not total_tokens:
         total_tokens = sum(s["tokens"]["input"] + s["tokens"]["output"] for s in steps)
-    total_time = round(float(finish_usage.get("elapsed", prev_t) or prev_t), 1)
-    avg = (sum(s["total_time"] for s in steps) / len(steps)) if steps else 0.0
+    total_time = round(finish_time if finish_time is not None else prev_t, 1)
+    graph_steps = finish_steps or len({s["step"] for s in steps if s["step"] > 0})
+    avg = total_time / graph_steps if graph_steps else 0.0
     return {
         "task_dir": task_dir,
         "session_id": task_dir,
-        "task": task_dir,
+        "task": task,
+        "title": task_label(task_dir, task),
         "status": status,
         "stats": {
-            "total_steps": finish_steps or len(steps),
+            "total_steps": graph_steps,
+            "total_time": total_time,
             "total_tokens": total_tokens,
             "avg_step": round(avg, 2),
         },
@@ -272,12 +334,8 @@ def get_task_detail(task_dir: str) -> dict:
     }
 
 
-def get_live(task_dir: str) -> dict:
-    """轻量版：只回「最新一步 + 计数」，供下指令页每 2 秒轮询刷实时卡片。
-
-    为什么不直接复用 /api/task/<dir>：那个会把整条轨迹（每步 action / evidence /
-    图片 URL）全序列化，步骤一多响应就是几十 KB，2 秒一次纯属白耗。这里只切最后一步。
-    """
+def get_live(task_dir: str, after_idx: int | None = None) -> dict:
+    """按事件序号增量返回，避免两次轮询之间的事件丢失。"""
     detail = get_task_detail(task_dir)
     if not detail:
         return {"ok": False, "error": "task not found"}
@@ -286,9 +344,15 @@ def get_live(task_dir: str) -> dict:
     if steps:
         s = steps[-1]
         last = {k: s.get(k) for k in (
-            "idx", "step", "action", "image", "total_time", "execution_time",
+            "idx", "step", "substep", "wall_time", "action", "image", "total_time", "execution_time",
             "inference_time", "tokens", "noop", "evidence",
         )}
+    updates = []
+    if after_idx is not None:
+        updates = [{k: s.get(k) for k in (
+            "idx", "step", "substep", "wall_time", "action", "image", "total_time",
+            "execution_time", "inference_time", "tokens", "noop", "evidence",
+        )} for s in steps if s["idx"] > after_idx]
     return {
         "ok": True,
         "task_dir": detail["task_dir"],
@@ -296,6 +360,7 @@ def get_live(task_dir: str) -> dict:
         "status": detail["status"],
         "stats": detail["stats"],
         "last": last,
+        "updates": updates,
     }
 
 
@@ -461,14 +526,6 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json({"error": "设置仅允许本机访问"}, 403)
                 else:
                     self._send_json(_settings_api().public_settings(CONFIG_PATH))
-            elif path == "/api/settings/grid-preview":
-                if not self._settings_allowed():
-                    self._send_json({"error": "设置仅允许本机访问"}, 403)
-                else:
-                    try:
-                        self._send_json({"ok": True, **_settings_api().grid_preview(CONFIG_PATH)})
-                    except Exception as e:
-                        self._send_json({"ok": False, "error": str(e)})
             elif path == "/api/tasks":
                 self._send_json(list_tasks())
             elif path.startswith("/api/task/"):
@@ -478,9 +535,21 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json({"error": "task not found"}, 404)
                 else:
                     self._send_json(detail)
+            elif path == "/api/artifact":
+                task_dir = qs.get("task", [""])[0]
+                filename = qs.get("file", [""])[0]
+                artifact = task_xml_artifact(task_dir, filename)
+                if artifact is None:
+                    self._send(404, b"not found", "text/plain; charset=utf-8")
+                else:
+                    self._send(200, artifact.read_bytes(), "application/xml; charset=utf-8")
             elif path == "/api/live":
                 task_dir = qs.get("task", [""])[0]
-                self._send_json(get_live(task_dir))
+                try:
+                    after_idx = int(qs["after"][0]) if "after" in qs else None
+                except (ValueError, IndexError):
+                    after_idx = None
+                self._send_json(get_live(task_dir, after_idx))
             elif path == "/api/heartbeat":
                 # 页面心跳：仅刷新活跃时间（_touch 已在 do_GET 开头做过）
                 self._send_json({"ok": True})
@@ -767,8 +836,11 @@ BASE_CSS = r"""
   .live-list::-webkit-scrollbar-thumb { background:#d8dce1; border-radius:4px; }
   .live-list::-webkit-scrollbar-thumb:hover { background:#c2c8cf; }
   .live-list::-webkit-scrollbar-track { background:transparent; }
-  .live-item { display:flex; gap:11px; align-items:flex-start; padding:9px 8px;
+  .live-item { display:block; padding:9px 8px;
                border-radius:9px; border-left:3px solid transparent; }
+  .phase-group { margin:14px 0 7px; padding:8px 10px; border-radius:8px;
+                 background:#eaf2ff; color:#174ea6; font-weight:700; font-size:14px; }
+  .timeline .phase-group { margin-top:18px; }
   /* 最后一行就是「正在执行/最新一步」，用 CSS 自动高亮，不用 JS 维护 */
   .live-item:last-child { background:#f5f9ff; border-left-color:#2563eb; }
   /* 固定 126×80 的行高盒子：截图懒加载完会改变行高，把已滚到底的列表顶离底部，
@@ -815,11 +887,23 @@ BASE_CSS = r"""
   .a-SCROLL { background:#0891b2; } .a-AWAKE { background:#ca8a04; }
   .a-COMPLETE { background:#059669; }
   /* AutomotiveGUI 决策链 phase 配色（无截图，靠颜色区分阶段） */
-  .a-perceive { background:#0891b2; } .a-route { background:#7c3aed; }
-  .a-decide { background:#2563eb; } .a-act { background:#059669; }
-  .a-verify { background:#0891b2; } .a-recovery { background:#ca8a04; }
-  .a-guard { background:#64748b; } .a-finish { background:#059669; }
-  .a-skill { background:#7c3aed; } .a-error { background:#dc2626; } .a-log { background:#475569; }
+  .a-perceive { background:#0369a1; } .a-route { background:#6d28d9; }
+  .a-decide { background:#1d4ed8; } .a-act { background:#047857; }
+  .a-verify { background:#0f766e; } .a-recovery { background:#c2410c; }
+  .a-guard { background:#334155; } .a-finish { background:#15803d; }
+  .a-skill { background:#7e22ce; } .a-error { background:#b91c1c; } .a-log { background:#475569; }
+  .a-setup { background:#475569; } .a-xml { background:#0e7490; }
+  .a-glm_request { background:#be185d; } .a-glm_response { background:#db2777; }
+  .a-input { background:#a16207; } .a-ad { background:#b45309; }
+  .card.p-setup { border-left:4px solid #475569; } .card.p-xml { border-left:4px solid #0e7490; }
+  .card.p-glm_request { border-left:4px solid #be185d; } .card.p-glm_response { border-left:4px solid #db2777; }
+  .card.p-perceive { border-left:4px solid #0369a1; } .card.p-route { border-left:4px solid #6d28d9; }
+  .card.p-decide { border-left:4px solid #1d4ed8; } .card.p-act { border-left:4px solid #047857; }
+  .card.p-verify { border-left:4px solid #0f766e; } .card.p-recovery { border-left:4px solid #c2410c; }
+  .card.p-guard { border-left:4px solid #334155; } .card.p-finish { border-left:4px solid #15803d; }
+  .card.p-skill { border-left:4px solid #7e22ce; } .card.p-ad { border-left:4px solid #b45309; }
+  .card.p-input { border-left:4px solid #a16207; } .card.p-error { border-left:4px solid #b91c1c; }
+  .card.p-log { border-left:4px solid #475569; }
   .step-no { color:#7b8794; font-weight:600; }
   .meta { margin:8px 0; font-size:13px; color:#3e4c59; line-height:1.6; word-break:break-all; }
   .meta b { color:#1f2933; }
@@ -926,6 +1010,46 @@ COMMON_JS = r"""
 const $ = (s) => document.querySelector(s);
 function esc(s){ return String(s==null?'':s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 
+// 两个页面共用同一套解释；阶段名和原始事件仍保留，便于定位源码与日志。
+function eventSummary(a){
+  const phase = a.action || 'log', msg = a.summary || a.explain || '';
+  if(phase === 'glm_request') return a.request_kind === 'initial_app_route'
+    ? '请求模型选择启动应用和技能' : '请求模型判断下一步操作';
+  if(phase === 'glm_response') return a.request_kind === 'initial_app_route'
+    ? '模型已返回启动应用和技能的选择' : '模型已返回下一步决策';
+  if(phase === 'perceive') return '已观察屏幕：' + msg;
+  if(phase === 'act'){
+    let m = /^OK tap\((\d+),(\d+)\)/.exec(msg);
+    if(m) return '点击屏幕（' + m[1] + '，' + m[2] + '）成功';
+    if(msg === 'OK back') return '返回上一页成功';
+    if(msg === 'OK home') return '返回桌面成功';
+  }
+  if(phase === 'decide'){
+    const m = /^([A-Z_]+)(?:\s+([^—]*?))?\s*—\s*(.*)$/.exec(msg);
+    if(m){
+      const names = {CLICK:'点击', LONG_PRESS:'长按', TYPE:'输入', SCROLL:'滚动',
+        ROLL_TO:'调整滚轮', DRAG:'拖动', BACK:'返回', HOME:'回桌面',
+        LAUNCH:'启动应用', SKILL:'加载技能', WAIT:'等待', COMPLETE:'完成任务', FAIL:'任务失败'};
+      return '模型决定' + (names[m[1]] || m[1]) + (m[3] ? '：' + m[3] : '');
+    }
+  }
+  return msg;
+}
+function eventTechnical(a){
+  const labels = {artifact:'原始文件', chars:'字符数', request_kind:'模型请求用途',
+    attempt:'尝试次数', latency_ms:'模型耗时（毫秒）', in_tok:'输入 token',
+    out_tok:'输出 token', status:'状态', adb_detail:'ADB 错误', command:'ADB 命令',
+    dump_ms:'获取 XML 耗时（毫秒）', dump_exit:'生成退出码', dump_stdout:'生成输出',
+    dump_stderr:'生成错误', remote_file:'设备文件检查', stage:'失败阶段',
+    adb_exit:'ADB 退出码', shot_ms:'截图耗时（毫秒）'};
+  const kinds = {initial_app_route:'启动应用与技能选择', decide:'下一步决策'};
+  return Object.entries(a).filter(([k,v]) =>
+    !['action','summary','explain','call_id','task'].includes(k) && v !== '' && v != null)
+    .map(([k,v]) => '<b>' + esc(labels[k] || k) + '：</b>'
+      + esc(k === 'request_kind' ? (kinds[v] || v) : (typeof v === 'object' ? JSON.stringify(v) : v)))
+    .join(' · ');
+}
+
 // 大圣喵状态机：idle 呼吸 / receiving 弹一下 / thinking 摇尾思考 / happy 眯眼大笑
 const MOUTH = {
   'idle':'M27.5 40.5 Q32 43.6 36.5 40.5', 'receiving':'M27.5 40.5 Q32 43.6 36.5 40.5',
@@ -991,31 +1115,42 @@ function clearLive(){
 }
 
 function stepKey(s){ return (s && s.idx != null) ? String(s.idx) : (s && s.step != null ? String(s.step) : ''); }
+function graphStepLabel(n){ return Number(n) === 0 ? '任务准备' : '第 ' + n + ' 步'; }
 
-function liveItemHTML(s){
+function xmlSummary(a){
+  if(a.action !== 'xml') return '';
+  const chars = Number(a.chars || 0).toLocaleString('zh-CN');
+  const time = Number.isFinite(Number(a.dump_ms)) ? ' · ' + (Number(a.dump_ms) / 1000).toFixed(2) + ' 秒' : '';
+  return a.status === 'ok' ? 'XML 获取成功 · ' + chars + ' 字符' + time
+       : a.status === 'empty' ? 'XML 内容为空' + time
+       : 'XML 获取失败（' + (a.status || '状态未知') + '）' + time;
+}
+
+function liveItemHTML(s, firstInStep){
   const a = s.action || {};
   const phase = a.action || 'log';
-  const msg = a.summary || a.explain || '';
+  const msg = xmlSummary(a) || eventSummary(a);
   const tk = s.tokens || {}, tok = (tk.input || 0) + (tk.output || 0);
-  const extra = Object.entries(a).filter(([k]) => !['action','summary','explain'].includes(k))
-    .map(([k,v]) => k + '=' + (typeof v === 'object' ? JSON.stringify(v) : v)).join(' · ');
-  const meta = 't+' + (s.total_time || 0) + 's' + (tok ? ' · ' + tok + ' tok' : '');
+  const extra = eventTechnical(a);
+  const meta = (s.wall_time ? s.wall_time + '  cost:' + (s.total_time || 0) + 's' : 't+' + (s.total_time || 0) + 's') + (tok ? ' · ' + tok + ' tok' : '');
   return '<div class="live-item" data-step="' + esc(stepKey(s)) + '">'
+    + (firstInStep ? '<div class="phase-group">' + esc(graphStepLabel(s.step)) + '</div>' : '')
     + '<div class="mini-body">'
     +   '<div class="mini-head">'
-    +     '<span class="idx-no">#' + esc(s.idx != null ? s.idx : '') + '</span>'
+    +     '<span class="idx-no">' + esc(s.substep != null ? s.substep : '') + '</span>'
     +     '<span class="atype a-' + esc(phase) + '">' + esc(phase) + '</span>'
     +     '<span class="mini-msg">' + esc(msg) + '</span>'
     +   '</div>'
-    +   (extra ? '<div class="mini-explain">' + esc(extra) + '</div>' : '')
-    +   '<div class="mini-meta">' + esc(meta) + ' · graph step ' + esc(s.step != null ? s.step : '') + '</div>'
+    +   (extra ? '<div class="mini-explain">' + extra + '</div>' : '')
+    +   '<div class="mini-meta">' + esc(meta) + '</div>'
     + '</div></div>';
 }
 
 function appendStep(s){
   const list = $('#liveList'); if(!list) return;
   const box = document.createElement('div');
-  box.innerHTML = liveItemHTML(s);
+  const i = liveSteps.length - 1;
+  box.innerHTML = liveItemHTML(s, i === 0 || liveSteps[i-1].step !== s.step);
   list.appendChild(box.firstElementChild);
   if(stickBottom) list.scrollTop = list.scrollHeight;
 }
@@ -1025,7 +1160,8 @@ function replaceStep(s){
   const row = list.querySelector('[data-step="' + stepKey(s) + '"]');
   if(!row) return;
   const box = document.createElement('div');
-  box.innerHTML = liveItemHTML(s);
+  const i = liveSteps.findIndex(x => stepKey(x) === stepKey(s));
+  box.innerHTML = liveItemHTML(s, i === 0 || liveSteps[i-1].step !== s.step);
   row.replaceWith(box.firstElementChild);
 }
 
@@ -1039,15 +1175,15 @@ function renderLive(d){
   const b = BADGE[liveStatus] || BADGE.running;
   setBadge(b[0], b[1]);
   $('#liveTask').textContent = d.task || '';
-  const s = d.last;
-  if(s){
+  const updates = Array.isArray(d.updates) ? d.updates : (d.last ? [d.last] : []);
+  updates.forEach(s => {
     const key = stepKey(s), i = liveSteps.findIndex(x => stepKey(x) === key);
     if(i < 0){ liveSteps.push(s); appendStep(s); }       // 新的一步：往列表尾部追加
     else if(JSON.stringify(liveSteps[i]) !== JSON.stringify(s)){
       liveSteps[i] = s; replaceStep(s);                  // 同一步内容更新（截图后到等）
     }
-    $('#liveCount').textContent = '共 ' + liveSteps.length + ' 步';
-  }
+  });
+  $('#liveCount').textContent = '第 ' + (d.stats?.total_steps || 0) + ' 步 · ' + liveSteps.length + ' 条事件';
   showCard(true);
 }
 
@@ -1061,8 +1197,8 @@ async function loadLiveHistory(dir){
     liveSteps = d.steps.slice();
     liveStatus = d.status || 'running';
     const list = $('#liveList'); if(!list) return;
-    list.innerHTML = liveSteps.map(liveItemHTML).join('');
-    const c = $('#liveCount'); if(c) c.textContent = '共 ' + liveSteps.length + ' 步';
+    list.innerHTML = liveSteps.map((item, i) => liveItemHTML(item, i === 0 || liveSteps[i-1].step !== item.step)).join('');
+    const c = $('#liveCount'); if(c) c.textContent = '第 ' + (d.stats?.total_steps || 0) + ' 步 · ' + liveSteps.length + ' 条事件';
     const t = $('#liveTask'); if(t) t.textContent = d.task || '';
     showCard(true);                       // 必须先显示：面板带 hidden 时是 display:none，
     list.scrollTop = list.scrollHeight;   // scrollHeight 为 0，此时赋 scrollTop 是空操作，
@@ -1073,7 +1209,8 @@ async function loadLiveHistory(dir){
 async function fetchLive(){
   if(!curDir) return;
   try {
-    const r = await fetch('/api/live?task=' + encodeURIComponent(curDir));
+    const after = liveSteps.length ? Math.max(...liveSteps.map(s => Number(s.idx) || 0)) : -1;
+    const r = await fetch('/api/live?task=' + encodeURIComponent(curDir) + '&after=' + after);
     renderLive(await r.json());
   } catch(e){}
 }
@@ -1093,11 +1230,11 @@ async function tick(){
       const cur = liveSteps.length ? liveSteps[liveSteps.length - 1] : null;
       const lastPhase = cur && cur.action ? cur.action.action : '';
       const lastGraphStep = cur ? cur.step : null;
-      setLive('🔴 运行中 · 已记录 ' + liveSteps.length + ' 条'
-              + (cur ? ' · 最新 ' + lastPhase + (lastGraphStep != null ? '（graph step ' + lastGraphStep + '）' : '') : ''));
+      setLive('🔴 运行中 · ' + me.total_steps + ' 步 · 已记录 ' + liveSteps.length + ' 条事件'
+              + (cur ? ' · 最新 ' + lastPhase + (lastGraphStep != null ? '（' + graphStepLabel(lastGraphStep) + '）' : '') : ''));
     });
-    staleTicks = (me.total_steps === lastSteps) ? staleTicks + 1 : 0;
-    lastSteps = me.total_steps;
+    staleTicks = (me.event_count === lastSteps) ? staleTicks + 1 : 0;
+    lastSteps = me.event_count;
     if(staleTicks >= 15){                // 30s 步数没动：不假装还在跑
       setMascot('idle');
       setLive('⏸ 30 秒无新动作，任务可能已中断（去任务日志确认）');
@@ -1419,6 +1556,30 @@ LOGS_JS = r"""
 try { window.name = 'lg_logs'; } catch(e){}
 
 let currentDir = null, timer = null;
+function graphStepLabel(n){ return Number(n) === 0 ? '任务准备' : '第 ' + n + ' 步'; }
+
+function xmlLogView(a, taskDir){
+  if(a.action !== 'xml') return null;
+  const elapsed = Number.isFinite(Number(a.dump_ms)) ? ' · ' + (Number(a.dump_ms) / 1000).toFixed(2) + ' 秒' : '';
+  const count = Number(a.chars || 0).toLocaleString('zh-CN');
+  const title = a.status === 'ok' ? 'XML 获取成功 · ' + count + ' 字符' + elapsed
+              : a.status === 'empty' ? 'XML 内容为空' + elapsed
+              : 'XML 获取失败（' + (a.status || '状态未知') + '）' + elapsed;
+  const url = '/api/artifact?task=' + encodeURIComponent(taskDir)
+            + '&file=' + encodeURIComponent(a.artifact || '');
+  const link = a.artifact ? `<a href="${url}" target="_blank" rel="noopener">查看原始 XML</a>` : '';
+  const labels = {status:'状态', adb_detail:'ADB 错误', command:'ADB 命令',
+    dump_exit:'生成退出码', dump_stdout:'生成输出', dump_stderr:'生成错误',
+    read_exit:'读取退出码', remote_file:'设备文件检查', stage:'失败阶段',
+    adb_exit:'ADB 退出码', dump_ms:'耗时（毫秒）', chars:'字符数'};
+  const fields = Object.entries(a).filter(([k,v]) =>
+    !['action','summary','explain','artifact','call_id'].includes(k) && v !== '' && v != null)
+    .map(([k,v]) => `<b>${esc(labels[k] || k)}：</b>${esc(typeof v === 'object' ? JSON.stringify(v) : v)}`)
+    .join(' · ');
+  const diagnostics = a.status === 'ok' ? ''
+    : `<details class="meta"><summary>诊断详情</summary>${fields}</details>`;
+  return {summary: title, detail: link, diagnostics};
+}
 
 async function loadTasks(prefer){
   const r = await fetch('/api/tasks'); const list = await r.json();
@@ -1426,7 +1587,8 @@ async function loadTasks(prefer){
   list.forEach(t => {
     const o = document.createElement('option');
     o.value = t.task_dir;
-    o.textContent = `${t.task_dir} | ${t.task||'(无)'} | ${t.status==='done'?'✅':'⏳'} ${t.total_steps}步`;
+    o.textContent = t.title || t.task;
+    o.title = o.textContent;
     sel.appendChild(o);
   });
   const pick = (prefer && list.find(t => t.task_dir === prefer)) ? prefer
@@ -1441,34 +1603,44 @@ async function loadTask(dir, animate){
   if(d.error){ $('#timeline').innerHTML = `<div class="empty">${esc(d.error)}</div>`; return; }
   // 统计卡
   $('#stats').innerHTML = `
-    <div class="stat"><div class="k">任务</div><div class="v" style="font-size:14px">${esc(d.task)}</div></div>
+    <div class="stat"><div class="k">任务</div><div class="v" style="font-size:14px;white-space:normal;overflow-wrap:anywhere">${esc(d.title || d.task)}</div></div>
     <div class="stat"><div class="k">状态</div><div class="v"><span class="badge ${d.status}">${d.status==='done'?'已完成':(d.status==='aborted'?'已中止':'运行中')}</span></div></div>
     <div class="stat"><div class="k">步数</div><div class="v">${d.stats.total_steps}</div></div>
+    <div class="stat"><div class="k">任务总耗时</div><div class="v">${d.stats.total_time}s</div></div>
     <div class="stat"><div class="k">平均步耗时</div><div class="v">${d.stats.avg_step}s</div></div>
     <div class="stat"><div class="k">总 Token</div><div class="v">${d.stats.total_tokens}</div></div>
   `;
   // 时间线
   const tl = $('#timeline'); tl.innerHTML = '';
   if(!d.steps.length){ tl.innerHTML = '<div class="empty">暂无步骤数据</div>'; }
+  let previousGraphStep = null;
   d.steps.forEach(s => {
+    if(previousGraphStep !== s.step){
+      const heading = document.createElement('div');
+      heading.className = 'phase-group';
+      heading.textContent = graphStepLabel(s.step);
+      tl.appendChild(heading);
+      previousGraphStep = s.step;
+    }
     const a = s.action || {};
-    const explain = a.explain ? `<div class="meta"><b>说明：</b>${esc(a.explain)}</div>` : '';
-    const detail = Object.entries(a).filter(([k]) => !['action','summary','explain','decision_source','_tool_call_id','_from_tool','chinese_resolved','typed_value'].includes(k))
-      .map(([k,v]) => `<b>${esc(k)}:</b> ${esc(v)}`).join(' · ');
+    const xml = xmlLogView(a, dir);
+    const explain = `<div class="meta"><b>${esc(xml ? xml.summary : eventSummary(a))}</b></div>`;
+    const tech = xml ? xml.diagnostics : eventTechnical(a);
+    const detail = xml ? xml.detail : tech;
     const ev = s.evidence ? `<div class="evidence">✅ 完成证据：${esc(s.evidence)}</div>` : '';
     const noop = s.noop ? `<div class="noop">⚠️ 上一步点击后界面无变化（控件树+画面均未变）</div>` : '';
     const card = document.createElement('div');
-    card.className = 'card';
+    card.className = 'card p-' + String(a.action || 'log').replace(/[^a-z_]/gi, '');
     card.innerHTML = `
       <div class="body">
         <div class="row1">
-          <span class="step-no">#${s.idx}</span>
+          <span class="step-no">${s.substep}</span>
           <span class="atype a-${esc(a.action||'')}">${esc(a.action||'?')}</span>
           ${a.decision_source?`<span class="badge" style="background:#e0e7ff;color:#3730a3">${esc(a.decision_source)}</span>`:''}
         </div>
         ${detail?`<div class="meta">${detail}</div>`:''}
         ${explain}
-        <div class="timing">推理 ${s.inference_time}s · 执行 ${s.execution_time}s · 总 ${s.total_time}s · token ${ (s.tokens.input||0)+(s.tokens.output||0) }</div>
+        <div class="timing">${s.wall_time ? s.wall_time + '  ' : ''}推理 ${s.inference_time}s · 执行 ${s.execution_time}s · 总 ${s.total_time}s · token ${ (s.tokens.input||0)+(s.tokens.output||0) }</div>
         ${ev}${noop}
       </div>`;
     tl.appendChild(card);
@@ -1493,7 +1665,6 @@ loadTasks(qsTask);
 """
 
 SETTINGS_JS = r"""
-let screenPreview = null;
 let devicePackages = [];
 let currentDeviceSerial = '';
 function appRows(){
@@ -1605,28 +1776,12 @@ function settingsPayload(){
             agc_target:numOrNull('#voiceAgcTarget'), agc_max_gain:numOrNull('#voiceAgcMaxGain'),
             agc_release:numOrNull('#voiceAgcRelease'), noise_rise:numOrNull('#voiceNoiseRise'),
             noise_factor:numOrNull('#voiceNoiseFactor')},
-    grid: {mode:$('#gridManual').checked ? 'manual' : 'auto',
-           cols:Number($('#gridCols').value), rows:Number($('#gridRows').value)},
     apps: appRows(), device_serial: currentDeviceSerial
   };
 }
 function status(id, message, good){
   const node = $(id); node.textContent = message;
   node.className = 'settings-message ' + (good ? 'good' : 'error');
-}
-function updateGrid(){
-  const manual = $('#gridManual').checked;
-  $('#gridCols').disabled = !manual;
-  $('#gridRows').disabled = !manual;
-  if(!screenPreview){
-    $('#gridPreview').textContent = '设备未连接或截图不可用；自动网格将在运行时按实际截图计算。';
-    return;
-  }
-  const w=screenPreview.width, h=screenPreview.height;
-  const c=manual ? Number($('#gridCols').value) : screenPreview.auto.cols;
-  const r=manual ? Number($('#gridRows').value) : screenPreview.auto.rows;
-  $('#gridPreview').textContent = `${w}×${h} 截图；自动建议 ${screenPreview.auto.cols}×${screenPreview.auto.rows}；`
-    + `当前表单将使用 ${c}×${r}（单格约 ${Math.round(w/c)}×${Math.round(h/r)}px）。保存后对新任务生效。`;
 }
 async function readSettings(){
   try {
@@ -1640,9 +1795,6 @@ async function readSettings(){
     $('#modelMaxTokens').value = data.model.max_tokens;
     $('#modelTimeout').value = data.model.timeout;
     $('#modelMaxRetries').value = data.model.max_retries;
-    $('#gridManual').checked = data.grid.mode === 'manual';
-    $('#gridCols').value = data.grid.cols;
-    $('#gridRows').value = data.grid.rows;
     $('#voiceAppid').value = data.voice.appid || '';
     $('#voiceApiKey').value = data.voice.api_key || '';
     $('#voiceApiSecret').value = data.voice.api_secret || '';
@@ -1671,17 +1823,7 @@ async function readSettings(){
       currentDeviceSerial = '';
       status('#appsDeviceStatus', `暂时无法核对设备：${error.message}。配置文件：${data.config_path}`, false);
     }
-    updateGrid();
   } catch(error){ status('#saveStatus', error.message, false); }
-}
-async function readPreview(){
-  try {
-    const response = await fetch('/api/settings/grid-preview', {cache:'no-store'});
-    const data = await response.json();
-    screenPreview = data.ok ? data : null;
-    if(!data.ok) $('#gridPreview').textContent = '无法预览设备：' + (data.error || '未知错误');
-    else updateGrid();
-  } catch(error){ screenPreview=null; updateGrid(); }
 }
 async function postSettings(path, body){
   const response = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'},
@@ -1690,9 +1832,6 @@ async function postSettings(path, body){
   if(!response.ok) throw new Error(data.error || data.message || '请求失败');
   return data;
 }
-$('#gridManual').addEventListener('change', updateGrid);
-$('#gridCols').addEventListener('input', updateGrid);
-$('#gridRows').addEventListener('input', updateGrid);
 $('#voiceEnabled').addEventListener('change', () => {
   $('#voiceFields').style.display = $('#voiceEnabled').checked ? '' : 'none';
 });
@@ -1738,7 +1877,6 @@ $('#saveBtn').onclick = async () => {
     status('#saveStatus', currentDeviceSerial
       ? '设置已保存；目标应用包名已针对当前设备核对。'
       : '设置已保存；应用包名尚未针对当前设备核对，请点「重新加载」后再直启。', true);
-    updateGrid();
   } catch(error){ status('#saveStatus', error.message, false); }
   finally { button.disabled=false; };
 };
@@ -1793,7 +1931,7 @@ $('#reloadAppsBtn').onclick = async () => {
     st.textContent = '重新加载失败：' + error.message;
   } finally { button.disabled = false; }
 };
-readSettings(); readPreview();
+readSettings();
 """
 
 # 下指令页：只有大圣喵 + 输入坞 + 一行状态，日志入口丢到新标签
@@ -1817,7 +1955,7 @@ PAGE_RUN_TPL = r"""<!DOCTYPE html>
     <div class="dock-inner">
       <div id="beanDock">/*__MASCOT__*/</div>
       <input id="taskInput" placeholder="输入任务，如：播放哔哩哔哩西部世界第一季第一集" autofocus />
-      <button id="voiceBtn" type="button" title="语音录入（边说边识别，再点一次结束）" aria-label="语音录入">
+      <button id="voiceBtn" type="button" title="语音录入" aria-label="语音录入">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
              stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <rect x="9" y="2.5" width="6" height="11" rx="3"/>
@@ -1941,17 +2079,6 @@ PAGE_SETTINGS_TPL = r"""<!DOCTYPE html>
       <div id="asrVerifyStatus" class="settings-message" role="status" aria-live="polite"></div>
     </div>
   </section>
-  <section class="settings-card">
-    <h2>VLM 网格</h2>
-    <label><input id="gridManual" type="checkbox"> 手动设置网格（优先于自动计算）</label>
-    <div class="settings-row">
-      <label class="field">列数<input id="gridCols" type="number" min="5" max="26" value="20" disabled></label>
-      <label class="field">行数<input id="gridRows" type="number" min="3" max="40" value="10" disabled></label>
-    </div>
-    <p id="gridPreview" class="settings-hint">正在读取屏幕尺寸…</p>
-    <p class="settings-hint">默认按实际截图尺寸自动计算；手动覆盖只对保存后的新任务生效。</p>
-  </section>
-
   <section class="settings-card">
     <h2>应用配置</h2>
     <p class="settings-hint">此处只维护目标应用。点击「重新加载」会以当前设备为准核对并保存目标应用的包名；另一设备上不存在的旧包名会清空，之后请从包名列表选正确包名再保存。获取到的全部包名只作为候选，不会全部写入配置。</p>

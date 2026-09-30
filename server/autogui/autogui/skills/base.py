@@ -48,6 +48,7 @@ class Skill:
     steps: list[dict] = field(default_factory=list)
     popups: list[dict] = field(default_factory=list)
     package: str = ""
+    configured_app: str = ""
 
     def signature(self) -> str:
         """一行技能签名，注入永久提示词块。
@@ -61,10 +62,14 @@ class Skill:
 class SkillBook:
     """全部已加载技能 + 执行器。"""
 
-    def __init__(self, root: Path | str, device: Device, text_input: TextInput):
+    def __init__(self, root: Path | str, device: Device, text_input: TextInput,
+                 app_packages: dict | None = None):
         self.device = device
         self.text_input = text_input
         self.root = Path(root)
+        # 页面配置（config.yaml apps 段，设置页设备探测）的应用名 -> 包名。
+        # 有 configured_app 绑定的技能优先用它；YAML 里的 app.package 仅作回退。
+        self.app_packages = dict(app_packages or {})
         self.by_id: dict[str, Skill] = {}
         self.load()
 
@@ -95,7 +100,11 @@ class SkillBook:
                     steps=list(spec.get("steps") or []),
                     popups=popups,
                     package=package,
+                    configured_app=str(doc.get("configured_app") or "").strip(),
                 )
+                # 包名以页面配置为准（设置页设备探测写入 config.yaml 的 apps 段）
+                if skill.configured_app and self.app_packages.get(skill.configured_app):
+                    skill.package = self.app_packages[skill.configured_app]
                 self.by_id[f"{skill.app}.{skill.name}"] = skill
 
     def index(self) -> str:
@@ -103,6 +112,11 @@ class SkillBook:
         return "\n".join(
             s.signature() for _, s in sorted(self.by_id.items(), key=lambda kv: kv[1].app) if s.guide
         ) or "（无）"
+
+    def for_configured_app(self, app_name: str) -> list[Skill]:
+        """Skills explicitly bound to a configured app for the initial model route."""
+        return [s for s in self.by_id.values()
+                if s.guide and s.configured_app == app_name]
 
     def guidance(self, key: str, params: dict | None = None) -> str:
         """返回给模型的操作指导，不执行任何设备动作。"""
@@ -363,5 +377,6 @@ def run_by_name(key: str, params: dict, *, device: Device | None = None) -> list
 
         device = dev()
     cfg = load()
-    book = SkillBook(PROJECT_ROOT / cfg.skills.directory, device, TextInput(device))
+    book = SkillBook(PROJECT_ROOT / cfg.skills.directory, device, TextInput(device),
+                     app_packages={a.name: a.package for a in (cfg.apps or []) if a.package})
     return book.run(key, params)

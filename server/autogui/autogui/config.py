@@ -40,32 +40,11 @@ def _decrypt_or_empty(value: str) -> str:
         return ""
 
 
-class GridConfig(BaseModel):
-    """VLM 兜底路由的叠加网格。
+class ImageConfig(BaseModel):
+    """VLM 截图编码参数。"""
 
-    横屏是显式声明的，而不是推导出来的：LightGUIAgent 的自动密度
-    （settings.py:159-171）把行数钳制到 ``max(15, ...)``，在 1920x1080
-    车机上会悄悄得到 15 行 ~128x72px 的格子，而不是横屏应有的 ~10 行。
-    见 技术方案评估.md §2 C-11。
-    """
-
-    mode: Literal["auto", "manual"] = "auto"
-    cols: int = Field(default=20, ge=5, le=26)  # 只在 manual 时使用；26 -> 列字母 A..Z
-    rows: int = Field(default=10, ge=3, le=40)
-    line_color: tuple = (255, 0, 0)
-    line_width: int = 3
-    label_size: int = 22
-    label_color: tuple = (255, 255, 0)
-    label_bg: tuple = (0, 0, 0, 180)
     jpeg_quality: int = Field(default=85, ge=40, le=100)
     max_side: int = Field(default=1568, ge=512, le=2560)  # 编码前先降采样
-
-    @field_validator("cols")
-    @classmethod
-    def _cols_fit_alphabet(cls, v: int) -> int:
-        if v > 26:
-            raise ValueError("grid.cols must be <= 26 (single-letter column labels A..Z)")
-        return v
 
 
 class GLMConfig(BaseModel):
@@ -85,6 +64,20 @@ class GLMConfig(BaseModel):
     max_tokens: int = 1024
     timeout: float = 30.0
     max_retries: int = 4
+    # 思考强度：low/high/max；空串=不发送该参数。
+    # 注意：llm.thundersoft.com 网关 9/29 实测忽略此参数（三档延迟与思考链长度无差异），
+    # 当前为占位配置；网关侧支持或换模型后即生效。默认 high。
+    reasoning_effort: str = "high"
+
+    @field_validator("reasoning_effort")
+    @classmethod
+    def _effort_enum(cls, v: str) -> str:
+        if v == "":
+            return ""
+        allowed = {"low", "high", "max"}
+        if v not in allowed:
+            raise ValueError(f"reasoning_effort 必须是 {sorted(allowed)} 之一或空串，得到 {v!r}")
+        return v
 
     @field_validator("api_key")
     @classmethod
@@ -103,6 +96,7 @@ class AgentConfig(BaseModel):
     history_window: int = Field(default=5, ge=1, le=20)
     token_budget: int = Field(default=8000, ge=1000, le=128000)
     tree_candidate_limit: int = Field(default=40, ge=5, le=200)
+    tree_candidate_token_budget: int = Field(default=900, ge=200, le=8000)
     reflection: Literal["cheap", "always", "off"] = "cheap"
 
 
@@ -159,7 +153,7 @@ class Config(BaseModel):
     device_serial: str = "auto"
     display_id: Optional[int] = None  # 默认捕获不是中控屏时才设置
     input_chain: list[str] = Field(default_factory=lambda: ["yadb", "adbkeyboard", "ascii"])
-    grid: GridConfig = Field(default_factory=GridConfig)
+    image: ImageConfig = Field(default_factory=ImageConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     glm: GLMConfig = Field(default_factory=GLMConfig)
     skills: SkillConfig = Field(default_factory=SkillConfig)
@@ -179,6 +173,11 @@ class Config(BaseModel):
             if not isinstance(loaded, dict):
                 raise ValueError(f"config.yaml must contain a mapping, got {type(loaded).__name__}")
             data = loaded
+            # Old configs kept JPEG parameters under grid. The retired grid
+            # dimensions are ignored while image quality keeps its value.
+            if "image" not in data and isinstance(data.get("grid"), dict):
+                data["image"] = {k: data["grid"][k] for k in ("jpeg_quality", "max_side")
+                                 if k in data["grid"]}
         return cls(**data)
 
     @property

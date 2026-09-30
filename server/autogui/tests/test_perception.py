@@ -1,4 +1,4 @@
-"""感知层：树压缩、横屏网格、屏幕指纹。"""
+"""感知层：树压缩、屏幕尺寸和屏幕指纹。"""
 
 import io
 
@@ -6,7 +6,7 @@ from PIL import Image
 
 from autogui.perception import tree as tree_mod
 from autogui.perception.capture import compute_signature, observe
-from autogui.perception.grid import Grid, encode_jpeg
+from autogui.perception.image import encode_jpeg
 from tests.conftest import EMPTY_TREE_XML, SAMPLE_XML
 
 
@@ -103,9 +103,28 @@ def test_dedup_and_priority_happen_before_limit():
     stats = {}
     cands = tree_mod.extract(xml, screen=(1080, 2400), limit=40, stats=stats)
     assert len(cands) == 40
-    assert stats == {"eligible": 91, "unique": 47, "selected": 40, "omitted_actionable": 0}
+    assert all(stats[key] == value for key, value in {
+        "eligible": 91, "unique": 47, "selected": 40, "omitted_actionable": 0,
+        "omitted_passive": 7, "target_lost": 0,
+    }.items())
     assert len([c for c in cands if c.bounds == (0, 100, 100, 200)]) == 1
     assert next(c for c in cands if c.rid == "timezone_button_row").clickable
+
+
+def test_task_target_survives_candidate_and_token_budget():
+    noise = [_ui_node(f"button{i}", f"[0,{i*30}][90,{i*30+25}]", clickable=True)
+             for i in range(65)]
+    title = _ui_node("song_title", "[200,1600][540,1640]", text="Simon")
+    artist = _ui_node("song_artist", "[200,1650][540,1680]", text="丁世光")
+    queue = _ui_node("queue_button", "[600,1600][700,1640]", text="添加到播放队列", clickable=True)
+    xml = "<hierarchy>" + "".join(noise + [title, artist, queue]) + "</hierarchy>"
+    stats = {}
+    cands = tree_mod.extract(xml, screen=(1080, 2400), limit=40, stats=stats,
+                             focus_terms=["Simon"], token_budget=900)
+    labels = {c.label for c in cands}
+    assert {"Simon", "丁世光", "添加到播放队列"} <= labels
+    assert stats["target_lost"] == 0
+    assert stats["candidate_tokens"] <= 900
 
 
 def test_render_preserves_action_and_state_attributes():
@@ -155,18 +174,7 @@ def test_number_picker_uses_numeric_description_when_text_is_a_title():
     assert "描述:19时" in tree_mod.render_candidates(cands)
 
 
-# ── 横屏网格 ───────────────────────────────────────────────────────────────────
-
-
-def test_grid_label_and_pixel_roundtrip():
-    g = Grid(width=1920, height=1080, cols=20, rows=10)
-    for label in ("A1", "T10", "J5", "E10"):
-        x, y = g.to_pixel(label)
-        assert 0 <= x < 1920 and 0 <= y < 1080
-        assert g.to_label(x, y) == label
-
-
-def test_observe_auto_grid_follows_current_frame():
+def test_observe_screen_geometry_follows_current_frame():
     buf = io.BytesIO()
     Image.new("RGB", (1080, 2400), "navy").save(buf, format="PNG")
 
@@ -178,34 +186,11 @@ def test_observe_auto_grid_follows_current_frame():
             return EMPTY_TREE_XML
 
         def screen_size(self):
-            return 1920, 1080  # 过期缓存不能影响实际截图网格
+            return 1920, 1080  # 过期缓存不能影响实际截图尺寸
 
-    observation, grid = observe(Device(), grid_mode="auto")
+    observation, screen = observe(Device())
     assert (observation.width, observation.height) == (1080, 2400)
-    assert (grid.cols, grid.rows) == (11, 22)
-
-
-def test_landscape_cells_are_squareish():
-    """LightGUIAgent 的自动密度在这里产生 ~128x72px 的格子；我们要接近正方形。"""
-    g = Grid(width=1920, height=1080, cols=20, rows=10)
-    ratio = g.cell_w / g.cell_h
-    assert 0.6 < ratio < 1.7
-
-
-def test_grid_rejects_out_of_range_labels():
-    g = Grid(width=1920, height=1080, cols=20, rows=10)
-    for bad in ("U5", "A11", "A0", "5A", "", "#3"):
-        assert not g.in_bounds(bad)
-
-
-def test_annotate_resyncs_to_actual_image_size():
-    """比缓存尺寸小的截图不能让标签与像素错位。"""
-    buf = io.BytesIO()
-    Image.new("RGB", (1280, 720), "navy").save(buf, format="PNG")
-    g = Grid(width=1920, height=1080, cols=20, rows=10)  # 故意用过期尺寸
-    img = g.annotate(buf.getvalue())
-    assert (g.width, g.height) == (1280, 720)
-    assert img.size == (1280, 720)
+    assert (screen.width, screen.height) == (1080, 2400)
 
 
 def test_encode_jpeg_downscales_to_max_side():

@@ -2,8 +2,8 @@
 # 普通任务只读取 guide，不执行下面的 steps。
 # steps 属于显式 --skill-only 配方；hint 是占位符，需在车机实测校准。
 name: music
-app:
-  package: ""            # 用 `python main.py --packages` 填
+configured_app: QQ音乐
+# 包名不写在这里：统一取 config.yaml apps 段（设置页设备探测）中「QQ音乐」的 package
 
 # App 级弹窗覆盖项；省略则用 autogui/skills/base.py 的 DEFAULT_POPUPS。
 popups:

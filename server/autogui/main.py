@@ -54,7 +54,8 @@ def _run_skill_direct(args, cfg, tools) -> int:
     """显式 --skill-only 调试入口：跳过模型直接执行配方。"""
     from autogui.skills.base import SkillBook, SkillMiss
 
-    book = SkillBook(Path(__file__).resolve().parent / cfg.skills.directory, tools.dev(), tools.text_input())
+    book = SkillBook(Path(__file__).resolve().parent / cfg.skills.directory, tools.dev(), tools.text_input(),
+                     app_packages={a.name: a.package for a in (cfg.apps or []) if a.package})
     print("可用配方：\n" + "\n".join(sorted(book.by_id)) + "\n")
 
     key, _, param = args.task.partition("=")
@@ -95,7 +96,6 @@ def cmd_packages(cfg) -> int:
 def cmd_check(cfg) -> int:
     """设备自检：硬故障记失败，定位质量和耗时问题记警告；不请求模型 API。"""
     from autogui.bridge.adb import ADBError, png_size
-    from autogui.perception.grid import auto_grid_dimensions, grid_dimensions
     from autogui.perception.tree import candidates_from_xml
 
     tools = _bootstrap(cfg)
@@ -129,14 +129,6 @@ def cmd_check(cfg) -> int:
         # 规则 4.2 把范围限定在中控屏；多屏车机可能抓到的是仪表屏，
         # 那会悄悄把错误的屏幕喂给模型。
         warn("多屏提示", f"发现 {len(displays)} 块屏 {displays}；确认截图是中控，必要时设 display_id")
-    if size:
-        cols, rows = grid_dimensions(*size, mode=cfg.grid.mode,
-                                     cols=cfg.grid.cols, rows=cfg.grid.rows)
-        recommended = auto_grid_dimensions(*size)
-        cw, ch = size[0] / cols, size[1] / rows
-        report("网格", True, f"{cfg.grid.mode} {cols}×{rows} → cell {cw:.0f}×{ch:.0f}px")
-        if not (60 <= cw <= 220 and 60 <= ch <= 220):
-            warn("网格密度", f"当前单格超出建议 60–220px；自动建议 {recommended[0]}×{recommended[1]}")
 
     t = time.perf_counter()
     xml = device.dump_xml()
@@ -147,7 +139,7 @@ def cmd_check(cfg) -> int:
         warn("控件树速度", f"{dump_ms:.0f}ms ≥ 3000ms，任务响应可能变慢")
     report("可寻址候选", True, f"{len(cands)} 个（≥3 可走 tree，否则走 VLM）")
     if len(cands) < 3:
-        warn("tree 不可用", "当前屏幕候选不足；主流程会使用 VLM 网格")
+        warn("tree 不可用", "当前屏幕候选不足；主流程会使用 VLM 截图")
 
     # P0：IME 必须在一轮 Unicode 输入尝试后保持完好。
     try:

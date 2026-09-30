@@ -31,9 +31,16 @@ from autogui.actions import ACTIONS, ACTION_NAMES, SCROLL_DIRECTIONS
 #   {"type":"SKILL","skill":"search_video",...}   -> 解析器读 name，报 SKILL needs name
 #   {"type":"TYPE","explain":"输入关键词钢铁侠"}    -> 解析器读 text，报 TYPE needs text
 # 由 ACTIONS 生成而不是手写，才能保证以后加动作时不会再漂移。
-_ACTION_FIELDS = "；".join(
-    f"{a.name}({', '.join(a.args)})" for a in ACTIONS if a.args
-)
+def _action_fields(route: str) -> str:
+    fields = []
+    for action in ACTIONS:
+        if not action.args:
+            continue
+        args = list(action.args)
+        if action.name in ("CLICK", "LONG_PRESS"):
+            args[0] = "node_ref | coord" if route == "tree" else "point | node_ref | coord"
+        fields.append(f"{action.name}({', '.join(args)})")
+    return "；".join(fields)
 
 _PROMPT_FILE = Path(__file__).with_name("prompt_text.yaml")
 _PROMPT_TEXT = yaml.safe_load(_PROMPT_FILE.read_text(encoding="utf-8"))
@@ -49,13 +56,21 @@ def render(name: str, **values: object) -> str:
 
 OUTPUT_RULE = render("output_rule")
 DECIDE_SCHEMA_TEXT = render("decide_schema_tree")
-DECIDE_SYSTEM = render(
-    "decide_system",
-    action_names=", ".join(ACTION_NAMES),
-    action_fields=_ACTION_FIELDS,
-    scroll_directions="/".join(SCROLL_DIRECTIONS),
-    output_rule=OUTPUT_RULE,
-)
+def _decide_system(route: str) -> str:
+    drag_rule = ("DRAG 的 from/to 都是设备屏幕像素 [x,y]。" if route == "tree"
+                 else "DRAG 的 from/to 都是当前发送截图的像素 [x,y]，程序会换算为设备坐标。")
+    return render(
+        "decide_system",
+        action_names=", ".join(ACTION_NAMES),
+        action_fields=_action_fields(route),
+        scroll_directions="/".join(SCROLL_DIRECTIONS),
+        drag_coordinate_rule=drag_rule,
+        output_rule=OUTPUT_RULE,
+    )
+
+
+DECIDE_SYSTEM = _decide_system("tree")
+DECIDE_SYSTEM_VLM = _decide_system("vlm")
 
 
 def decide_user_text(context_text: str, screen: tuple[int, int] | None = None) -> str:
@@ -74,13 +89,16 @@ def decide_user_text(context_text: str, screen: tuple[int, int] | None = None) -
     )
 
 
-def decide_user_vlm(context_text: str, jpeg_b64: str, grid_spec: str) -> list[dict]:
-    """兜底路由——一张叠加了网格的截图。"""
+def decide_user_vlm(context_text: str, jpeg_b64: str,
+                    image_size: tuple[int, int] | None = None) -> list[dict]:
+    """兜底路由——一张无覆盖物的截图。"""
     return [
         {"type": "text", "text": context_text},
         {
             "type": "text",
-            "text": render("decide_vlm_screen", grid_spec=grid_spec),
+            "text": render("decide_vlm_screen",
+                           image_width=(image_size or (0, 0))[0],
+                           image_height=(image_size or (0, 0))[1]),
         },
         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{jpeg_b64}"}},
         {"type": "text", "text": render("decide_vlm_output", schema_text=render("decide_schema_vlm"))},
@@ -88,12 +106,14 @@ def decide_user_vlm(context_text: str, jpeg_b64: str, grid_spec: str) -> list[di
 
 
 def build_decide_messages(
-    context_text: str, jpeg_b64: str | None, grid_spec: str,
+    context_text: str, jpeg_b64: str | None,
     screen: tuple[int, int] | None = None,
+    image_size: tuple[int, int] | None = None,
 ) -> list[dict]:
-    msgs = [{"role": "system", "content": DECIDE_SYSTEM}]
+    msgs = [{"role": "system", "content": DECIDE_SYSTEM_VLM if jpeg_b64 else DECIDE_SYSTEM}]
     if jpeg_b64:
-        msgs.append({"role": "user", "content": decide_user_vlm(context_text, jpeg_b64, grid_spec)})
+        msgs.append({"role": "user", "content": decide_user_vlm(context_text, jpeg_b64,
+                                                              image_size or screen)})
     else:
         msgs.append({"role": "user", "content": decide_user_text(context_text, screen)})
     return msgs
