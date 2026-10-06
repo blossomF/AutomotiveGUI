@@ -568,7 +568,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": str(e)}, 500)
 
     def do_POST(self):
-        global _LAST_SEEN
+        global _LAST_SEEN, _CFG
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         _touch()                     # 有请求 = 页面还在
@@ -617,35 +617,53 @@ class Handler(BaseHTTPRequestHandler):
                 finally:
                     _VOICE_LOCK.release()
             elif path == "/api/voice/stream/start":
-                # 流式语音：建立讯飞 IAT 会话（浏览器随后边录边发）
+                # 流式语音：建立讯飞 IAT 会话（浏览器随后边录边发），回传停止逻辑所需配置
                 _voice_stream_cleanup()
                 try:
-                    sid = _voice_stream_create(_load_cfg())
-                    self._send_json({"ok": True, "session": sid})
+                    cfg = _load_cfg()
+                    sid = _voice_stream_create(cfg)
+                    v = cfg.voice
+                    self._send_json({"ok": True, "session": sid, "settings": {
+                        "max_seconds": v.max_seconds,
+                        "silence_seconds": v.silence_seconds,
+                        "silence_threshold": v.silence_threshold,
+                        "min_voice_seconds": v.min_voice_seconds,
+                        "agc_target": v.agc_target,
+                        "agc_max_gain": v.agc_max_gain,
+                        "agc_release": v.agc_release,
+                        "noise_rise": v.noise_rise,
+                        "noise_factor": v.noise_factor,
+                    }})
                 except Exception as e:  # noqa: BLE001
                     self._send_json({"ok": False, "error": str(e)}, 400)
-            elif path in ("/api/voice/stream/chunk", "/api/voice/stream/stop", "/api/voice/stream/abort"):
+            elif path.startswith("/api/voice/stream/"):
+                parts = path.split("/")
+                if len(parts) == 6 and parts[1] == "api" and parts[4] in ("chunk", "stop", "abort"):
+                    action, sid = parts[4], parts[5]
+                else:
+                    action, sid = "", ""
+                if not sid:
+                    self._send_json({"ok": False, "error": "未知语音流操作"}, 400)
+                    return
                 _voice_stream_cleanup()
-                item = _voice_stream_get(payload.get("sid", ""))
+                item = _voice_stream_get(sid)
                 if item is None:
                     self._send_json({"ok": False, "error": "流式会话不存在或已过期"}, 404)
                     return
                 sess = item["session"]
-                if path == "/api/voice/stream/chunk":
-                    try:
-                        pcm = base64.b64decode(payload.get("audio", ""))
-                    except Exception:
-                        pcm = b""
-                    if len(pcm) > 32768:
+                if action == "chunk":
+                    pcm = raw if len(raw) > 2 else b""
+                    if len(pcm) > 16384:
                         self._send_json({"ok": False, "error": "音频帧过大"}, 413)
                         return
                     item["frames"] += 1
                     item["bytes"] += len(pcm)
                     if item["frames"] == 1:
-                        print(f"   首帧到达 {payload.get('sid','')}：{len(pcm)} 字节")
+                        print(f"   首帧到达 {sid}：{len(pcm)} 字节")
                     sess.send_audio(pcm)
-                    self._send_json({"ok": True, "partial": sess.partial})
-                elif path == "/api/voice/stream/stop":
+                    st, err = sess.state()
+                    self._send_json({"ok": True, "partial": sess.partial, "state": st, "error": err})
+                elif action == "stop":
                     try:
                         text = sess.finish(timeout=10.0)
                     except Exception as e:  # noqa: BLE001
@@ -653,19 +671,21 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     finally:
                         with _VOICE_STREAMS_LOCK:
-                            _VOICE_STREAMS.pop(payload.get("sid", ""), None)
+                            _VOICE_STREAMS.pop(sid, None)
                     print(f"   ✓ 流式识别完成：{item['frames']} 帧/{item['bytes']} 字节 | {len(text)} 字 | {text[:80]}")
                     self._send_json({"ok": True, "text": text})
-                else:  # abort
+                else:  # abort（body 可为空：浏览器 sendBeacon 使用）
                     sess.close()
                     with _VOICE_STREAMS_LOCK:
-                        _VOICE_STREAMS.pop(payload.get("sid", ""), None)
+                        _VOICE_STREAMS.pop(sid, None)
                     print(f"   ✗ 流式会话中止：{item['frames']} 帧/{item['bytes']} 字节")
                     self._send_json({"ok": True})
             elif path == "/api/settings":
                 try:
                     with _SETTINGS_LOCK:
                         saved = _settings_api().save_settings(CONFIG_PATH, payload)
+                    with _CFG_LOCK:
+                        _CFG = None   # 保存后丢弃缓存，语音等路径立即用新值
                     self._send_json({"ok": True, **saved})
                 except Exception as e:
                     self._send_json({"ok": False, "error": str(e)}, 400)
@@ -744,6 +764,12 @@ BASE_CSS = r"""
   #voiceBtn svg { display:block; }
   #voiceBtn:hover { border-color:#2563eb; color:#2563eb; background:#eff6ff; }
   #voiceBtn:active { transform:scale(.94); }
+  /* 语音电平条：录音时在麦克风键旁显示 */
+  .voice-level { width:5px; height:26px; background:#e5e7eb; border-radius:3px;
+                 overflow:hidden; align-self:center; display:none; }
+  .voice-level.show { display:flex; flex-direction:column; justify-content:flex-end; }
+  #voiceLevelFill { width:100%; height:0%; background:#22c55e; border-radius:3px;
+                    transition:height 80ms linear; }
   #voiceBtn.recording { background:#fee2e2; border-color:#ef4444; color:#dc2626;
                         animation: voicePulse 1.2s ease-in-out infinite; }
   @keyframes voicePulse { 0%,100% { box-shadow:0 0 0 0 rgba(239,68,68,.4); }
@@ -1274,50 +1300,132 @@ function fillTaskText(text, autoRun){
   if(autoRun && inp.value) $('#runBtn').click();
 }
 // —— 流式语音：浏览器麦克风边录边发 → 服务端转发讯飞 IAT → 实时出字 ——
-let voiceStream = null;   // {sid, stream, ctx, node, rec, startedAt, silentSince}
-
-function f32to16(buf){
-  const out = new Int16Array(buf.length);
-  for(let i = 0; i < buf.length; i++){
-    const s = Math.max(-1, Math.min(1, buf[i]));
-    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+// 停止参数全部读 /settings voice 段配置（静音停止/最长录音/静音阈值/最少语音）
+const VOICE_FRAME_SAMPLES = 1280;   // 80ms @16kHz，讯飞推荐帧长
+// AudioWorklet：AGC（快攻慢放）+ 16k 线性重采样（必要时）+ 80ms 帧打包
+function buildVoiceWorkletCode(S){
+  return `
+class VoiceCaptureProcessor extends AudioWorkletProcessor {
+  constructor(){
+    super();
+    this.resample = (sampleRate !== 16000);
+    this.step = 16000 / sampleRate;
+    this.pos = 0; this.prev = 0;
+    this.peak = 1e-4;
+    this.buf = new Int16Array(1280);
+    this.fill = 0;
   }
-  return out;
+  emit16(x){
+    const s = Math.max(-1, Math.min(1, x));
+    this.buf[this.fill++] = Math.round(s * 32767);
+    if(this.fill >= 1280){
+      const out = this.buf; this.buf = new Int16Array(1280); this.fill = 0;
+      this.port.postMessage({type:'pcm', buf: out.buffer}, [out.buffer]);
+    }
+  }
+  process(inputs){
+    const ch = (inputs[0] && inputs[0][0]) ? inputs[0][0] : null;
+    if(!ch || !ch.length) return true;
+    let sum = 0;
+    for(let i = 0; i < ch.length; i++) sum += ch[i] * ch[i];
+    const rms = Math.sqrt(sum / ch.length);
+    this.port.postMessage({type:'rms', value: rms});
+    // AGC：峰值快攻慢放（参数来自设置页）
+    if(rms > this.peak) this.peak = rms; else this.peak *= ${S.agc_release};
+    const g = Math.min(${S.agc_target} / this.peak, ${S.agc_max_gain});
+    for(let i = 0; i < ch.length; i++){
+      const x = ch[i] * g;
+      if(this.resample){
+        this.pos += this.step;
+        while(this.pos >= 1){
+          this.pos -= 1;
+          this.emit16(this.prev + (x - this.prev) * this.pos);
+        }
+        this.prev = x;
+      } else {
+        this.emit16(x);
+      }
+    }
+    return true;
+  }
 }
-function resampleTo16k(buf, fromRate){
-  if(fromRate === 16000) return buf;
-  const n = Math.round(buf.length * 16000 / fromRate);
-  const out = new Float32Array(n);
-  for(let i = 0; i < n; i++){
-    const pos = i * (buf.length - 1) / Math.max(1, n - 1);
-    const i0 = Math.floor(pos), i1 = Math.min(buf.length - 1, i0 + 1), f = pos - i0;
-    out[i] = buf[i0] * (1 - f) + buf[i1] * f;
-  }
-  return out;
+registerProcessor('voice-capture', VoiceCaptureProcessor);
+  `;
+}
+let voiceStream = null;   // {sid, stream, ctx, node, blobUrl, rec, ...}
+
+function updateVoiceMeter(rms){
+  const f = $('#voiceLevelFill'); if(!f) return;
+  f.style.height = Math.min(100, Math.sqrt(Math.max(0, rms)) * 100) + '%';
+}
+function showVoiceMeter(){ const m = $('#voiceLevel'); if(m) m.classList.add('show'); }
+function hideVoiceMeter(){
+  const m = $('#voiceLevel'); if(m) m.classList.remove('show');
+  const f = $('#voiceLevelFill'); if(f) f.style.height = '0%';
 }
 function fillTaskTextLive(text){
   const inp = $('#taskInput'); if(!inp) return;
   if(document.activeElement !== inp) inp.value = text || '';
 }
 function releaseMedia(vs){
-  try { vs.node && vs.node.disconnect(); } catch(e){}
-  try { vs.stream && vs.stream.getTracks().forEach(t => t.stop()); } catch(e){}
-  try { vs.ctx && vs.ctx.close(); } catch(e){}
+  try { if(vs.node) vs.node.disconnect(); } catch(e){}
+  try { if(vs.stream) vs.stream.getTracks().forEach(t => t.stop()); } catch(e){}
+  try { if(vs.ctx) vs.ctx.close(); } catch(e){}
+  if(vs.blobUrl) URL.revokeObjectURL(vs.blobUrl);
   const btn = $('#voiceBtn'); if(btn) btn.classList.remove('recording');
+  hideVoiceMeter();
+}
+// 端点判定：自适应噪底 + 最少语音时长 + 尾部静音（参数来自设置页配置）
+function endpointDecision(vs, rms, nowMs){
+  updateVoiceMeter(rms);
+  if(!vs.rec) return;
+  const th = Math.max(vs.baseTh, vs.noise * vs.noiseFactor);
+  if(rms < th){   // 安静段：快速跟随降、慢速升；说话段不更新噪底
+    if(rms < vs.noise) vs.noise = rms; else vs.noise += (rms - vs.noise) * vs.noiseRise;
+  }
+  if(rms >= th){ vs.started = true; vs.silentSince = 0; vs.voiceMs += vs.rmsStepMs; }
+  else if(vs.started && !vs.silentSince){ vs.silentSince = nowMs; }
+  if((vs.started && vs.silentSince && vs.voiceMs >= vs.minVoiceMs && nowMs - vs.silentSince > vs.silenceMs) ||
+     nowMs - vs.startedAt > vs.capMs){
+    vs.rec = false;
+    endVoiceStream(true);
+  }
+}
+// 发一帧裸 PCM；顺带检查服务端返回的会话状态（dead 时立即中断并提示）
+function sendChunk(vs, buf){
+  if(!vs.rec) return;
+  fetch('/api/voice/stream/chunk/' + vs.sid, {
+    method:'POST', headers:{'Content-Type':'application/octet-stream'}, body: buf
+  })
+    .then(r => r.json())
+    .then(j => {
+      if(!vs.rec) return;
+      if(j.state === 'dead'){
+        vs.rec = false;
+        toast('✗ 识别中断：' + (j.error || 'ASR 连接断开'));
+        releaseMedia(vs);
+        fetch('/api/voice/stream/abort/' + vs.sid, {method:'POST'}).catch(()=>{});
+        setMascot('idle');
+      } else if(j.partial){
+        fillTaskTextLive(j.partial);
+      }
+    })
+    .catch(()=>{});
 }
 async function endVoiceStream(final){
   const vs = voiceStream; voiceStream = null;
   if(!vs) return;
+  vs.rec = false;
   releaseMedia(vs);
   if(!final){
+    if(vs.sid) fetch('/api/voice/stream/abort/' + vs.sid, {method:'POST'}).catch(()=>{});
     setMascot('idle');
-    try { await fetch('/api/voice/stream/abort', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({sid: vs.sid})}); } catch(e){}
     return;
   }
   setMascot('thinking');
   toast('🎤 说话结束，识别收尾中…');
   try {
-    const r = await fetch('/api/voice/stream/stop', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({sid: vs.sid})});
+    const r = await fetch('/api/voice/stream/stop/' + vs.sid, {method:'POST'});
     const j = await r.json();
     if(j.ok){ fillTaskText(j.text || ''); toast(j.text ? '✓ 已识别，确认后启动' : '✗ 未识别到内容'); }
     else toast('✗ ' + (j.error || '识别失败'));
@@ -1327,74 +1435,108 @@ async function endVoiceStream(final){
   }
 }
 async function startVoiceInput(){
-  if(voiceStream){ endVoiceStream(true); return; }   // 录音中再点一次麦克风 = 结束
+  if(voiceStream){ endVoiceStream(true); return; }   // 录音中再点麦克风 = 结束
   const btn = $('#voiceBtn'); if(!btn) return;
   let stream;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({audio: {echoCancellation: true, noiseSuppression: true}});
+    stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true, noiseSuppression:true}});
   } catch(e){
     toast('✗ 无法访问麦克风：' + e); setMascot('idle'); return;
   }
   btn.classList.add('recording');
   setMascot('thinking');
   toast('🎤 录音中，实时出字…');
+  showVoiceMeter();
+  const vs = {
+    sid: null, stream, ctx: null, node: null, blobUrl: null, rec: true,
+    startedAt: Date.now(), silentSince: 0, started: false, voiceMs: 0,
+    baseTh: 120 / 32768, noise: 0.01, rmsStepMs: 8,
+    noiseRise: 0.01, noiseFactor: 3, agcTarget: 0.8, agcMaxGain: 16, agcRelease: 0.995,
+    silenceMs: 800, minVoiceMs: 1500, capMs: 15000,
+  };
+  voiceStream = vs;
   try {
     const r0 = await fetch('/api/voice/stream/start', {method:'POST', headers:{'Content-Type':'application/json'}, body: '{}'});
     const j0 = await r0.json();
     if(!j0.ok){
       toast('✗ ' + (j0.error || '启动识别失败'));
-      stream.getTracks().forEach(t => t.stop());
-      btn.classList.remove('recording'); setMascot('idle');
+      endVoiceStream(false);
       return;
     }
+    vs.sid = j0.session;
+    const S = j0.settings || {max_seconds:15, silence_seconds:0.8, silence_threshold:120, min_voice_seconds:1.5,
+                              agc_target:0.8, agc_max_gain:16, agc_release:0.995, noise_rise:0.01, noise_factor:3};
+    vs.baseTh = (S.silence_threshold || 120) / 32768;
+    vs.silenceMs = S.silence_seconds * 1000;
+    vs.capMs = S.max_seconds * 1000;
+    vs.minVoiceMs = S.min_voice_seconds * 1000;
+    vs.noiseRise = S.noise_rise || 0.01;
+    vs.noiseFactor = S.noise_factor || 3;
+    vs.agcTarget = S.agc_target || 0.8;
+    vs.agcMaxGain = S.agc_max_gain || 16;
+    vs.agcRelease = S.agc_release || 0.995;
     const AC = window.AudioContext || window.webkitAudioContext;
     const ctx = new AC({sampleRate: 16000});
+    vs.ctx = ctx;
     if(ctx.state === 'suspended'){ await ctx.resume(); }
     const src = ctx.createMediaStreamSource(stream);
-    const node = ctx.createScriptProcessor(1024, 1, 1);   // ~64ms/帧 @16k
-    const vs = {sid: j0.session, stream, ctx, node, rec: true, startedAt: Date.now(), silentSince: 0, started: false};
-    voiceStream = vs;
-    node.onaudioprocess = async (ev) => {
-      if(!vs.rec) return;
-      let f32 = resampleTo16k(ev.inputBuffer.getChannelData(0), ctx.sampleRate);
-      if(!f32.length) return;
-      let sum = 0;
-      for(let i = 0; i < f32.length; i++) sum += f32[i] * f32[i];
-      const rms = Math.sqrt(sum / f32.length);
-      const now = Date.now();
-      if(rms >= 0.003){ vs.started = true; vs.silentSince = 0; }
-      else if(vs.started && !vs.silentSince){ vs.silentSince = now; }
-      if((vs.started && vs.silentSince && now - vs.silentSince > 800) ||
-         now - vs.startedAt > 15000){
-        vs.rec = false;
-        endVoiceStream(true);
-        return;
-      }
-      try {
-        const pcm = new Uint8Array(f32to16(f32).buffer);
-        let b64 = '';
-        for(let i = 0; i < pcm.length; i += 8192){
-          b64 += btoa(String.fromCharCode.apply(null, pcm.subarray(i, i + 8192)));
+    if(ctx.audioWorklet){
+      vs.blobUrl = URL.createObjectURL(new Blob([buildVoiceWorkletCode(S)], {type:'application/javascript'}));
+      await ctx.audioWorklet.addModule(vs.blobUrl);
+      const node = new AudioWorkletNode(ctx, 'voice-capture');
+      vs.node = node;
+      src.connect(node);
+      vs.rmsStepMs = 128 / ctx.sampleRate * 1000;   // worklet 128 采样/回调
+      node.port.onmessage = (e) => {
+        const d = e.data;
+        if(d.type === 'rms') endpointDecision(vs, d.value, Date.now());
+        else if(d.type === 'pcm') sendChunk(vs, d.buf);
+      };
+    } else {
+      // 兜底：ScriptProcessor（旧浏览器），1024 采样/次，同样带 AGC + 重采样
+      const node = ctx.createScriptProcessor(1024, 1, 1);
+      vs.node = node;
+      const mute = ctx.createGain(); mute.gain.value = 0;   // 防回授
+      src.connect(node); node.connect(mute); mute.connect(ctx.destination);
+      vs.rmsStepMs = 1024 / ctx.sampleRate * 1000;
+      let acc = new Int16Array(VOICE_FRAME_SAMPLES), accN = 0, peak = 1e-4;
+      let pos = 0, prev = 0; const step = 16000 / ctx.sampleRate;
+      node.onaudioprocess = (ev) => {
+        if(!vs.rec) return;
+        const ch = ev.inputBuffer.getChannelData(0);
+        let sum = 0;
+        for(let i = 0; i < ch.length; i++) sum += ch[i] * ch[i];
+        const rms = Math.sqrt(sum / ch.length);
+        endpointDecision(vs, rms, Date.now());
+        let fp = 0;
+        for(let i = 0; i < ch.length; i++){ const a = Math.abs(ch[i]); if(a > fp) fp = a; }
+        if(fp > peak) peak = fp; else peak *= vs.agcRelease;
+        const g = Math.min(vs.agcTarget / peak, vs.agcMaxGain);
+        for(let i = 0; i < ch.length; i++){
+          const x = ch[i] * g;
+          pos += step;
+          while(pos >= 1){
+            pos -= 1;
+            const y = prev + (x - prev) * pos;
+            acc[accN++] = Math.round(Math.max(-1, Math.min(1, y)) * 32767);
+            if(accN >= VOICE_FRAME_SAMPLES){
+              const out = acc; acc = new Int16Array(VOICE_FRAME_SAMPLES); accN = 0;
+              sendChunk(vs, out.buffer);
+            }
+          }
+          prev = x;
         }
-        const r = await fetch('/api/voice/stream/chunk', {method:'POST', headers:{'Content-Type':'application/json'},
-                                                           body: JSON.stringify({sid: vs.sid, audio: b64})});
-        const j = await r.json();
-        if(j.partial) fillTaskTextLive(j.partial);
-      } catch(e){ /* 单帧失败不打断录音 */ }
-    };
-    const mute = ctx.createGain(); mute.gain.value = 0;   // 防回授
-    src.connect(node); node.connect(mute); mute.connect(ctx.destination);
+      };
+    }
   } catch(e){
     toast('✗ ' + e);
-    stream.getTracks().forEach(t => t.stop());
-    const cur = voiceStream; voiceStream = null;
-    if(cur){
-      releaseMedia(cur);
-      try { await fetch('/api/voice/stream/abort', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({sid: cur.sid})}); } catch(_){}
-    }
-    btn.classList.remove('recording'); setMascot('idle');
+    endVoiceStream(false);
   }
 }
+// 关页/刷新时主动终止会话（sendBeacon 空 body，不等 180s TTL）
+window.addEventListener('pagehide', function(){
+  try { if(voiceStream && voiceStream.sid) navigator.sendBeacon('/api/voice/stream/abort/' + voiceStream.sid); } catch(e){}
+});
 $('#voiceBtn').onclick = startVoiceInput;
 
 // 列表滚动粘性：用户手动上滚看历史时，别把他拽回底部
@@ -1629,7 +1771,11 @@ function settingsPayload(){
             api_secret:$('#voiceApiSecret').value.trim(),
             iat_url:$('#voiceIatUrl').value.trim(),
             max_seconds:numOrNull('#voiceMaxSeconds'), silence_seconds:numOrNull('#voiceSilenceSeconds'),
-            silence_threshold:numOrNull('#voiceSilenceThreshold')},
+            silence_threshold:numOrNull('#voiceSilenceThreshold'),
+            min_voice_seconds:numOrNull('#voiceMinVoiceSeconds'),
+            agc_target:numOrNull('#voiceAgcTarget'), agc_max_gain:numOrNull('#voiceAgcMaxGain'),
+            agc_release:numOrNull('#voiceAgcRelease'), noise_rise:numOrNull('#voiceNoiseRise'),
+            noise_factor:numOrNull('#voiceNoiseFactor')},
     apps: appRows(), device_serial: currentDeviceSerial
   };
 }
@@ -1656,6 +1802,12 @@ async function readSettings(){
     $('#voiceMaxSeconds').value = data.voice.max_seconds;
     $('#voiceSilenceSeconds').value = data.voice.silence_seconds;
     $('#voiceSilenceThreshold').value = data.voice.silence_threshold;
+    $('#voiceMinVoiceSeconds').value = data.voice.min_voice_seconds;
+    $('#voiceAgcTarget').value = data.voice.agc_target;
+    $('#voiceAgcMaxGain').value = data.voice.agc_max_gain;
+    $('#voiceAgcRelease').value = data.voice.agc_release;
+    $('#voiceNoiseRise').value = data.voice.noise_rise;
+    $('#voiceNoiseFactor').value = data.voice.noise_factor;
     renderAppRows(data.apps || []);
     $('#appsDeviceStatus').textContent = `配置文件：${data.config_path}；上次验证设备：${data.app_cache_serial || '未验证'}。`;
     try {
@@ -1715,6 +1867,12 @@ $('#saveBtn').onclick = async () => {
     $('#voiceMaxSeconds').value = data.voice.max_seconds;
     $('#voiceSilenceSeconds').value = data.voice.silence_seconds;
     $('#voiceSilenceThreshold').value = data.voice.silence_threshold;
+    $('#voiceMinVoiceSeconds').value = data.voice.min_voice_seconds;
+    $('#voiceAgcTarget').value = data.voice.agc_target;
+    $('#voiceAgcMaxGain').value = data.voice.agc_max_gain;
+    $('#voiceAgcRelease').value = data.voice.agc_release;
+    $('#voiceNoiseRise').value = data.voice.noise_rise;
+    $('#voiceNoiseFactor').value = data.voice.noise_factor;
     renderAppRows(data.apps || []);
     status('#saveStatus', currentDeviceSerial
       ? '设置已保存；目标应用包名已针对当前设备核对。'
@@ -1805,6 +1963,7 @@ PAGE_RUN_TPL = r"""<!DOCTYPE html>
           <path d="M12 18.2v3.3"/>
         </svg>
       </button>
+      <div id="voiceLevel" class="voice-level" title="麦克风电平"><div id="voiceLevelFill"></div></div>
       <button id="runBtn" class="primary">▶ 启动</button>
       <button id="stopBtn">■ 停止</button>
       <div id="toast" role="status" aria-live="polite"></div>
@@ -1902,10 +2061,20 @@ PAGE_SETTINGS_TPL = r"""<!DOCTYPE html>
       </label>
       <label class="field">请求地址<input id="voiceIatUrl" type="text" placeholder="留空 = 讯飞公网 wss://iat-api.xfyun.cn/v2/iat"></label>
       <div class="settings-row">
-        <label class="field">最长录音（秒）<input id="voiceMaxSeconds" type="number" step="1" min="3" max="120" placeholder="15"></label>
-        <label class="field">静音停止（秒）<input id="voiceSilenceSeconds" type="number" step="0.1" min="0.2" max="5" placeholder="0.8"></label>
-        <label class="field">静音阈值 RMS<input id="voiceSilenceThreshold" type="number" step="1" min="50" max="3000" placeholder="120"></label>
+        <label class="field">最长录音（秒）<input id="voiceMaxSeconds" type="number" step="1" min="3" max="120" placeholder="15" title="单次录音硬性时间上限，超过强制停止"></label>
+        <label class="field">静音停止（秒）<input id="voiceSilenceSeconds" type="number" step="0.1" min="0.2" max="5" placeholder="0.8" title="说完后连续静音达到此时长自动停止录音（推荐 0.8）"></label>
+        <label class="field">静音阈值 RMS<input id="voiceSilenceThreshold" type="number" step="1" min="50" max="3000" placeholder="120" title="RMS 低于该值视为静音；越小越灵敏（推荐 120）"></label>
+        <label class="field">最少语音（秒）<input id="voiceMinVoiceSeconds" type="number" step="0.1" min="0" max="30" placeholder="1.5" title="语音总时长不足该值前不允许静音自动停，防止点击/噪音误停（推荐 1.5）"></label>
       </div>
+      <p class="settings-hint">停止逻辑：说话后连续静音超过「静音停止」（RMS 低于「静音阈值」）自动结束；「最少语音」未达到前不会停，防开头误停；「最长录音」为硬性上限。</p>
+      <div class="settings-row">
+        <label class="field">AGC 目标峰值<input id="voiceAgcTarget" type="number" step="0.01" min="0.01" max="1" placeholder="0.8" title="自动增益放大后的目标音量峰值（推荐 0.8）"></label>
+        <label class="field">AGC 最大增益<input id="voiceAgcMaxGain" type="number" step="1" min="1" max="100" placeholder="16" title="AGC 放大倍数上限，小声说话靠它提亮（推荐 16）"></label>
+        <label class="field">AGC 释放系数<input id="voiceAgcRelease" type="number" step="0.001" min="0.9" max="0.9999" placeholder="0.995" title="峰值回落衰减系数，越小音量恢复越快（推荐 0.995）"></label>
+        <label class="field">噪底回升系数<input id="voiceNoiseRise" type="number" step="0.001" min="0.0001" max="0.5" placeholder="0.01" title="环境变吵时噪底基线追赶速度，越大适应越快（推荐 0.01）"></label>
+        <label class="field">噪底阈值倍数<input id="voiceNoiseFactor" type="number" step="0.1" min="1" max="20" placeholder="3" title="说话判定阈值 = max(静音阈值, 该倍数×噪底)；越大越不易把环境声误判为说话（推荐 3）"></label>
+      </div>
+      <p class="settings-hint">AGC = 自动音量调节，小声说话也能识别清楚；噪底参数用于嘈杂环境自适应。不确定就保持默认值。</p>
       <div class="settings-actions"><button id="asrVerifyBtn" type="button">验证连接</button></div>
       <div id="asrVerifyStatus" class="settings-message" role="status" aria-live="polite"></div>
     </div>

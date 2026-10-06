@@ -77,6 +77,12 @@ def public_settings(config_path: Path) -> dict:
             "max_seconds": cfg.voice.max_seconds,
             "silence_seconds": cfg.voice.silence_seconds,
             "silence_threshold": cfg.voice.silence_threshold,
+            "min_voice_seconds": cfg.voice.min_voice_seconds,
+            "agc_target": cfg.voice.agc_target,
+            "agc_max_gain": cfg.voice.agc_max_gain,
+            "agc_release": cfg.voice.agc_release,
+            "noise_rise": cfg.voice.noise_rise,
+            "noise_factor": cfg.voice.noise_factor,
         },
         "apps": [{"name": app.name, "package": app.package,
                   "aliases": list(app.aliases or [])} for app in cfg.apps if app.in_scope],
@@ -334,6 +340,12 @@ def save_settings(config_path: Path, payload: dict) -> dict:
         voice_updates["max_seconds"] = _num_field(voice_raw, "max_seconds", current.voice.max_seconds, float)
         voice_updates["silence_seconds"] = _num_field(voice_raw, "silence_seconds", current.voice.silence_seconds, float)
         voice_updates["silence_threshold"] = _num_field(voice_raw, "silence_threshold", current.voice.silence_threshold, int)
+        voice_updates["min_voice_seconds"] = _num_field(voice_raw, "min_voice_seconds", current.voice.min_voice_seconds, float)
+        voice_updates["agc_target"] = _num_field(voice_raw, "agc_target", current.voice.agc_target, float)
+        voice_updates["agc_max_gain"] = _num_field(voice_raw, "agc_max_gain", current.voice.agc_max_gain, float)
+        voice_updates["agc_release"] = _num_field(voice_raw, "agc_release", current.voice.agc_release, float)
+        voice_updates["noise_rise"] = _num_field(voice_raw, "noise_rise", current.voice.noise_rise, float)
+        voice_updates["noise_factor"] = _num_field(voice_raw, "noise_factor", current.voice.noise_factor, float)
     updates = {
         "glm": model_updates,
     }

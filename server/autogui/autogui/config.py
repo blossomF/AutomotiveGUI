@@ -121,6 +121,12 @@ class VoiceConfig(BaseModel):
     max_seconds: float = Field(default=15.0, ge=3, le=120)  # 最长录音秒数
     silence_seconds: float = Field(default=0.8, ge=0.2, le=5.0)  # 尾部连续静音后自动停止
     silence_threshold: int = Field(default=300, ge=50, le=3000)  # 静音判定 RMS 阈值
+    min_voice_seconds: float = Field(default=1.5, ge=0.0, le=30.0)  # 至少收到这么多语音才允许静音自动停（防开头误停）
+    agc_target: float = Field(default=0.8, ge=0.01, le=1.0)  # 浏览器 AGC 目标峰值
+    agc_max_gain: float = Field(default=16.0, ge=1.0, le=100.0)  # 浏览器 AGC 最大增益
+    agc_release: float = Field(default=0.995, ge=0.9, le=0.9999)  # 浏览器 AGC 峰值释放系数
+    noise_rise: float = Field(default=0.01, ge=0.0001, le=0.5)  # 自适应噪底回升系数
+    noise_factor: float = Field(default=3.0, ge=1.0, le=20.0)  # 静音阈值相对噪底的倍数
 
     @field_validator("appid", "api_key", "api_secret")
     @classmethod
