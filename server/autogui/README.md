@@ -2,7 +2,16 @@
 
 从零部署、拉通检测与运行监测见[部署与联调手册](../../doc/部署与联调手册.md)。
 
-想按代码逐步理解 skill、XML、VLM 的切换和联调日志，请先读 [代码流程与联调日志导读](../../doc/代码流程与联调日志导读.md)。
+自检结果的含义见[部署与联调手册第 3 节](../../doc/部署与联调手册.md#3-设备和应用配置)，运行日志的查看方式见该手册第 5 节。
+
+相关文档的位置如下，路径相对于项目根目录。
+
+| 文档 | 相对于项目根目录的位置 | 要看的内容 |
+|---|---|---|
+| 部署与联调手册 | `doc/部署与联调手册.md` | 第 2 节部署、第 3 节自检、第 5 节日志 |
+| 队伍分工说明 | `doc/队伍分工说明.md` | 团队分工 |
+
+下文的源码链接相对于本 README 所在的 `server/autogui` 目录。比如 `autogui/core/graph.py` 在项目中的完整相对位置是 `server/autogui/autogui/core/graph.py`。
 
 看懂车机屏幕、操作车机屏幕的 Agent。LangGraph 做决策大脑，MCP 做执行面，自研 ADB 桥接层直连
 Android Automotive 中控屏。CART Q3 AI 大赛作品。
@@ -15,55 +24,76 @@ Agent：看屏幕 → 判断当前状态 → 选一个控件 → 点下去 → �
 
 ---
 
-## 1. 快速上手（目标 10 分钟内跑通）
+## 1. 快速上手（Windows / PowerShell）
 
-### 依赖
+电脑运行程序，通过 ADB 控制安卓设备；GLM 服务负责根据指令和屏幕信息决定下一步操作。手机可以检查技术链路，正式车机验收仍需使用中控主屏。
 
-| 需要 | 版本 | 说明 |
-|---|---|---|
-| Python | 3.10+ | 用到 `X \| None` 语法 |
-| ADB | 任意新版 | Android Platform Tools，`adb version` 能跑即可 |
-| 车机/安卓设备 | — | USB 调试已开，`adb devices` 能看到 |
-| GLM API Key | 组委会发放 | 只走环境变量，不写进仓库 |
+### 准备条件
 
-不需要：GPU、Docker、Node、数据库、模型权重。
+| 需要 | 要求 |
+|---|---|
+| Python | 3.10 或更高版本 |
+| ADB | 仓库自带 `env/platform-tools/adb.exe`，需加入当前窗口的 PATH |
+| 安卓设备 | USB 调试已开启、已允许这台电脑调试，`adb devices -l` 状态为 `device` |
+| 模型服务 | 电脑能访问配置的 GLM 服务，有可用的 URL、模型名称和 API Key；截图定位需要模型支持图像输入 |
 
-### 步骤
+不需要本地 GPU、Docker、Node、数据库或模型权重。文字任务无需麦克风和讯飞凭证。
 
-```bash
-# ① 依赖（二选一）
-uv sync                                  # 有 uv：一条命令，锁版本
-pip install -r requirements.txt          # 没 uv：纯 pip，同样可用
+### 第 1 步：设置路径并检查连接
 
-# ② Key（只从环境读，永远不进 git）
-set GLM_API_KEY=xxxx                     # Windows cmd
-$env:GLM_API_KEY="xxxx"                  # PowerShell
-export GLM_API_KEY=xxxx                  # bash
+打开 PowerShell，将第一行改成你电脑上的项目位置。后续命令都在这个窗口执行。
 
-# ③ 连车机
-adb devices                              # 应看到一行 <serial>  device
-# 无线连接：adb connect <车机IP>:5555
-
-# ④ 先自检，不要一上来就跑任务
-python main.py --selftest                # 不需要车机、不需要 Key
-python main.py --check                   # 需要车机：抓帧/控件树/输入/IME 逐项打勾
+```powershell
+$repo = 'D:\Workspace\github\automotiveGUI'
+$env:Path = (Join-Path $repo 'env\platform-tools') + ';' + $env:Path
+Set-Location (Join-Path $repo 'server\autogui')
+py -3 -V
+adb version
+adb devices -l
 ```
 
-前两步任意一步失败，看 [§7 故障排查](#7-故障排查)。
+`$repo` 保存项目路径，第二行让电脑和程序能找到 ADB，第三行进入程序目录。应看到 Python 3.10+、ADB 版本，以及状态为 `device` 的设备。如果没有 `py`，用 `python -V` 检查版本，后面的 `py -3` 也改成 `python`。连接异常的逐步处理见[部署手册第 2.1 节](../../doc/部署与联调手册.md#21-电脑与设备)。
 
-### 跑第一个任务
+### 第 2 步：安装依赖并自检
 
-```bash
-python main.py --packages                # 看车机上到底装了哪些包
-#   → 把想用的包名填进 config.yaml 的 apps: [{name, package}]
-
-python main.py --dump-report             # 实测各 App 控件树质量
-#   → 生成 artifacts/dump-report.md，用于排查控件树质量
-
-python main.py "在音乐App里播放周杰伦的《七里香》"
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe main.py --selftest
+.\.venv\Scripts\python.exe main.py --check
 ```
 
-Windows 用户可以全部用 `run.bat` 代劳：`run.bat setup` / `run.bat check` / `run.bat "任务"`。
+已有 `.venv` 时可跳过第一行。`--selftest` 运行离线测试，不需要设备或模型密钥；`--check` 需要设备，但不调用模型。自检中 `[✗]` 表示失败，需先处理；`[!]` 是警告，仍需核对。退出码为 `0` 只代表硬检查通过，详细判据见[部署手册第 3 节](../../doc/部署与联调手册.md#3-设备和应用配置)。
+
+### 第 3 步：启动面板，配置模型和应用
+
+```powershell
+Set-Location $repo
+.\server\autogui\.venv\Scripts\python.exe .\dist\dashboard_server.py
+```
+
+保持这个窗口打开，浏览器访问 [设置页](http://127.0.0.1:8777/settings)：
+
+1. 填写模型 URL、名称和 API Key，点击“验证连接”，成功后保存。
+2. 在应用配置中点击“重新加载”，取得当前设备的包名列表；为目标应用选择正确包名后保存。中文名称不能直接当作包名。
+3. 打开[任务页](http://127.0.0.1:8777/)，输入一条结果容易确认的任务，例如“打开 QQ 音乐”（应用名称按设备实际安装情况替换）。
+
+在设备屏幕上确认应用确实打开，再去[日志页](http://127.0.0.1:8777/logs)查看运行记录。按 `Ctrl+C` 停止服务。关闭窗口后，路径设置和环境变量不会自动保留。
+
+API Key 在设置页保存时，会使用 Windows DPAPI 加密写入本机 `config.yaml`，换机器或 Windows 用户后需重新录入。也可以只用 CLI，通过环境变量提供 Key，方法见[部署手册第 2.3 节](../../doc/部署与联调手册.md#23-配置-glm-与语音凭证)。不要提交明文凭证或本机凭证配置。
+
+### 使用 CLI 执行任务
+
+如果面板仍在运行，另开 PowerShell，重新执行第 1 步的前三行，再运行：
+
+```powershell
+.\.venv\Scripts\python.exe main.py "打开 QQ 音乐"
+$LASTEXITCODE
+```
+
+面板与 CLI 读取同一份配置。退出码为 `0` 后仍需确认屏幕上的实际结果。`--dump-report` 会依次启动配置中的应用，首次跑任务前不必执行；包名校准后再用它检查控件树质量。
+
+`run.bat` 是可选的 CLI 入口，只负责安装依赖或调用任务命令。它不创建虚拟环境、不配置 ADB 或模型。若要让它使用上述虚拟环境，先在程序目录执行 `$env:PYTHON = (Resolve-Path '.\.venv\Scripts\python.exe').Path`，再执行 `.\run.bat check` 或 `.\run.bat "任务"`。
 
 ---
 
@@ -75,15 +105,15 @@ flowchart LR
     VOICE["可选语音输入"] --> ASR["ASR 转文字"] --> TASK
     TASK --> MAIN["main.py: 配置与设备绑定"]
     MAIN --> PREP["Runner.prepare: 日志 / 技能 / 执行器"]
-    PREP --> INIT{"文本模型: 应用在缓存中?"}
-    INIT -->|选择已配置应用| LAUNCH["ADB 启动应用"]
+    PREP --> INIT{"当前设备有可用应用缓存?"}
+    INIT -->|选择已配置应用| LAUNCH["文本模型选择应用后，ADB 启动"]
     LAUNCH -->|还有后续操作| OBS["perceive: 截图 + XML"]
     LAUNCH -->|纯打开| ENDNODE["finish: 结果与日志"]
     INIT -->|观测界面| OBS
     OBS --> GUARD["guard: 限制检查"]
     GUARD --> ROUTE{"route"}
     ROUTE -->|XML 可用| TREE["decide: 树文本给 GLM"]
-    ROUTE -->|XML 不可用或降级| VLM["decide: 网格图给 GLM"]
+    ROUTE -->|XML 不可用或降级| VLM["decide: 截图给 GLM"]
     TREE -->|node_ref 越界或决策无效| VLM
     TREE -->|模型选择 SKILL| SKILL["run_skill: 加载指南，不操作设备"]
     VLM -->|模型选择 SKILL| SKILL
@@ -98,12 +128,12 @@ flowchart LR
     GUARD -->|超限| ENDNODE
 ```
 
-`route` 只选 tree/VLM。模型可以在 `decide` 中选择 `SKILL`，加载指南后再决定具体动作；普通指令不会因关键词而直接执行配方。完整条件边见[代码流程与联调日志导读](../../doc/代码流程与联调日志导读.md)。
+`route` 只选 tree/VLM。模型可以在 `decide` 中选择 `SKILL`，加载指南后再决定具体动作；普通指令不会因关键词而直接执行配方。完整条件边见源码 [`autogui/core/graph.py`](autogui/core/graph.py)。
 
-三条不可破的约束：
+主要实现边界：
 
-1. **大脑不直接碰 ADB。** 所有设备操作经 `bridge/tools.py`。节点里找不到一行 `subprocess`。
-2. **工具本体是纯函数。** MCP 只是套 schema。`exec_mode: local` 与 `mcp` 调用的是同一批函数，
+1. **模型返回动作，执行层操作设备。** 常规动作经 `core/executor.py`、`bridge/tools.py` 执行；滚轮调整由 `core/picker.py` 配合设备桥接层完成。
+2. **local 和 MCP 共用设备工具函数。** 这些函数会读取或操作设备。`exec_mode: local` 与 `mcp` 调用的是同一批函数，
    所以 MCP 集成出问题改一个配置就能跑，不会卡死主线。
 3. **LangGraph 只管控制流。** 状态里只放路由要读的字段，截图/XML/上下文放在 Runner 上。
 
@@ -111,15 +141,15 @@ flowchart LR
 
 ## 3. 定位路径（声明：**C**）
 
-| | 通道 | 触发条件 | 每次决策开销 |
+| | 通道 | 触发条件 | 决策请求内容 |
 |---|---|---|---|
-| 1 | **tree**（控件树 → 模型选 `node_ref`） | `uiautomator dump` 有 ≥3 个可寻址候选 | 1 次，**纯文本，不发图** |
-| 2 | **vlm**（网格截图） | 树为空 / 自绘界面 / tree 返回越界 `node_ref` | 1 次 + 1 张图 |
+| 1 | **tree**（控件树 → 模型选 `node_ref`） | `uiautomator dump` 有 ≥3 个可寻址候选 | 控件候选文本，**不发图** |
+| 2 | **vlm**（截图定位） | 树为空 / 自绘界面 / tree 返回越界 `node_ref` | 上下文和一张截图 |
 | 可选 | **Skill 指南** | 模型选择合适技能且参数齐全 | 加载指南后再调用模型；不自动操作设备 |
 
 运行时固定控件树优先、VLM 兜底，不提供 A/B/C 切换配置。`--dump-report` 用于检查各应用的树质量；赛事路径 C 声明以真实任务日志和演示证据支持。
 
-降级是真实发生的代码路径，决策链里会打印 `tree 决策无效 → 本轮降级 vlm` 这样的行，供 AI Reviewer 核验。
+截图定位使用没有网格覆盖的画面。模型返回截图上的像素坐标，程序按图像与设备屏幕尺寸换算后执行。tree 决策无效时会降级到 VLM；模型重试、加载 Skill 和反思可能增加调用次数，不能把一轮操作理解为固定只有一次请求。
 
 ### 滚动控件
 
@@ -131,74 +161,48 @@ flowchart LR
 
 ## 4. 命令
 
+在 `server/autogui` 目录执行。下表的 `python` 指安装过项目依赖的解释器；按第 1 节创建虚拟环境后，替换为 `.\.venv\Scripts\python.exe`。
+
 | 命令                                                  | 作用 |
 |-----------------------------------------------------|---|
 | `python main.py "打开美团，搜索卡旺卡"`                       | 跑一个任务，实时打印决策链 |
-| `python main.py --selftest`                         | 离线单测（无车机、无 Key），CI 门禁 |
+| `python main.py --selftest`                         | 离线测试（无车机、无 Key） |
 | `python main.py --check`                            | 车机自检：抓帧耗时/树节点/输入策略/**IME 未被改坏** |
 | `python main.py --packages`                         | 列出安装的应用，用于填 `config.yaml` |
 | `python main.py --dump-report`                      | 逐 App 实测控件树质量 → `artifacts/dump-report.md` |
 | `python main.py --mcp-check`                        | 真开一个 MCP 会话，列工具 + 校验与 local 同源 |
 | `python main.py --skill-only "music.play_song=七里香"` | 跳过模型直接跑配方（0 次 VLM） |
 | `python -m autogui.mcp_server`                      | 作为 stdio MCP server 给外部客户端用 |
-| `python -m autogui.mcp_server --list-tools`         | 打印工具清单与 schema |
+| `python -m autogui.mcp_server --list-tools`         | 打印工具名、字段名及说明；也需要已连接设备 |
+| `python main.py --voice-test` | 只验证麦克风和讯飞识别，不操作设备 |
+| `python main.py --voice` | 将识别出的文字作为任务执行，需要设备和模型 |
 
-覆盖默认配置：`--exec-mode mcp`、`--config 路径`。
+覆盖默认配置：`--exec-mode mcp`、`--config 路径`。语音功能需额外安装 `.\.venv\Scripts\python.exe -m pip install -e ".[voice]"` 并配置讯飞凭证，具体步骤见部署手册。
 
 ---
 
-## 5. 决策链样例
+## 5. 怎样查看运行日志
 
-规则 4.7 要求实时打印。一次运行日志的形状：
+控制台按阶段打印任务进度，JSONL 文件每行记录一个事件：
 
-```
-====================================================================
-Automotive GUI Agent  |  tree→vlm  |  exec=local
-====================================================================
-  任务: 在音乐App里播放周杰伦的《七里香》
-  设备: 192.168.1.37:5555
-  技能: 3 个可用
+| 阶段 | 含义 |
+|---|---|
+| `setup` | 初始化任务与运行环境 |
+| `perceive` | 获取截图和控件树 |
+| `route` | 选择应用直启、控件树定位或截图定位 |
+| `decide` | 模型决定下一步动作 |
+| `skill` | 加载任务指导 |
+| `act` | 执行动作 |
+| `verify` | 检查动作结果 |
+| `recovery` | 尝试从无进展或错误页面恢复 |
+| `finish` | 输出任务结果和统计 |
+| `error` / `glm_error` | 运行错误或模型请求错误 |
 
-[Step 1] perceive  1920×1080 树60节点/候选40 shot_ms=412 dump_ms=1180 sig=a3f9c1d2
-[Step 1] route      tree（控件树可用：候选40）
-[Step 1] decide     CLICK node_ref=3 "点击搜索框进入搜索" glms=1 in_tok=2841 out_tok=87
-[Step 1] act        OK tap(960,72)
-[Step 1] verify     指纹变化=是 → 继续（0 次 VLM） sig=7be0f4a1
+纯打开任务如果命中应用缓存并成功直启，可以直接结束，不一定经过全部阶段。模型报告成功后仍需在设备上核对结果。
 
-[Step 2] perceive  1920×1080 树44节点/候选31 shot_ms=398 dump_ms=940 sig=7be0f4a1
-[Step 2] route      tree（控件树可用：候选31）
-[Step 2] decide     TYPE text='七里香' "输入歌名" glms=1 in_tok=2610 out_tok=94
-[Step 2] act        OK input(yadb) sent='七里香'
-[Step 2] verify     指纹变化=是 → 继续（0 次 VLM） sig=c2d8e5f0
+日志位置由 `config.yaml` 的 `log_dir` 决定，相对路径以 `server/autogui` 为基准。当前仓库配置为 `artifacts/logs`；代码在该字段缺省时使用 `test/log`。面板日志页固定读取 `artifacts/logs`，使用面板时保持该路径。
 
-[Step 5] perceive  1920×1080 树38节点/候选28 sig=f1a2b3c4
-[Step 5] route      tree（控件树可用：候选28）
-[Step 5] decide     CLICK node_ref=6 "点击搜索结果里的歌曲" glms=1 in_tok=2702 out_tok=79
-[Step 5] act        OK tap(512,388)
-[Step 5] verify     反思=C 未生效/进错页 → 恢复 vlm=1
-[Step 5] recovery   第 1 级：press_back
-
-[Step 7] decide     COMPLETE "七里香正在播放，播放条已高亮" glms=1 in_tok=2650 out_tok=61
-[Step 7] verify     终止动作 COMPLETE vlm=0
-
-────────────────────────────────────────────────────────────────────
-结果 ✅ 成功   status=complete
-────────────────────────────────────────────────────────────────────
-  步数            7
-  总耗时          41.2s   (平均 5.9s/步)
-  GLM 调用次数    6   (反思额外 1 次)
-  平均每步 VLM    0.86    ← 目标 ≤ 1（Mobile-Agent-v2 ≈ 4）
-  token  in/out   16,841 / 512   合计 17,353
-  路由分布        decide=5  tree=6
-  决策链日志      artifacts\logs\在音乐App里播放-20260915-142201.jsonl
-────────────────────────────────────────────────────────────────────
-```
-
-> 上面是**格式样例**，数值来自离线自检的形状，不是真机成绩。真机日志在借到车机后用
-> `python main.py "..."` 重新生成并归档到 `artifacts/`。
-
-每一行都对应评分项：`route` 行 = 路径 C 的证据；`verify` 行的 `0 次 VLM` = Context；
-`shot_ms/dump_ms` = 性能；结尾统计 = 客观分自证。
+`debug: true` 时，JSONL 旁会生成同名目录，保存截图、XML、候选与模型请求/响应。排查失败时对照动作前后的画面，判断是否定位错误、页面未加载完成或任务结果不符。日志可能包含账号和任务内容，分享前检查并脱敏。实际耗时、模型调用次数和 token 用量以本次运行日志为准。
 
 ---
 
@@ -209,14 +213,14 @@ Automotive GUI Agent  |  tree→vlm  |  exec=local
 | 键 | 默认 | 什么时候改 |
 |---|---|---|
 | `exec_mode` | `local` | MCP 不通时留 `local`；要演示 MCP 时改 `mcp` |
-| `grid.mode` | `auto` | 默认按截图计算；面板勾选“手动设置网格”后为 `manual`，使用 `cols/rows` |
-| `agent.reflection` | `cheap` | `always` 更准但每步多 1 次调用；`off` 最快但丢掉恢复 |
+| `image.max_side` / `image.jpeg_quality` | `1568` / `85` | 控制发给模型的截图尺寸和 JPEG 质量 |
+| `agent.reflection` | `cheap` | `cheap` 在画面无明显变化时进一步检查；`always` 对符合条件的动作调用模型反思；`off` 跳过这部分动作效果检查 |
 | `apps` | 见配置文件 | 设置页全量维护目标应用名称、包名和别名；`--check` 核对全部目标应用 |
 
-`glm.model` 需要换成组委会实际发的型号 id。
-面板设置页 `http://127.0.0.1:8777/settings` 可填写模型 URL、名称和 API Key，单独验证连接；`--check` 不发模型请求。逐项自检说明见[环境自检说明与优化方案](../../doc/环境自检说明与优化方案.md)。
+`glm.model`、`glm.base_url` 和 API Key 必须对应实际可用的服务。配置文件中已有的值会覆盖代码默认值；不要把默认值当作当前机器的有效配置。
+面板设置页 `http://127.0.0.1:8777/settings` 可填写模型 URL、名称和 API Key，单独验证连接；`--check` 不发模型请求。逐项自检说明见[部署与联调手册第 3 节](../../doc/部署与联调手册.md#3-设备和应用配置)。
 
-普通任务先发一次仅含指令与应用名称/别名的文本模型请求。模型选择缓存 ID 后，执行器按配置包名 ADB 启动；纯打开任务到此结束，复合任务再抓屏和 XML。模型选择 `OBSERVE`、返回无效 ID 或启动失败时进入原有观测流程。首次请求计入任务日志的 `initial_model` 和 token 用量；缓存未命中时会增加一次模型调用。
+普通任务只有在应用缓存与当前设备匹配、且有可直启应用时，才先发文本模型请求，选择应用 ID 和可选的 Skill 指导。纯打开任务直启成功后结束；复合任务继续抓屏和 XML。缓存不匹配、没有可用应用、模型选择观察或直启失败时，进入屏幕观测流程。该请求的统计计入 `initial_model` 和模型用量。
 
 ---
 
@@ -224,28 +228,25 @@ Automotive GUI Agent  |  tree→vlm  |  exec=local
 
 | 现象 | 原因 / 处理 |
 |---|---|
-| `no ADB device connected` | `adb devices`；无线则 `adb connect IP:5555`；车机上确认已允许调试 |
+| `no ADB device connected` | 先用 USB 连接，检查 `adb devices -l`，在设备上允许调试；无线连接需先确认设备已开启对应功能和端口 |
 | `multiple devices connected` | `config.yaml` 里 `device_serial` 写死具体 serial |
 | `GLM_API_KEY is not set` | 在面板设置页录入 API Key，或为启动任务的进程设置 `GLM_API_KEY`；新任务会重新读取配置 |
-| `--check` 里「IME 未被改坏」✗ | **不要继续**。说明输入法被换走了，中文输入会静默失败。见 `autogui/bridge/input.py` 的 `_via_adbkeyboard` |
-| 截图拿到的不是中控屏 | 车机多屏，`screencap` 默认屏不对。已在 `bridge/adb.py` 用 `--display` 前的 PNG 签名裁剪兜底；仍错则设 `display_id` |
-| 中文输入变成字母 | 正常——车机可能禁装 yadb/ADBKeyboard，自动降级到 ASCII。确认方式：`--check` 的「输入策略」 |
+| `--check` 里「IME 未被改坏」✗ | 输入探测前后默认输入法不一致；先恢复原输入法，再自检。实现见 `autogui/bridge/input.py` |
+| 截图拿到的不是中控屏 | 检查 `display_id` 并确认截图来自中控。PNG 签名裁剪只处理截图字节前的杂项，不能修正选错屏幕的问题 |
+| 中文输入变成字母 | 查看输入策略和实际输入结果。ASCII 通道不能精确输入中文；程序会尝试屏幕键盘，不能用字母代替中文并当作成功 |
 | 一直 `BACK` 到桌面 | 检查该页面 XML 候选及 VLM 降级日志，并修正动作或 Skill 指导 |
-| 跑两步就 `no_progress` 停止 | `agent.no_progress_limit` 调大；或该界面确实需要滑动，看决策链里 `route` 是否错判 |
-| `GraphRecursionError` | 把 `agent.max_steps` 调小。递归上限按 `max_steps*6+20` 自动算 |
+| 跑两步就 `no_progress` 停止 | 先对照截图、`act` 和 `verify` 检查动作是否生效；确认页面只是加载慢后，再考虑调整等待时间或无进展上限 |
+| `GraphRecursionError` | 保存错误日志，检查是否反复决策或加载指导；当前递归上限按 `max_steps*8+20` 设置，单纯调小任务步数不能定位原因 |
 
 ---
 
 ## 8. 已知限制
 
-诚实清单，不掩饰：
-
 - **单屏**。只操作中控屏（规则 4.2 强制），不支持多屏/副屏/仪表屏切换。
-- **`uiautomator dump` 在自绘界面（SurfaceView/游戏化 UI）拿不到控件**，此时走网格兜底，准确率下降。
-- **中文输入依赖车机是否允许 yadb/ADBKeyboard**。都禁则只剩 ASCII + 拼音，长中文搜索会退化。
+- **`uiautomator dump` 在自绘界面（SurfaceView/游戏化 UI）拿不到控件**，此时使用截图定位，效果需在实际设备上验证。
+- **中文输入依赖车机是否允许 yadb/ADBKeyboard**。没有可用的中文输入通道时会尝试屏幕键盘，仍需核对实际输入；ASCII 通道不能代替中文。
 - **无长期记忆**。上下文只在单次任务内有效，不做跨任务持久化。
 - **不处理登录、支付、验证码**。规则不允许，也没做。
-- **网格模式列标签单字母**，所以最多 26 列；默认按截图尺寸自动计算，手动列数上限也是 26。
 - **`estimate_tokens` 是启发式**，不是真 tokenizer，只用于决定裁剪多少；对外报告的是 GLM 返回的真实用量。
 - **显式 `--skill-only` 配方的 hint 文本需在真机上实测填写**。仓库里现带的 `music`/`bilibili` 配方含占位文本；普通指令只读取 `guide`，不执行这些步骤。
 
@@ -254,7 +255,7 @@ Automotive GUI Agent  |  tree→vlm  |  exec=local
 ## 9. 目录
 
 ```
-autogui/
+server/autogui/
 ├── main.py                CLI（--check / --dump-report / --mcp-check / --selftest）
 ├── config.yaml            运行时配置
 ├── run.bat                Windows 一键入口
@@ -265,20 +266,21 @@ autogui/
 │   ├── bridge/
 │   │   ├── adb.py         ADB 原语：exec-out/PNG裁剪/错误分级/防注入/树解析
 │   │   ├── input.py       中文输入：IME 存复 + yadb→ADBKeyboard→ASCII 降级
-│   │   └── tools.py       19 个纯函数 = MCP 工具本体
+│   │   └── tools.py       设备工具函数与 MCP 注册表
 │   ├── mcp_server.py      FastMCP，把 tools 套成协议面
 │   ├── perception/
 │   │   ├── capture.py     并行抓帧 + 屏幕指纹
 │   │   ├── tree.py        XML → 压缩候选（tree 模式不发图的底气）
-│   │   └── grid.py        横屏网格 + 标注 + 动作标记
+│   │   └── image.py       截图缩放与 JPEG 编码
 │   ├── brain/
-│   │   ├── glm_client.py  GLM 5.3（OpenAI 兼容）+ JSON 严格 + 用量统计
+│   │   ├── glm_client.py  配置的模型服务（OpenAI 兼容）+ JSON 校验 + 用量统计
 │   │   ├── prompts.py     读取模板、填充动态字段、组装消息
 │   │   ├── prompt_text.yaml  通用模型提示词（首次选应用/决策/反思/重试/上下文）
 │   │   └── context.py     四层上下文 + token 预算裁剪
 │   ├── core/
-│   │   ├── graph.py       LangGraph 8 节点 + 条件回边
-│   │   ├── state.py       窄状态
+│   │   ├── graph.py       LangGraph 9 节点 + 条件回边
+│   │   ├── picker.py      可读数值滚轮的调整与核验
+│   │   ├── state.py       状态字段
 │   │   ├── guard.py       三重硬限制
 │   │   ├── decision_log.py 规则 4.7 决策链 + JSONL
 │   │   └── executor.py    local / mcp 双通道
@@ -303,17 +305,14 @@ autogui/
 
 ## 10. 参考与借鉴来源
 
-本项目不是从零到一，也不是拿现成套壳。借了什么、改了什么，逐条登记在
-[`../技术方案评估.md`](../技术方案评估.md) §8，源码注释里也标注了来源文件与行号。
+以下借鉴关系在源码注释中有记录，对应实现入口如下：
 
-- **LightGUIAgent** — 闭环骨架、网格坐标思路、JSON 解析校验、JSONL 日志结构。
-- **android-agent（Ghost in the Droid）** — ADB 封装范式、错误分级、控件树解析全家桶、Skill 声明式结构与弹窗三级策略、FastMCP 工具注册范式。
-- **MobileAgent（阿里 X-PLUG）** — 仅设计思想：反思 A/B/C、进度与实体记忆分层。代码与模型均未使用。
-
-三者的适配点与**已在哪些地方必须改掉**，同样记在该文档 §2。
+- **LightGUIAgent**：提示词组织、日志和上下文等思路，见 [`brain/prompts.py`](autogui/brain/prompts.py)、[`core/decision_log.py`](autogui/core/decision_log.py)。
+- **android-agent（Ghost in the Droid）**：ADB、文字输入和 MCP 工具注册的适配，见 [`bridge/adb.py`](autogui/bridge/adb.py)、[`bridge/input.py`](autogui/bridge/input.py)、[`mcp_server.py`](autogui/mcp_server.py)。
+- **MobileAgent**：动作前后画面的反思提示与失败上下文保留思路，见 [`brain/prompts.py`](autogui/brain/prompts.py)、[`brain/context.py`](autogui/brain/context.py)。
 
 ---
 
 ## 11. 团队分工
 
-见 [`../aidoc/`](../aidoc/) 与提交时的 `队伍分工说明`（交付物 7）。
+见[队伍分工说明](../../doc/队伍分工说明.md)。
