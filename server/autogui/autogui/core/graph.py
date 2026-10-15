@@ -84,6 +84,7 @@ class Runner:
 
     # 运行开始时刻（time.time()），用于墙钟耗时与 guard 超时判定
     started: float = 0.0
+    _clock_started: float | None = None
     # 各路由使用次数统计：{"tree": n, "vlm": n, "skill": n}，结尾汇总用
     route_counts: dict = field(default_factory=dict)
     # 累计 VLM 反思次数（verify 里调 _reflect 才 +1），结尾汇总用
@@ -125,6 +126,7 @@ class Runner:
     def prepare(self) -> None:
         """运行前初始化：日志器、执行器（local/mcp 双通道）、技能库，并打印运行横幅。"""
         self.started = time.time()
+        self._clock_started = time.perf_counter()
         self.log = DecisionLog(self.task, self.cfg.artifacts_dir, verbose=self.cfg.verbose, debug=self.cfg.debug)
         if self.glm is not None:
             self.glm._log = self.log
@@ -161,7 +163,7 @@ class Runner:
     @property
     def elapsed(self) -> float:
         """本次运行已耗费的墙钟秒数。"""
-        return time.time() - self.started
+        return time.perf_counter() - self._clock_started if self._clock_started is not None else time.time() - self.started
 
     # ==============================节点 =================================================================
 
@@ -345,9 +347,9 @@ class Runner:
             self.log.save_text(f"step{state.get('step', 0):02d}_candidates", text)
 
         if route == "tree":
-            self.log.phase("decide", f"tree 模式（纯文本，无图）候选={len(kept)} ≈in={counts['approx_input']}tok")
+            self.log.phase("decide", f"根据控件树选择操作，候选 {len(kept)} 个，预计输入 {counts['approx_input']} token")
         else:
-            self.log.phase("decide", f"vlm 模式（原始截图）≈in={counts['approx_input']}tok")
+            self.log.phase("decide", f"根据屏幕截图选择操作，预计输入 {counts['approx_input']} token")
 
         if self.glm is None:
             return {"action": {}, "retry_decision": False,
@@ -392,6 +394,7 @@ class Runner:
             "decide",
             f"{action['type']} {self._action_detail(action)} — {action.get('explain', '')}",
             glms=usage.calls, in_tok=usage.prompt_tokens, out_tok=usage.completion_tokens,
+            latency_ms=round(usage.latency_ms, 1), usage_scope="summary",
         )
         if route == "tree" and action.get("point") is not None:
             self.log.phase("route", "tree 模式没有图片坐标系，改用 VLM 重新定位")
@@ -513,6 +516,8 @@ class Runner:
                 return {"last_action": {}, "no_progress": 0}
             action = refreshed
 
+        started = time.perf_counter()
+        self.log.phase("act", f"正在执行 {a_type} {self._action_detail(action)}", state="start")
         try:
             result = self._dispatch(action, route=state.get("route", "tree"))
         except UnicodeInputUnavailable as e:
@@ -524,22 +529,28 @@ class Runner:
                 f"可继续或 COMPLETE；否则再通过系统输入法按键、候选词完成输入。不必无限等待 XML。"
                 f"全拼参考：{pinyin or '不可用'}。"
             )
+            self.log.phase("act", "文字输入结束，尚未确认字段内容", state="end", status="unconfirmed",
+                           duration_ms=round((time.perf_counter() - started) * 1000, 1))
             self.log.phase("input", f"中文未获控件树确认，转屏幕观察：{e}", target=e.text, pinyin=pinyin)
             self.context.record(state.get("step", 0), state.get("route", "?"), a_type,
                                 "中文未获 XML 确认，转屏幕观察", failed=True)
             return {"last_action": {}, "no_progress": 0}
         except ADBError as e:
-            self.log.phase("act", f"ADB 失败：{e}")
+            self.log.phase("act", f"ADB 失败：{e}", state="end", status="error",
+                           duration_ms=round((time.perf_counter() - started) * 1000, 1))
             self.context.record(state.get("step", 0), state.get("route", "?"), a_type, "执行失败", failed=True)
             return {"last_action": action, "no_progress": state.get("no_progress", 0) + 1}
         except Exception as e:
-            self.log.phase("act", f"动作无法执行：{type(e).__name__}: {e}")
+            self.log.phase("act", f"动作无法执行：{type(e).__name__}: {e}", state="end", status="error",
+                           duration_ms=round((time.perf_counter() - started) * 1000, 1))
             self.context.record(state.get("step", 0), state.get("route", "?"), a_type, "执行异常", failed=True)
             return {"last_action": action, "no_progress": state.get("no_progress", 0) + 1}
 
-        self.log.phase("act", result or f"{a_type} ok")
+        self.log.phase("act", result or f"{a_type} ok", state="end", status="ok",
+                       duration_ms=round((time.perf_counter() - started) * 1000, 1))
         self.context.record(state.get("step", 0), state.get("route", "?"), a_type,
                             action.get("explain", ""), detail=result[:60])
+        self.log.phase("wait", "等待界面响应", wait_ms=self.cfg.agent.delay_after_action * 1000)
         time.sleep(self.cfg.agent.delay_after_action)
         return {"last_action": action}
 
@@ -665,7 +676,7 @@ class Runner:
         self.skip_waited_targets.clear()
         self.launch_monotonic = time.monotonic()
         if self.log:
-            self.log.phase("route", f"启动后弹窗提示已启用：{app}", decisions=2)
+            self.log.phase("route", f"接下来观察 {app} 的启动弹窗，必要时等待或关闭", decisions=2)
 
     @staticmethod
     def _is_launch_ad(xml: str) -> bool:
@@ -1279,15 +1290,19 @@ class Runner:
     def _launch_selected_app(self, app: AppConfig) -> bool:
         """按模型选出的缓存 ID 启动应用；失败交给界面观测流程。"""
         self.log.phase("route", f"模型选择应用直启：{app.name} → {app.package}")
+        started = time.perf_counter()
+        self.log.phase("act", f"正在通过 ADB 启动 {app.name}", state="start")
         try:
             result = self.executor.call("launch_app", package=app.package)
             if result.startswith("TOOL_ERROR"):
                 raise RuntimeError(result)
         except Exception as e:
-            self.log.phase("error", f"{app.name} ADB 启动失败，回退界面观测：{e}")
+            self.log.phase("act", f"{app.name} ADB 启动失败，回退界面观测：{e}", state="end", status="error",
+                           duration_ms=round((time.perf_counter() - started) * 1000, 1))
             self.context.record(0, "initial", "LAUNCH", f"{app.name} 启动失败：{e}", failed=True)
             return False
-        self.log.phase("act", f"已通过 ADB 打开 {app.name}", package=app.package, result=result)
+        self.log.phase("act", f"ADB 已执行 {app.name} 的启动命令", package=app.package, result=result,
+                       state="end", status="ok", duration_ms=round((time.perf_counter() - started) * 1000, 1))
         self.context.entities["已打开应用"] = app.name
         self.context.progress = f"已打开 {app.name}；继续完成用户指令"
         self.route_counts["model_adb_launch"] = 1

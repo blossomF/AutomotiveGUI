@@ -18,9 +18,13 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
+import threading
 import time
 from pathlib import Path
+
+from autogui.log_timeline import process_key
 
 
 def _c(text: str, code: str) -> str:
@@ -47,6 +51,9 @@ class DecisionLog:
     def __init__(self, task: str, artifacts_dir: Path | str, *, verbose: bool = True, debug: bool = False):
         self.task = task
         self.started = time.time()
+        self._clock = time.perf_counter()
+        self._process_key = process_key(os.getpid())
+        self._lock = threading.RLock()
         self.verbose = verbose
         self.debug = debug
         stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -75,18 +82,26 @@ class DecisionLog:
 
     def phase(self, phase: str, message: str, *, step: int | None = None, **metrics) -> None:
         """输出一行：``[19:11:51] [Step 3] [decide] 点击搜索框 (glms=1 in=3120 out=96)``。"""
-        now = time.time()
         wall = time.strftime("%H:%M:%S")
-        self.events.append({"t": round(now - self.started, 3), "wall": wall,
-                            "step": step if step is not None else self.step,
-                            "phase": phase, "msg": message, **metrics})
-        self._write_jsonl()
+        with self._lock:
+            if not self.events:
+                metrics = {"schema_version": 2, "pid": os.getpid(),
+                           "process_key": self._process_key, "started_at": self.started,
+                           "run_log": os.environ.get("AUTOGUI_RUN_LOG", ""), **metrics}
+            self.events.append({"t": round(time.perf_counter() - self._clock, 3), "wall": wall,
+                                "step": step if step is not None else self.step,
+                                "phase": phase, "msg": message, **metrics})
+            self._write_jsonl()
         if not self.verbose:
             return
         n = self.step if step is None else step
-        tail = "".join(f" {k}={v}" for k, v in metrics.items() if v is not None and v != "")
+        labels = {"latency_ms": "模型请求毫秒", "duration_ms": "执行毫秒", "in_tok": "输入token",
+                  "out_tok": "输出token", "shot_ms": "截图毫秒", "dump_ms": "控件树毫秒",
+                  "attempt": "尝试", "wait_ms": "等待毫秒", "error_type": "错误类型"}
+        tail = "".join(f" {labels[k]}={v}" for k, v in metrics.items()
+                       if k in labels and v is not None and v != "")
         label = _c(f"{phase:<9}", _PHASE_COLOR.get(phase, "0"))
-        print(f"[{wall}] [Step {n}] {label} {message}{tail}")
+        print(f"[{wall}] [Step {n}] {label} {message}{tail}", flush=True)
 
     def step_begin(self, step: int) -> None:
         self.step = step
@@ -168,8 +183,8 @@ class DecisionLog:
                 vlm_reflections: int, elapsed: float) -> str:
         """评委和验收文档共同阅读的汇总表。
 
-        ``avg_vlm_per_step`` 是整场运行中最值得引用的数字：设计目标
-        <=1（Mobile-Agent-v2 每步约 4 次），就在这里展示它。
+        模型调用包含文本决策、截图决策及反思，不能统称为 VLM。
+        所有 token 数均为已收到的服务端用量。
         """
         avg = f"{elapsed / steps:.1f}" if steps else "-"
         vlm_per_step = f"{(usage.get('calls', 0) / steps):.2f}" if steps else "-"
@@ -180,11 +195,11 @@ class DecisionLog:
             _c("─" * 68, "1"),
             f"  步数            {steps}",
             f"  总耗时          {elapsed:.1f}s   (平均 {avg}s/步)",
-            f"  GLM 调用次数    {usage.get('calls', 0)}   (反思额外 {vlm_reflections} 次)",
-            f"  平均每步 VLM    {vlm_per_step}    ← 目标 ≤ 1（Mobile-Agent-v2 ≈ 4）",
+            f"  GLM 调用次数    {usage.get('calls', 0)}   (其中反思 {vlm_reflections} 次)",
+            f"  平均每步模型调用 {vlm_per_step}    （含文本决策、截图决策与反思）",
             f"  token  in/out   {usage.get('prompt_tokens', 0):,} / {usage.get('completion_tokens', 0):,}"
             f"   合计 {usage.get('total_tokens', 0):,}",
-            f"  JSON 重试        {usage.get('retries', 0)}",
+            f"  请求/格式重试    {usage.get('retries', 0)}",
             f"  决策/指南次数  " + "  ".join(f"{k}={v}" for k, v in sorted(route_counts.items())) if route_counts else "  决策/指南次数  -",
             f"  决策链日志      {self.path}",
             _c("─" * 68, "1"),
@@ -195,7 +210,8 @@ class DecisionLog:
         self.events.append({"t": round(elapsed, 3), "elapsed": round(elapsed, 3),
                             "wall": time.strftime("%H:%M:%S"),
                             "phase": "finish", "msg": status, "success": success,
-                            "steps": steps, "usage": usage, "routes": route_counts})
+                            "steps": steps, "usage": usage, "routes": route_counts,
+                            "usage_complete": usage.get("usage_complete", True)})
         self._write_jsonl()
         self.close()
         return text

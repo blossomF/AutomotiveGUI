@@ -79,6 +79,8 @@
   .step-no { color:#7b8794; font-weight:600; }
   .meta { margin:8px 0; font-size:13px; color:#3e4c59; line-height:1.6; word-break:break-all; }
   .meta b { color:#1f2933; }
+  [hidden] { display:none !important; }
+  header { flex-wrap:wrap; }
   .timing { font-size:12px; color:#7b8794; }
   .evidence { background:#ecfdf5; border-left:3px solid #059669; padding:6px 10px;
               font-size:12px; color:#065f46; margin-top:6px; border-radius:4px; }
@@ -96,6 +98,8 @@
   <div class="spacer" data-page-node-id="0WuiGSZbAX8RH43vgJkDld"></div>
   <select id="taskSel" data-page-node-id="xEPnMuhyZhksGRpwNrFwKK"></select>
   <button id="loadBtn" class="mini" data-page-node-id="5oLIhOrkhUCCsukhwSSl1Q">加载</button>
+  <label class="mini"><input type="checkbox" id="offlineDebug"> 调试详情</label>
+  <button id="offlineOlder" class="mini" hidden>显示更早记录</button>
   <button id="reloadBtn" class="mini" title="重新读取已选文件（日志更新后点这个）" data-page-node-id="t8LvADt71fAo1Jud1tlLoT">重新读取</button>
   <a class="mini" href="http://localhost:8777/" target="lg_run" data-page-node-id="DOTNmHjrxPjbCdmwIjMYha">下指令 →</a>
 </header>
@@ -114,6 +118,7 @@
   <div id="timeline" class="timeline" data-page-node-id="NTII3cEAFHkcdmPOhONqTA"></div>
 </div>
 
+<script src="log_view.js"></script>
 <script>
 /*__CORE_START__*/
 // ============================================================
@@ -123,133 +128,28 @@
 function esc(s){
   return String(s==null?'':s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 }
-function num(v){ const n = Number(v); return isFinite(n) ? n : 0; }
 
 // 解析 JSONL 全文 -> 事件数组（跳过空行/坏行）
 function parseEvents(text){
   const out = [];
   String(text).split(/\r?\n/).forEach(ln => {
     if(!ln.trim()) return;
-    try { out.push(JSON.parse(ln)); } catch(e) {}
+    try { const e=JSON.parse(ln);if(e&&typeof e==='object'&&!Array.isArray(e))out.push(e); } catch(e) {}
   });
   return out;
 }
 
-// 空行数（用于「没有 finish 事件」时近似步数，对齐后端口径）
-function nonEmptyLines(text){
-  return String(text).split(/\r?\n/).filter(ln => ln.trim()).length;
-}
-
 // 任务概要：从 finish 事件取 status / 步数 / token / 耗时
-function buildSummary(stem, evs, lineCount){
-  let status = 'running', total_steps = 0, total_tokens = 0, total_time = 0;
-  evs.forEach(ev => {
-    if(ev.phase === 'finish'){
-      status = (ev.success === false) ? 'aborted' : 'done';
-      total_time  = num(ev.elapsed ?? ev.t);
-      const u = ev.usage || {};
-      total_tokens = Math.trunc(num(u.total_tokens));
-      total_steps  = Math.trunc(num(ev.steps));
-    }
-  });
-  if(status === 'running'){
-    total_steps = new Set(evs.filter(ev => Number.isInteger(ev.step) && ev.step > 0).map(ev => ev.step)).size;
-    total_time = Math.max(0, ...evs.map(ev => num(ev.t)));
-  }
-  return {
-    task_dir: stem, session_id: stem, task: stem,
-    status: status,
-    total_steps: total_steps,
-    total_time: Math.round(total_time * 10) / 10,
-    total_tokens: total_tokens
-  };
-}
+function buildSummary(stem,evs){const d=LogView.project(evs,stem);return {...d,...d.stats};}
 
-// 决策链明细：每条事件一张卡片（finish 只用于汇总，不单独成卡）
-function buildDetail(stem, evs){
-  let status = 'running', finishUsage = {}, finishSteps = 0, finishTime = null, steps = [], prevT = 0;
-  const stepCounts = {};
-  // 任务开始墙钟时刻（文件名末尾 -YYYYMMDD-HHMMSS）：旧日志无 wall 字段时用 t 偏移还原 HH:MM:SS
-  const stampM = String(stem).match(/-(\d{8})-(\d{6})$/);
-  let startMs = 0;
-  if(stampM){
-    const d = stampM[1], c = stampM[2];
-    startMs = new Date(+d.slice(0,4), +d.slice(4,6)-1, +d.slice(6,8),
-                       +c.slice(0,2), +c.slice(2,4), +c.slice(4,6)).getTime();
-  }
-
-  evs.forEach((ev, idx) => {
-    const phase = ev.phase || 'log';
-    const msg   = ev.msg || '';
-    let stepNo  = (typeof ev.step === 'number') ? ev.step : idx;
-
-    if(phase === 'finish'){
-      status = (ev.success === false) ? 'aborted' : 'done';
-      finishUsage = ev.usage || {};
-      // 真实步数取自 finish 顶层 steps（与概况口径一致）；usage 里没有 steps。
-      finishSteps = Math.trunc(num(ev.steps));
-      finishTime = num(ev.elapsed ?? ev.t);
-      return;
-    }
-    stepCounts[stepNo] = (stepCounts[stepNo] || 0) + 1;
-
-    // 事件自带指标（路由 / 屏幕指纹 / 调用次数 …）-> 卡片 detail
-    const metrics = {};
-    Object.keys(ev).forEach(k => {
-      if(k !== 't' && k !== 'wall' && k !== 'step' && k !== 'phase' && k !== 'msg') metrics[k] = ev[k];
-    });
-
-    // token 兼容 int 或 {input,output}
-    const tok = metrics.tokens;
-    let tokenD = {input:0, output:0};
-    if(tok && typeof tok === 'object'){
-      tokenD = {input: Math.trunc(num(tok.input)), output: Math.trunc(num(tok.output))};
-    } else if(typeof tok === 'number'){
-      tokenD = {input: Math.trunc(tok), output: 0};
-    }
-
-    const t  = num(ev.t);
-    const dt = prevT ? Math.round((t - prevT) * 100) / 100 : 0;
-    prevT = t;
-
-    // 每步墙钟时间（HH:MM:SS）：优先事件自带 wall（新版日志），否则 起始时刻 + t 还原
-    let wallTime = (typeof ev.wall === 'string' && ev.wall) ? ev.wall : '';
-    if(!wallTime && startMs) wallTime = new Date(startMs + t * 1000).toTimeString().slice(0, 8);
-
-    steps.push({
-      step: stepNo,
-      substep: stepCounts[stepNo],
-      wall_time: wallTime || null,
-      action: Object.assign({action: phase, summary: msg, explain: msg}, metrics),
-      inference_time: 0, execution_time: 0, total_time: dt,
-      tokens: tokenD, evidence: null, image: null, noop: false
-    });
-  });
-
-  let totalTokens = Math.trunc(num(finishUsage.total_tokens));
-  if(!totalTokens) totalTokens = steps.reduce((a, s) => a + s.tokens.input + s.tokens.output, 0);
-  const totalTime = finishTime ?? prevT;
-  const graphSteps = finishSteps || new Set(steps.filter(s => s.step > 0).map(s => s.step)).size;
-  const avg = graphSteps ? totalTime / graphSteps : 0;
-
-  return {
-    task_dir: stem, session_id: stem, task: stem,
-    status: status,
-    stats: {
-      total_steps: graphSteps,
-      total_time: Math.round(totalTime * 10) / 10,
-      total_tokens: totalTokens,
-      avg_step: Math.round(avg * 100) / 100
-    },
-    steps: steps
-  };
-}
+// 包含总结和诊断的完整事件流，展示时可过滤诊断。
+function buildDetail(stem,evs){return LogView.project(evs,stem);}
 
 // 一次解析出概要 + 明细（离线版一次性都拿到，不用再请求接口）
 function parseLog(stem, text){
   const evs = parseEvents(text);
   return {
-    summary: buildSummary(stem, evs, nonEmptyLines(text)),
+    summary: buildSummary(stem, evs),
     detail:  buildDetail(stem, evs)
   };
 }
@@ -261,33 +161,9 @@ function parseLog(stem, text){
 const $ = (s) => document.querySelector(s);
 
 const FILES  = [];   // [{stem, file}]  保留 File 句柄，便于「重新读取」
-const TASKS  = [];   // 概要列表（按名字倒序）
+const TASKS  = [];   // 概要列表（按启动时间倒序）
 const DETAIL = {};   // stem -> detail
 const ARTIFACTS = {}; // 选择整个日志文件夹时，按「任务名/文件名」索引 XML
-
-function xmlLogView(a, stem){
-  if(a.action !== 'xml') return null;
-  const elapsed = Number.isFinite(Number(a.dump_ms)) ? ' · ' + (Number(a.dump_ms) / 1000).toFixed(2) + ' 秒' : '';
-  const count = Number(a.chars || 0).toLocaleString('zh-CN');
-  const title = a.status === 'ok' ? 'XML 获取成功 · ' + count + ' 字符' + elapsed
-              : a.status === 'empty' ? 'XML 内容为空' + elapsed
-              : 'XML 获取失败（' + (a.status || '状态未知') + '）' + elapsed;
-  const key = stem + '/' + (a.artifact || '');
-  const link = a.artifact && ARTIFACTS[key]
-    ? `<a href="#" data-xml-key="${encodeURIComponent(key)}">查看原始 XML</a>`
-    : (a.artifact ? `原始 XML：${esc(a.artifact)}（选择整个日志文件夹可打开）` : '');
-  const labels = {status:'状态', adb_detail:'ADB 错误', command:'ADB 命令',
-    dump_exit:'生成退出码', dump_stdout:'生成输出', dump_stderr:'生成错误',
-    read_exit:'读取退出码', remote_file:'设备文件检查', stage:'失败阶段',
-    adb_exit:'ADB 退出码', dump_ms:'耗时（毫秒）', chars:'字符数'};
-  const fields = Object.entries(a).filter(([k,v]) =>
-    !['action','summary','explain','artifact'].includes(k) && v !== '' && v != null)
-    .map(([k,v]) => `<b>${esc(labels[k] || k)}：</b>${esc(typeof v === 'object' ? JSON.stringify(v) : v)}`)
-    .join(' · ');
-  const diagnostics = a.status === 'ok' ? ''
-    : `<details class="meta"><summary>诊断详情</summary>${fields}</details>`;
-  return {summary: title, detail: link, diagnostics};
-}
 
 function setInfo(t){ $('#pickInfo').textContent = t; }
 
@@ -317,66 +193,27 @@ function renderTaskList(){
   TASKS.forEach(t => {
     const o = document.createElement('option');
     o.value = t.task_dir;
-    o.textContent = `${t.task_dir} | ${t.status==='done'?'✅':(t.status==='aborted'?'⚠️':'⏳')} ${t.total_steps}步 · ${t.total_time}s · ${t.total_tokens} token`;
+    o.textContent = `${t.task_dir} | ${LogView.statusNames[t.status]||t.status} ${t.total_steps}步 · ${t.total_time}s · ${t.total_tokens} token`;
     sel.appendChild(o);
   });
   if(TASKS.length){ sel.value = TASKS[0].task_dir; renderTask(TASKS[0].task_dir); }
 }
 
+let offlineDebug=false,offlineLimit=200,offlineCurrent=null;
 function renderTask(stem){
-  const d = DETAIL[stem];
-  if(!d) return;
-  $('#stats').innerHTML = `
-    <div class="stat"><div class="k">任务</div><div class="v" style="font-size:14px">${esc(d.task)}</div></div>
-    <div class="stat"><div class="k">状态</div><div class="v"><span class="badge ${d.status}">${d.status==='done'?'已完成':(d.status==='aborted'?'已中止':'运行中')}</span></div></div>
-    <div class="stat"><div class="k">步数</div><div class="v">${d.stats.total_steps}</div></div>
-    <div class="stat"><div class="k">任务总耗时</div><div class="v">${d.stats.total_time}s</div></div>
-    <div class="stat"><div class="k">平均步耗时</div><div class="v">${d.stats.avg_step}s</div></div>
-    <div class="stat"><div class="k">总 Token</div><div class="v">${d.stats.total_tokens}</div></div>
-  `;
-
-  const tl = $('#timeline');
-  tl.innerHTML = '';
-  if(!d.steps.length){ tl.innerHTML = '<div class="empty">该日志没有可回放的事件</div>'; return; }
-
-  let previousGraphStep = null;
-  d.steps.forEach(s => {
-    if(previousGraphStep !== s.step){
-      const heading = document.createElement('div');
-      heading.className = 'phase-group';
-      heading.textContent = s.step === 0 ? '任务准备' : `第 ${s.step} 步`;
-      tl.appendChild(heading);
-      previousGraphStep = s.step;
-    }
-    const a = s.action || {};
-    const xml = xmlLogView(a, stem);
-    const explain = xml ? `<div class="meta"><b>${esc(xml.summary)}</b></div>`
-      : (a.explain ? `<div class="meta"><b>说明：</b>${esc(a.explain)}</div>` : '');
-    const detail = xml ? xml.detail : Object.entries(a)
-      .filter(([k]) => !['action','summary','explain','decision_source','_tool_call_id','_from_tool','chinese_resolved','typed_value'].includes(k))
-      .map(([k,v]) => `<b>${esc(k)}:</b> ${esc(typeof v === 'object' ? JSON.stringify(v) : v)}`)
-      .join(' · ');
-    const noop = s.noop ? `<div class="noop">⚠️ 上一步点击后界面无变化</div>` : '';
-    const card = document.createElement('div');
-    card.className = 'card p-' + esc(a.action || 'log');
-    card.innerHTML = `
-      <div class="body">
-        <div class="row1">
-          <span class="step-no">事件 ${s.substep}</span>
-          <span class="atype a-${esc(a.action||'')}">${esc(a.action||'?')}</span>
-          <span class="timing">${s.wall_time ? s.wall_time + '  cost:' + s.total_time + 's' : 't+' + s.total_time + 's'}</span>
-          ${a.decision_source?`<span class="badge" style="background:#e0e7ff;color:#3730a3">${esc(a.decision_source)}</span>`:''}
-        </div>
-        ${detail?`<div class="meta">${detail}</div>`:''}
-        ${explain}
-        ${xml ? xml.diagnostics : ''}
-        <div class="timing">token ${ (s.tokens.input||0)+(s.tokens.output||0) }（入 ${s.tokens.input} / 出 ${s.tokens.output}）</div>
-        ${noop}
-      </div>`;
-    tl.appendChild(card);
-  });
+ const d=DETAIL[stem];if(!d)return;offlineCurrent=stem;
+ $('#stats').innerHTML=LogView.stats(d);
+ const rows=d.steps.filter(s=>offlineDebug||!LogView.diagnostic(s));
+ $('#timeline').innerHTML=rows.slice(-offlineLimit).map(s=>LogView.card(s,stem)).join('');
+ // XML links resolve to the selected local folder, never to a web server.
+ $('#timeline').querySelectorAll('a[href^="/api/artifact"]').forEach(link=>{
+  const url=new URL(link.getAttribute('href'),'http://offline');const filename=url.searchParams.get('file');
+  const key=stem+'/'+filename;link.href='#';
+  if(ARTIFACTS[key])link.dataset.xmlKey=encodeURIComponent(key);
+  else{link.replaceWith(document.createTextNode('原始 XML：'+filename+'（选择日志文件夹可打开）'));}
+ });
+ $('#offlineOlder').hidden=rows.length<=offlineLimit;
 }
-
 // 从 File 对象列表解析
 async function loadFromFiles(fileList){
   const jls = Array.from(fileList).filter(f => /\.jsonl$/i.test(f.name));
@@ -414,7 +251,8 @@ async function parseAll(){
     TASKS.push(r.summary);
     DETAIL[it.stem] = r.detail;
   }
-  TASKS.sort((a, b) => a.task_dir < b.task_dir ? 1 : -1);   // 名字倒序，对齐后端口径
+  const stamp=t=>t.task_dir.match(/-(\d{8})-(\d{6})$/)?.slice(1).join('')||'';
+  TASKS.sort((a,b)=>stamp(b).localeCompare(stamp(a))||b.task_dir.localeCompare(a.task_dir));
   renderTaskList();
   if(!TASKS.length) emptyState('日志解析失败或为空');
   else setInfo(`已加载 ${TASKS.length} 个任务日志`);
@@ -426,6 +264,8 @@ $('#pickFileBtn').onclick = () => $('#fileInput').click();
 $('#dirInput').onchange   = e => loadFromFiles(e.target.files);
 $('#fileInput').onchange  = e => loadFromFiles(e.target.files);
 $('#loadBtn').onclick     = () => renderTask($('#taskSel').value);
+$('#offlineDebug').onchange=e=>{offlineDebug=e.target.checked;renderTask(offlineCurrent);};
+$('#offlineOlder').onclick=()=>{offlineLimit+=200;renderTask(offlineCurrent);};
 $('#reloadBtn').onclick   = () => { if(FILES.length) parseAll(); else setInfo('还没选文件'); };
 $('#taskSel').onchange    = e => renderTask(e.target.value);
 $('#timeline').addEventListener('click', e => {
