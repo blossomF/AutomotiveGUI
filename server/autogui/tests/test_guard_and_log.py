@@ -72,7 +72,7 @@ def test_log_flushes_per_event_so_a_crash_keeps_the_chain(log):
     assert text.strip() and json.loads(text.strip().splitlines()[-1])["phase"] == "act"
 
 
-def test_summary_reports_vlm_calls_per_step(log):
+def test_summary_reports_model_calls_per_step(log):
     out = log.summary(
         success=True, status="complete", steps=6,
         usage={"calls": 5, "prompt_tokens": 9000, "completion_tokens": 400, "total_tokens": 9400, "retries": 1},
@@ -82,7 +82,8 @@ def test_summary_reports_vlm_calls_per_step(log):
     assert "0.83" in out          # 5 次调用 / 6 步——展示 ≤1 目标
     assert "9,400" in out
     assert "tree=4" in out and "vlm=1" in out
-    assert "Mobile-Agent-v2" in out
+    assert "平均每步模型调用" in out
+    assert "平均每步 VLM" not in out
 
 
 def test_summary_survives_zero_steps(log):

@@ -69,6 +69,8 @@ class Usage:
     completion_tokens: int = 0
     latency_ms: float = 0.0
     retries: int = 0
+    usage_complete: bool = True
+    usage_reports: int = 0
 
     @property
     def total_tokens(self) -> int:
@@ -80,6 +82,8 @@ class Usage:
         self.completion_tokens += other.completion_tokens
         self.latency_ms += other.latency_ms
         self.retries += other.retries
+        self.usage_complete = self.usage_complete and other.usage_complete
+        self.usage_reports += other.usage_reports
 
     def as_dict(self) -> dict:
         return {
@@ -89,6 +93,8 @@ class Usage:
             "total_tokens": self.total_tokens,
             "latency_ms": round(self.latency_ms, 1),
             "retries": self.retries,
+            "usage_complete": self.usage_complete,
+            "usage_reports": self.usage_reports,
         }
 
 
@@ -144,28 +150,26 @@ class GLMClient:
 
         for attempt in range(self.cfg.max_retries + 1):
             started = time.perf_counter()
+            delta = Usage(calls=1, retries=int(attempt > 0))
+            final_usage = None
+            error = None
+            if self._log:
+                self._log.phase("model", "正在请求模型", state="start", call_id=call_id,
+                                attempt=attempt + 1, request_kind=kind)
             try:
-                # 流式接收：ts-glm-53-flash 是思维链模型，复杂步思考可达数分钟。
-                # 非流式下网关整体生成完才回包，60s 读超时内无任何字节 → 必然超时；
-                # 流式下思考 token 持续到达，读超时只约束块间静默，长思考可正常完成。
-                # SDK 内部重试已关闭（max_retries=0），重试统一走下方循环（带退避+日志）。
                 extra: dict = {}
                 effort = getattr(self.cfg, "reasoning_effort", "")
                 if effort:
                     extra["reasoning_effort"] = effort
+                # Keep streaming: long generations may exceed a gateway's non-streaming idle window.
+                # SDK retries are disabled; each attempt is settled exactly once below.
                 resp = self._client.chat.completions.create(
-                    model=self.cfg.model,
-                    messages=messages,
-                    temperature=self.cfg.temperature,
-                    max_tokens=self.cfg.max_tokens,
-                    stream=True,
-                    stream_options={"include_usage": True},
-                    extra_body=extra,
+                    model=self.cfg.model, messages=messages,
+                    temperature=self.cfg.temperature, max_tokens=self.cfg.max_tokens,
+                    stream=True, stream_options={"include_usage": True}, extra_body=extra,
                 )
-                call.calls += 1
-                call.retries += attempt
                 content_parts: list[str] = []
-                final_usage = None
+                last_progress = started
                 for ev in resp:
                     if getattr(ev, "usage", None):
                         final_usage = ev.usage
@@ -173,37 +177,63 @@ class GLMClient:
                         piece = getattr(ev.choices[0].delta, "content", None)
                         if piece:
                             content_parts.append(piece)
-                call.latency_ms += (time.perf_counter() - started) * 1000
-                if final_usage:
-                    call.prompt_tokens += int(final_usage.prompt_tokens or 0)
-                    call.completion_tokens += int(final_usage.completion_tokens or 0)
-                self.usage.merge(call)
-                self.last_call = call
+                    now = time.perf_counter()
+                    if self._log and now - last_progress >= 5:
+                        self._log.phase("model", "模型仍在生成，请稍候", state="progress",
+                                        call_id=call_id, attempt=attempt + 1, request_kind=kind,
+                                        pending_ms=round((now - started) * 1000, 1))
+                        last_progress = now
                 content = "".join(content_parts).strip()
-
                 if self._log and self._log.debug:
                     self._log.trace_text("glm_response", content, call_id=call_id, request_kind=kind,
-                                         attempt=attempt + 1, latency_ms=round(call.latency_ms, 1),
-                                         in_tok=call.prompt_tokens, out_tok=call.completion_tokens)
-
+                                         attempt=attempt + 1,
+                                         latency_ms=round((time.perf_counter() - started) * 1000, 1),
+                                         in_tok=int(getattr(final_usage, "prompt_tokens", 0) or 0),
+                                         out_tok=int(getattr(final_usage, "completion_tokens", 0) or 0))
                 if not content:
                     raise GLMError("empty completion")
-                return content, call
-            except Exception as e:  # 传输 / 鉴权 / schema 漂移
-                last = e
+            except (KeyboardInterrupt, SystemExit) as exc:
+                error = exc
+                raise
+            except Exception as exc:
+                last = error = exc
+                detail = str(exc)
+                if self.cfg.api_key:
+                    detail = detail.replace(self.cfg.api_key, "<redacted-api-key>")
                 if self._log and self._log.debug:
-                    detail = str(e)
-                    if self.cfg.api_key:
-                        detail = detail.replace(self.cfg.api_key, "<redacted-api-key>")
                     self._log.trace_text("glm_error", detail, call_id=call_id,
                                          request_kind=kind, attempt=attempt + 1,
-                                         error_type=type(e).__name__,
-                                         status_code=getattr(e, "status_code", None))
-                if attempt < self.cfg.max_retries and _is_retryable(e):
-                    # 指数退避 1/2/4/8s：网关坏窗常持续十几秒，多次重试以撞上健康实例
-                    time.sleep(min(8.0, 1.0 * (2 ** attempt)))
-                    continue
-                break  # 硬错误（401/403/确定性 400）立即失败，不空等
+                                         error_type=type(exc).__name__,
+                                         status_code=getattr(exc, "status_code", None))
+            finally:
+                delta.latency_ms = (time.perf_counter() - started) * 1000
+                delta.usage_complete = final_usage is not None
+                delta.usage_reports = int(final_usage is not None)
+                if final_usage:
+                    delta.prompt_tokens = int(final_usage.prompt_tokens or 0)
+                    delta.completion_tokens = int(final_usage.completion_tokens or 0)
+                call.merge(delta)
+                self.usage.merge(delta)
+                self.last_call = call
+                if self._log:
+                    self._log.phase("model", "模型请求失败" if error else "模型请求完成",
+                                    state="end", call_id=call_id, attempt=attempt + 1,
+                                    request_kind=kind, status="error" if error else "ok",
+                                    error_type=type(error).__name__ if error else None,
+                                    latency_ms=round(delta.latency_ms, 1),
+                                    tokens={"input": delta.prompt_tokens, "output": delta.completion_tokens},
+                                    usage_known=final_usage is not None, usage_total=self.usage.as_dict())
+            if error is None:
+                return content, call
+            if attempt < self.cfg.max_retries and _is_retryable(error):
+                wait = min(8.0, 1.0 * (2 ** attempt))
+                if self._log:
+                    self._log.phase("model", f"请求失败，{wait:g} 秒后重试", state="retry",
+                                    call_id=call_id, attempt=attempt + 1, request_kind=kind,
+                                    retry_wait_ms=wait * 1000)
+                time.sleep(wait)
+                continue
+            break
         self.last_call = call
         raise GLMError(f"GLM call failed after {self.cfg.max_retries + 1} attempts: {last}")
 
@@ -231,6 +261,8 @@ class GLMClient:
                 completion_tokens=first.completion_tokens + second.completion_tokens,
                 latency_ms=first.latency_ms + second.latency_ms,
                 retries=first.retries + second.retries + 1,
+                usage_complete=first.usage_complete and second.usage_complete,
+                usage_reports=first.usage_reports + second.usage_reports,
             )
             self.last_call = merged
             return prompts.first_json_object(text2)

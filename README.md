@@ -206,6 +206,26 @@ flowchart LR
 
 ---
 
+### 面板统计与实时状态
+
+- 模型请求、动作执行分别采集耗时；“距上条日志”只表示事件间隔。旧日志缺少的操作耗时不会补成 0。“平均每步（含启动）”是任务总时长除以操作步数。
+- 模型用量在关闭 debug 时也会记录。请求事件的累计用量是汇总依据，决策摘要不重复计入；服务端未返回完整用量时显示“已记录 Token”。异常退出可能丢失尚未返回的用量。
+- 日志静默超过 30 秒仍继续刷新。新任务根据进程及其启动标识核实状态；旧日志没有结束事件、也没有进程信息时显示“状态未知”。
+- 时间线默认隐藏成功获取 XML、请求/响应原文等调试记录，可打开“调试详情”。模型错误、XML 失败和任务总结始终可见。长日志先显示最近 200 条，可点“显示更早记录”。
+- 面板启动的任务会将标准输出同时写到启动终端与 `artifacts/logs/dashboard_run_*.log`；任务页和日志页的“进程输出”可查看最近 64 KiB。`.run.json` 保存退出结果，不要只复制 JSONL 就期待恢复进程输出链接。
+- `dist/dashboard.html` 是离线查看器，与 `dist/log_view.js` 一起保留；它支持选择 JSONL 或整个日志目录，离线时不推断本机进程状态。
+
+日志回归测试（从项目根目录执行，无需设备或模型凭证）：
+
+```bash
+python -m unittest discover -s server/autogui/tests -p test_log_regressions.py -v
+node server/autogui/tests/test_dashboard_frontend.cjs
+```
+
+Node 仅用于前端回归测试，运行面板不需要 Node。完整项目测试仍使用 `python -m pytest server/autogui/tests -q`。
+
+---
+
 ## 6. 配置
 
 全在 `config.yaml`，默认值见 `autogui/config.py`。常改的配置：

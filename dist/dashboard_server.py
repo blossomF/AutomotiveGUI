@@ -27,6 +27,7 @@ import base64
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -57,6 +58,13 @@ AUTOGUI_DIR = _resolve_autogui()
 PROJECT_ROOT = AUTOGUI_DIR          # 启动 main.py 时的 CWD（= server/autogui）
 LOGS_ROOT = AUTOGUI_DIR / "artifacts" / "logs"   # 决策链日志（扁平 *.jsonl）
 CONFIG_PATH = AUTOGUI_DIR / "config.yaml"
+if str(AUTOGUI_DIR) not in sys.path:
+    sys.path.insert(0, str(AUTOGUI_DIR))
+from autogui.log_timeline import LogCache, process_key
+_LOG_CACHE = LogCache()
+_LIST_CACHE = {}
+_LIST_LOCK = threading.RLock()
+
 _SETTINGS_LOCK = threading.Lock()
 
 
@@ -166,202 +174,118 @@ def task_label(session_id: str, task: str) -> str:
     return f"{stamp:%m-%d %H:%M:%S} {task}"
 
 
-def list_tasks() -> list:
-    """列出所有任务日志（扁平 *.jsonl），返回概要列表（按时间倒序）。
+def _task_path(task_dir):
+    if not task_dir or Path(task_dir).name != task_dir or "/" in task_dir or "\\" in task_dir:
+        return None
+    path = (LOGS_ROOT / f"{task_dir}.jsonl").resolve()
+    return path if path.parent == LOGS_ROOT.resolve() and path.is_file() else None
 
-    适配 AutomotiveGUI 的 DecisionLog 格式：每个任务一个
-    ``artifacts/logs/<任务>-<时间戳>.jsonl``，每行是
-    ``{"t":..,"step":..,"phase":..,"msg":..,**指标}``。
-    """
+
+def _run_state(task_dir):
+    path = _task_path(task_dir)
+    if not path:
+        return {}
+    try:
+        return json.loads(path.with_suffix(".run.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _apply_runtime(detail, first, state):
+    detail = {**detail, "stats": dict(detail["stats"])}
+    detail["run_log"] = state.get("run_log") or first.get("run_log") or ""
+    if detail["complete"]:
+        return detail
+    pid = first.get("pid") or state.get("pid")
+    identity = first.get("process_key") or state.get("process_key")
+    started = first.get("started_at") or state.get("started_at")
+    if state.get("state") in ("cancelled", "error", "interrupted"):
+        detail["status"] = state["state"]
+        detail["reason"] = state.get("reason", "进程已退出，未写入任务总结")
+        if state.get("ended_at") and started:
+            detail["stats"]["total_time"] = round(max(0, state["ended_at"] - started), 1)
+    elif pid and identity:
+        observed = process_key(pid)
+        if observed == identity:
+            detail["status"] = "running"
+            if started:
+                detail["stats"]["total_time"] = round(max(0, time.time() - started), 1)
+        elif observed is None and os.name == "nt":
+            # Access denied and a dead process are indistinguishable without a handle.
+            detail["status"] = "unknown"
+            detail["reason"] = "无法核实进程状态；尚无结束记录"
+        else:
+            detail["status"] = "interrupted"
+            detail["reason"] = "执行进程已退出，未写入任务总结；显示最后已记录的耗时和用量"
+    else:
+        detail["reason"] = "缺少结束记录和进程信息，无法确认任务是否仍在运行"
+    detail["stats"]["avg_step"] = round(detail["stats"]["total_time"] / detail["stats"]["total_steps"], 2) if detail["stats"]["total_steps"] else None
+    return detail
+
+
+def list_tasks() -> list:
+    """Newest session first. Cache projections; don't read old logs every poll."""
     if not LOGS_ROOT.exists():
         return []
     out = []
-    for jl in sorted(LOGS_ROOT.glob("*.jsonl"), reverse=True):
-        sid = jl.stem
-        task = re.sub(r"-\d{8}-\d{6}$", "", sid)
-        status = "running"
-        total_steps = 0
-        total_tokens = 0
-        total_time = 0.0
-        seen_steps = set()
-        event_count = 0
-        try:
-            lines = [ln for ln in jl.read_text(encoding="utf-8").splitlines() if ln.strip()]
-            for line in lines:
-                try:
-                    ev = json.loads(line)
-                except Exception:
-                    continue
-                event_count += 1
-                if isinstance(ev.get("task"), str) and ev["task"].strip():
-                    task = ev["task"]
-                if ev.get("phase") == "finish":
-                    status = "done" if ev.get("success", True) else "aborted"
-                    total_time = float(ev.get("elapsed", ev.get("t", 0.0)) or 0.0)
-                    usage = ev.get("usage") or {}
-                    total_tokens = int(usage.get("total_tokens", 0) or 0)
-                    total_steps = int(ev.get("steps", 0) or 0)
-                else:
-                    total_time = max(total_time, float(ev.get("t", 0.0) or 0.0))
-                    if isinstance(ev.get("step"), int) and ev["step"] > 0:
-                        seen_steps.add(ev["step"])
-            if status == "running":
-                total_steps = len(seen_steps)
-        except Exception:
-            pass
-        out.append(
-            {
-                "task_dir": sid,
-                "session_id": sid,
-                "task": task,
-                "title": task_label(sid, task),
-                "status": status,
-                "total_steps": total_steps,
-                "event_count": event_count,
-                "total_time": round(total_time, 1),
-                "total_cost": 0.0,
-                "total_tokens": total_tokens,
-            }
-        )
+    with _LIST_LOCK:
+        paths = list(LOGS_ROOT.glob("*.jsonl"))
+        existing = set()
+        for path in paths:
+            key = str(path.resolve())
+            existing.add(key)
+            stat = path.stat()
+            signature = (stat.st_ino, stat.st_size, stat.st_mtime_ns)
+            cached = _LIST_CACHE.get(key)
+            if not cached or cached[0] != signature:
+                base, events = _LOG_CACHE.read(path)
+                base = {k: v for k, v in base.items() if k != "steps"}
+                cached = (signature, base, events[0] if events else {})
+                _LIST_CACHE[key] = cached
+            detail = _apply_runtime(cached[1], cached[2], _run_state(path.stem))
+            stats = detail["stats"]
+            match = re.search(r"-(\d{8})-(\d{6})$", path.stem)
+            stamp = "".join(match.groups()) if match else datetime.fromtimestamp(stat.st_mtime).strftime("%Y%m%d%H%M%S")
+            out.append({**{k: detail[k] for k in ("task_dir", "session_id", "task", "title", "status", "reason", "event_count")},
+                        **stats, "total_cost": None, "_sort": (stamp, path.stem)})
+        for key in set(_LIST_CACHE) - existing:
+            del _LIST_CACHE[key]
+    out.sort(key=lambda item: item["_sort"], reverse=True)
+    for item in out:
+        del item["_sort"]
     return out
 
 
 def get_task_detail(task_dir: str) -> dict:
-    """解析单个任务的完整决策链（扁平 JSONL），聚合成前端友好的结构。
-
-    每一条事件（perceive/route/decide/act/verify/recovery/guard/finish）
-    渲染为时间线的一张卡片。AutomotiveGUI 不存截图，故 image 始终为 None。
-    """
-    p = LOGS_ROOT / f"{task_dir}.jsonl"
-    if not p.exists():
+    path = _task_path(task_dir)
+    if not path:
         return None
-    events = []
-    for line in p.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            try:
-                events.append(json.loads(line))
-            except Exception:
-                pass
-
-    task = next((ev["task"] for ev in events
-                 if isinstance(ev.get("task"), str) and ev["task"].strip()),
-                re.sub(r"-\d{8}-\d{6}$", "", task_dir))
-    status = "running"
-    finish_usage = {}
-    finish_steps = 0
-    finish_time = None
-    steps = []
-    step_counts = {}
-    prev_t = 0.0
-    # 任务开始墙钟时刻：文件名末尾 -YYYYMMDD-HHMMSS（DecisionLog 落盘时写入）。
-    # 旧日志事件无 wall 字段时，用它 + 相对时间 t 还原每步的 HH:MM:SS。
-    start_dt = None
-    _m = re.search(r"-(\d{8})-(\d{6})$", task_dir)
-    if _m:
-        try:
-            start_dt = datetime.strptime(_m.group(1) + _m.group(2), "%Y%m%d%H%M%S")
-        except ValueError:
-            start_dt = None
-    for idx, ev in enumerate(events):
-        phase = ev.get("phase", "log")
-        msg = ev.get("msg", "")
-        step_no = ev.get("step")
-        step_no = step_no if isinstance(step_no, int) else idx
-        # finish 事件只用于汇总状态，不单独成卡
-        if phase == "finish":
-            status = "done" if ev.get("success", True) else "aborted"
-            finish_usage = ev.get("usage") or {}
-            # 真实步数取自 finish 的顶层 steps（与 list_tasks 口径一致）；
-            # 注意 usage 里没有 steps 字段，别去 usage 里找。
-            finish_steps = int(ev.get("steps", 0) or 0)
-            finish_time = float(ev.get("elapsed", ev.get("t", 0.0)) or 0.0)
-            continue
-        step_counts[step_no] = step_counts.get(step_no, 0) + 1
-        # 事件自带的指标（路由/屏幕指纹/调用次数等），用于卡片 detail
-        metrics = {k: v for k, v in ev.items()
-                   if k not in ("t", "wall", "step", "phase", "msg")}
-        # token 解析（兼容 int 或 {input,output}）
-        tok = metrics.get("tokens")
-        if isinstance(tok, dict):
-            token_d = {"input": int(tok.get("input", 0) or 0),
-                       "output": int(tok.get("output", 0) or 0)}
-        elif isinstance(tok, (int, float)):
-            token_d = {"input": int(tok), "output": 0}
-        else:
-            token_d = {"input": 0, "output": 0}
-        t = float(ev.get("t", 0.0) or 0.0)
-        dt = round(t - prev_t, 2) if prev_t else 0.0
-        prev_t = t
-        # 每步墙钟时间（HH:MM:SS）：优先事件自带 wall（新版日志），否则 起始时刻 + t 还原
-        wall = ev.get("wall") if isinstance(ev.get("wall"), str) and ev.get("wall") else None
-        if wall is None and start_dt is not None:
-            wall = (start_dt + timedelta(seconds=t)).strftime("%H:%M:%S")
-        action = {"action": phase, "summary": msg, "explain": msg, **metrics}
-        steps.append({
-            "idx": idx,              # 唯一事件序号：前端用它做 key，避免同 graph step 下多事件互相覆盖
-            "step": step_no,         # graph step 编号（JSONL 里的 step 字段）
-            "substep": step_counts[step_no],
-            "wall_time": wall,       # 该步发生的系统时间 HH:MM:SS（可为 None）
-            "action": action,
-            "inference_time": 0,
-            "execution_time": 0,
-            "total_time": dt,
-            "tokens": token_d,
-            "evidence": None,
-            "image": None,           # 队友框架不存截图
-            "noop": False,
-        })
-
-    total_tokens = int(finish_usage.get("total_tokens", 0) or 0)
-    if not total_tokens:
-        total_tokens = sum(s["tokens"]["input"] + s["tokens"]["output"] for s in steps)
-    total_time = round(finish_time if finish_time is not None else prev_t, 1)
-    graph_steps = finish_steps or len({s["step"] for s in steps if s["step"] > 0})
-    avg = total_time / graph_steps if graph_steps else 0.0
-    return {
-        "task_dir": task_dir,
-        "session_id": task_dir,
-        "task": task,
-        "title": task_label(task_dir, task),
-        "status": status,
-        "stats": {
-            "total_steps": graph_steps,
-            "total_time": total_time,
-            "total_tokens": total_tokens,
-            "avg_step": round(avg, 2),
-        },
-        "steps": steps,
-    }
+    detail, events = _LOG_CACHE.read(path)
+    return _apply_runtime(detail, events[0] if events else {}, _run_state(task_dir))
 
 
 def get_live(task_dir: str, after_idx: int | None = None) -> dict:
-    """按事件序号增量返回，避免两次轮询之间的事件丢失。"""
     detail = get_task_detail(task_dir)
     if not detail:
         return {"ok": False, "error": "task not found"}
-    steps = detail.get("steps") or []
-    last = None
-    if steps:
-        s = steps[-1]
-        last = {k: s.get(k) for k in (
-            "idx", "step", "substep", "wall_time", "action", "image", "total_time", "execution_time",
-            "inference_time", "tokens", "noop", "evidence",
-        )}
-    updates = []
-    if after_idx is not None:
-        updates = [{k: s.get(k) for k in (
-            "idx", "step", "substep", "wall_time", "action", "image", "total_time",
-            "execution_time", "inference_time", "tokens", "noop", "evidence",
-        )} for s in steps if s["idx"] > after_idx]
-    return {
-        "ok": True,
-        "task_dir": detail["task_dir"],
-        "task": detail["task"],
-        "status": detail["status"],
-        "stats": detail["stats"],
-        "last": last,
-        "updates": updates,
-    }
+    after = -1 if after_idx is None else after_idx
+    reset = after > detail["cursor"]
+    if reset:
+        after = -1
+    updates = detail["steps"][max(0, after + 1):max(0, after + 1) + 200]
+    cursor = updates[-1]["idx"] if updates else after
+    return {**{k: v for k, v in detail.items() if k != "steps"},
+            "ok": True, "updates": updates, "last": detail["steps"][-1] if detail["steps"] else None,
+            "cursor": cursor, "reset": reset, "has_more": cursor < detail["cursor"]}
+
+
+def task_run_log(task_dir):
+    detail = get_task_detail(task_dir)
+    name = detail.get("run_log") if detail else None
+    if not name or Path(name).name != name or not re.fullmatch(r"dashboard_run_[\w-]+\.log", name):
+        return None
+    path = (LOGS_ROOT / name).resolve()
+    return path if path.parent == LOGS_ROOT.resolve() and path.is_file() else None
 
 
 # ============================================================================
@@ -419,24 +343,45 @@ def launch_task(task: str):
     with _RUN_LOCK:
         if _RUNNING_PROC is not None and _RUNNING_PROC.poll() is None:
             return None, "已有任务在运行中，请先停止"
+        LOGS_ROOT.mkdir(parents=True, exist_ok=True)
         before = {p.stem for p in LOGS_ROOT.glob("*.jsonl")}
-        ts = time.strftime("%Y%m%d_%H%M%S")
+        ts = time.strftime("%Y%m%d_%H%M%S") + f"_{time.time_ns() % 1000000000:09d}"
         log_path = LOGS_ROOT / f"dashboard_run_{ts}.log"
         try:
             logf = open(log_path, "w", encoding="utf-8", buffering=1)
-        except Exception:
-            logf = None
+        except OSError as exc:
+            return None, f"无法创建任务输出日志：{exc}"
+        task_env = {**os.environ, "AUTOGUI_RUN_LOG": log_path.name, "PYTHONUNBUFFERED": "1"}
+        started_at = time.time()
         try:
             proc = subprocess.Popen(
-                [sys.executable, "main.py", task],
+                [sys.executable, "-u", "main.py", task],
+                env=task_env,
                 cwd=str(PROJECT_ROOT),
-                stdout=logf,
+                stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace", bufsize=1,
+                start_new_session=os.name != "nt",
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
             )
         except Exception as e:  # noqa: BLE001
+            logf.close()
             return None, f"启动失败：{e}"
         _RUNNING_PROC = proc
+        proc.dashboard_cancelled = False
+        def copy_output():
+            try:
+                for line in proc.stdout:
+                    logf.write(line)
+                    logf.flush()
+                    try:
+                        print(line, end="", flush=True)
+                    except (OSError, UnicodeError):
+                        pass
+            finally:
+                logf.close()
+                proc.stdout.close()
+        threading.Thread(target=copy_output, daemon=True).start()
     # 轮询等待新任务日志出现。冷启动在这台重依赖车机上实测可达 60s+（import langgraph
     # 等重模块 + 首帧慢），旧窗口 25s 会把"还在启动"误判成失败、但 main.py 其实在正常跑。
     # 窗口放到 120s；同时若 main.py 提前退出（真报错）立即失败并带上日志尾部，不干等。
@@ -444,8 +389,27 @@ def launch_task(task: str):
     while time.time() < deadline_ts:
         now = sorted(p.stem for p in LOGS_ROOT.glob("*.jsonl"))
         new = [n for n in now if n not in before]
-        if new:
-            return new[-1], None
+        for task_dir in new:
+            path = _task_path(task_dir)
+            if not path:
+                continue
+            _, events = _LOG_CACHE.read(path)
+            if not events or events[0].get("run_log") != log_path.name:
+                continue
+            state = {"pid": proc.pid, "process_key": process_key(proc.pid),
+                     "started_at": started_at, "run_log": log_path.name, "state": "running"}
+            state_path = path.with_suffix(".run.json")
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            def watch(state_path=state_path, state=state, proc=proc):
+                code = proc.wait()
+                state = {**state, "ended_at": time.time(), "exit_code": code,
+                         "state": "cancelled" if proc.dashboard_cancelled else "error" if code else "interrupted",
+                         "reason": "用户停止任务" if proc.dashboard_cancelled else f"进程退出（退出码 {code}），未写入任务总结"}
+                temp = state_path.with_suffix(".tmp")
+                temp.write_text(json.dumps(state), encoding="utf-8")
+                temp.replace(state_path)
+            threading.Thread(target=watch, daemon=True).start()
+            return task_dir, None
         if proc.poll() is not None:
             tail = ""
             try:
@@ -466,21 +430,28 @@ def stop_task():
         proc = _RUNNING_PROC
         if proc is None or proc.poll() is not None:
             return False
+        proc.dashboard_cancelled = True
         try:
             if os.name == "nt":
-                subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
+                result = subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+                if result.returncode and proc.poll() is None:
+                    proc.dashboard_cancelled = False
+                    return False
             else:
-                proc.terminate()
-                proc.wait(timeout=5)
-        except Exception:
+                os.killpg(proc.pid, signal.SIGTERM)
             try:
-                proc.kill()
-            except Exception:
-                pass
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                if os.name == "nt":
+                    proc.kill()
+                else:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait(timeout=5)
+        except OSError:
+            if proc.poll() is None:
+                proc.dashboard_cancelled = False
+                return False
         _RUNNING_PROC = None
         return True
 
@@ -512,7 +483,20 @@ class Handler(BaseHTTPRequestHandler):
         qs = urllib.parse.parse_qs(parsed.query)
         _touch()                     # 有请求 = 页面还在
         try:
-            if path in ("/", "/index.html"):
+            if path == "/log_view.js":
+                self._send(200, Path(__file__).with_name("log_view.js").read_bytes(), "text/javascript; charset=utf-8")
+            elif path == "/favicon.ico":
+                self._send(204, b"", "image/x-icon")
+            elif path == "/api/run-log":
+                artifact = task_run_log(qs.get("task", [""])[0])
+                if artifact is None:
+                    self._send(404, "该任务没有关联的进程输出日志".encode("utf-8"), "text/plain; charset=utf-8")
+                else:
+                    with artifact.open("rb") as fh:
+                        fh.seek(max(0, artifact.stat().st_size - 65536))
+                        body = fh.read()
+                    self._send(200, body, "text/plain; charset=utf-8")
+            elif path in ("/", "/index.html"):
                 self._send(200, HTML_RUN.encode("utf-8"), "text/html; charset=utf-8")
             elif path in ("/logs", "/logs.html"):
                 self._send(200, HTML_LOGS.encode("utf-8"), "text/html; charset=utf-8")
@@ -881,6 +865,10 @@ BASE_CSS = r"""
   .step-no { color:#7b8794; font-weight:600; }
   .meta { margin:8px 0; font-size:13px; color:#3e4c59; line-height:1.6; word-break:break-all; }
   .meta b { color:#1f2933; }
+  [hidden] { display:none !important; }
+  header { flex-wrap:wrap; }
+  .live-top { flex-wrap:wrap; }
+  .badge.unknown,.badge.interrupted,.badge.error,.badge.timeout,.badge.cancelled { background:#fef3c7; color:#92400e; }
   .timing { font-size:12px; color:#7b8794; }
   .noop { color:#b91c1c; font-weight:600; font-size:12px; margin-top:6px; }
   .evidence { background:#ecfdf5; border-left:3px solid #059669; padding:6px 10px;
@@ -984,46 +972,8 @@ COMMON_JS = r"""
 const $ = (s) => document.querySelector(s);
 function esc(s){ return String(s==null?'':s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 
-// 两个页面共用同一套解释；阶段名和原始事件仍保留，便于定位源码与日志。
-function eventSummary(a){
-  const phase = a.action || 'log', msg = a.summary || a.explain || '';
-  if(phase === 'glm_request') return a.request_kind === 'initial_app_route'
-    ? '请求模型选择启动应用和技能' : '请求模型判断下一步操作';
-  if(phase === 'glm_response') return a.request_kind === 'initial_app_route'
-    ? '模型已返回启动应用和技能的选择' : '模型已返回下一步决策';
-  if(phase === 'perceive') return '已观察屏幕：' + msg;
-  if(phase === 'act'){
-    let m = /^OK tap\((\d+),(\d+)\)/.exec(msg);
-    if(m) return '点击屏幕（' + m[1] + '，' + m[2] + '）成功';
-    if(msg === 'OK back') return '返回上一页成功';
-    if(msg === 'OK home') return '返回桌面成功';
-  }
-  if(phase === 'decide'){
-    const m = /^([A-Z_]+)(?:\s+([^—]*?))?\s*—\s*(.*)$/.exec(msg);
-    if(m){
-      const names = {CLICK:'点击', LONG_PRESS:'长按', TYPE:'输入', SCROLL:'滚动',
-        ROLL_TO:'调整滚轮', DRAG:'拖动', BACK:'返回', HOME:'回桌面',
-        LAUNCH:'启动应用', SKILL:'加载技能', WAIT:'等待', COMPLETE:'完成任务', FAIL:'任务失败'};
-      return '模型决定' + (names[m[1]] || m[1]) + (m[3] ? '：' + m[3] : '');
-    }
-  }
-  return msg;
-}
-function eventTechnical(a){
-  const labels = {artifact:'原始文件', chars:'字符数', request_kind:'模型请求用途',
-    attempt:'尝试次数', latency_ms:'模型耗时（毫秒）', in_tok:'输入 token',
-    out_tok:'输出 token', status:'状态', adb_detail:'ADB 错误', command:'ADB 命令',
-    dump_ms:'获取 XML 耗时（毫秒）', dump_exit:'生成退出码', dump_stdout:'生成输出',
-    dump_stderr:'生成错误', remote_file:'设备文件检查', stage:'失败阶段',
-    adb_exit:'ADB 退出码', shot_ms:'截图耗时（毫秒）'};
-  const kinds = {initial_app_route:'启动应用与技能选择', decide:'下一步决策'};
-  return Object.entries(a).filter(([k,v]) =>
-    !['action','summary','explain','call_id','task'].includes(k) && v !== '' && v != null)
-    .map(([k,v]) => '<b>' + esc(labels[k] || k) + '：</b>'
-      + esc(k === 'request_kind' ? (kinds[v] || v) : (typeof v === 'object' ? JSON.stringify(v) : v)))
-    .join(' · ');
-}
-
+const eventSummary = LogView.summary;
+const eventTechnical = LogView.technical;
 // 大圣喵状态机：idle 呼吸 / receiving 弹一下 / thinking 摇尾思考 / happy 眯眼大笑
 const MOUTH = {
   'idle':'M27.5 40.5 Q32 43.6 36.5 40.5', 'receiving':'M27.5 40.5 Q32 43.6 36.5 40.5',
@@ -1053,181 +1003,72 @@ RUN_JS = r"""
 // 给本标签命名：日志页的「← 去下指令」会复用这个标签（切换），而不是再开一个
 try { window.name = 'lg_run'; } catch(e){}
 
-let curDir = null, pollTimer = null, lastSteps = -1, staleTicks = 0;
-// 实时步骤列表：后端 /api/live 每 2 秒只回「最新一步」（省流量），历史由前端攒
-let liveSteps = [];        // 已渲染的步骤，按 step 升序
-let liveStatus = 'running';
-let stickBottom = true;    // 用户没手动上滚时，自动贴到最新一步
-
-function setLive(t){ const el = $('#live'); if(el) el.textContent = t || ''; }
+let curDir = null, pollTimer = null, pollBusy = false, pollEnabled = false;
+let liveSteps = [], liveCursor = -1, liveStatus = 'running', liveDebug = false;
+let stickBottom = true, liveLimit = 200;
+function setLive(t){ const el=$('#live'); if(el) el.textContent=t||''; }
 function setLogLink(dir){
-  const a = $('#logLink'); if(!a) return;
-  a.href = dir ? ('/logs?task=' + encodeURIComponent(dir)) : '/logs';
+  $('#logLink').href=dir?'/logs?task='+encodeURIComponent(dir):'/logs';
+  const a=$('#runLog'); if(a){a.href='/api/run-log?task='+encodeURIComponent(dir||'');a.hidden=true;}
 }
-function stopPoll(){ if(pollTimer){ clearInterval(pollTimer); pollTimer = null; } }
-function startPoll(){ if(!pollTimer) pollTimer = setInterval(tick, 2000); }
-function track(dir){
-  curDir = dir; lastSteps = -1; staleTicks = 0;
-  clearLive();                          // 换任务就把上一条的步骤列表清干净
-  if(dir) localStorage.setItem('lga_task_dir', dir); else localStorage.removeItem('lga_task_dir');
-  setLogLink(dir);
+function stopPoll(){pollEnabled=false;if(pollTimer!==null)clearTimeout(pollTimer);pollTimer=null;}
+function startPoll(){pollEnabled=true;if(pollTimer===null&&!pollBusy)pollTimer=setTimeout(()=>{pollTimer=null;tick();},2000);}
+function track(dir){stopPoll();curDir=dir;liveCursor=-1;liveSteps=[];liveLimit=200;
+  const l=$('#liveList');if(l)l.replaceChildren();
+  if(dir)localStorage.setItem('lga_task_dir',dir);else localStorage.removeItem('lga_task_dir');setLogLink(dir);
 }
-
-// ---- 实时步骤列表：累积每一步（后端 /api/live 只回最新一步以省流量，历史在前端攒）----
-function showCard(on){ const p = $('#livePanel'); if(p) p.classList.toggle('hidden', !on); }
-// 统一改徽标：避免出现「徽标还写着运行中、内容却已被清空」的错位状态
-function setBadge(state, text){
-  const b = $('#liveBadge'); if(!b) return;
-  b.className = 'badge ' + state; b.textContent = text;
+function showCard(on){$('#livePanel').classList.toggle('hidden',!on);}
+function setBadge(state,text){const b=$('#liveBadge');b.className='badge '+state;b.textContent=text;}
+function renderRunRows(rebuild=false,updates=[]){
+ const list=$('#liveList');const selected=liveSteps.filter(s=>liveDebug||!LogView.diagnostic(s));
+ if(rebuild){list.innerHTML=selected.slice(-liveLimit).map(s=>LogView.card(s,curDir,true)).join('');}
+ else{
+  const fragment=document.createDocumentFragment();
+  for(const step of updates){if(!liveDebug&&LogView.diagnostic(step))continue;
+   const box=document.createElement('div');box.innerHTML=LogView.card(step,curDir,true);fragment.appendChild(box.firstElementChild);}
+  list.appendChild(fragment);while(list.childElementCount>liveLimit)list.firstElementChild.remove();
+ }
+ const primary=liveSteps.filter(s=>!LogView.diagnostic(s)).length;
+ $('#liveCount').textContent=primary+' 条进度 · '+(liveSteps.length-primary)+' 条调试';
+ $('#runOlder').hidden=selected.length<=liveLimit;
+ if(stickBottom)list.scrollTop=list.scrollHeight;
 }
-
-function clearLive(){
-  liveSteps = []; liveStatus = 'running'; stickBottom = true;
-  const l = $('#liveList'); if(l) l.innerHTML = '';
-  const c = $('#liveCount'); if(c) c.textContent = '';
-  const t = $('#liveTask'); if(t) t.textContent = '';
-}
-
-function stepKey(s){ return (s && s.idx != null) ? String(s.idx) : (s && s.step != null ? String(s.step) : ''); }
-function graphStepLabel(n){ return Number(n) === 0 ? '任务准备' : '第 ' + n + ' 步'; }
-
-function xmlSummary(a){
-  if(a.action !== 'xml') return '';
-  const chars = Number(a.chars || 0).toLocaleString('zh-CN');
-  const time = Number.isFinite(Number(a.dump_ms)) ? ' · ' + (Number(a.dump_ms) / 1000).toFixed(2) + ' 秒' : '';
-  return a.status === 'ok' ? 'XML 获取成功 · ' + chars + ' 字符' + time
-       : a.status === 'empty' ? 'XML 内容为空' + time
-       : 'XML 获取失败（' + (a.status || '状态未知') + '）' + time;
-}
-
-function liveItemHTML(s, firstInStep){
-  const a = s.action || {};
-  const phase = a.action || 'log';
-  const msg = xmlSummary(a) || eventSummary(a);
-  const tk = s.tokens || {}, tok = (tk.input || 0) + (tk.output || 0);
-  const extra = eventTechnical(a);
-  const meta = (s.wall_time ? s.wall_time + '  cost:' + (s.total_time || 0) + 's' : 't+' + (s.total_time || 0) + 's') + (tok ? ' · ' + tok + ' tok' : '');
-  return '<div class="live-item" data-step="' + esc(stepKey(s)) + '">'
-    + (firstInStep ? '<div class="phase-group">' + esc(graphStepLabel(s.step)) + '</div>' : '')
-    + '<div class="mini-body">'
-    +   '<div class="mini-head">'
-    +     '<span class="idx-no">' + esc(s.substep != null ? s.substep : '') + '</span>'
-    +     '<span class="atype a-' + esc(phase) + '">' + esc(phase) + '</span>'
-    +     '<span class="mini-msg">' + esc(msg) + '</span>'
-    +   '</div>'
-    +   (extra ? '<div class="mini-explain">' + extra + '</div>' : '')
-    +   '<div class="mini-meta">' + esc(meta) + '</div>'
-    + '</div></div>';
-}
-
-function appendStep(s){
-  const list = $('#liveList'); if(!list) return;
-  const box = document.createElement('div');
-  const i = liveSteps.length - 1;
-  box.innerHTML = liveItemHTML(s, i === 0 || liveSteps[i-1].step !== s.step);
-  list.appendChild(box.firstElementChild);
-  if(stickBottom) list.scrollTop = list.scrollHeight;
-}
-
-function replaceStep(s){
-  const list = $('#liveList'); if(!list) return;
-  const row = list.querySelector('[data-step="' + stepKey(s) + '"]');
-  if(!row) return;
-  const box = document.createElement('div');
-  const i = liveSteps.findIndex(x => stepKey(x) === stepKey(s));
-  box.innerHTML = liveItemHTML(s, i === 0 || liveSteps[i-1].step !== s.step);
-  row.replaceWith(box.firstElementChild);
-}
-
 function renderLive(d){
-  const panel = $('#livePanel'); if(!panel) return;    // 面板不在页面上就直接跳过
-  if(!d || !d.ok) return;
-  liveStatus = d.status || 'running';
-  // 三种结局分开显示：被熔断中止 ≠ 完成（否则会把"打转收手"误报成成功）
-  const BADGE = { done: ['done', '已完成'], running: ['running', '运行中'],
-                  aborted: ['aborted', '已中止'] };
-  const b = BADGE[liveStatus] || BADGE.running;
-  setBadge(b[0], b[1]);
-  $('#liveTask').textContent = d.task || '';
-  const updates = Array.isArray(d.updates) ? d.updates : (d.last ? [d.last] : []);
-  updates.forEach(s => {
-    const key = stepKey(s), i = liveSteps.findIndex(x => stepKey(x) === key);
-    if(i < 0){ liveSteps.push(s); appendStep(s); }       // 新的一步：往列表尾部追加
-    else if(JSON.stringify(liveSteps[i]) !== JSON.stringify(s)){
-      liveSteps[i] = s; replaceStep(s);                  // 同一步内容更新（截图后到等）
-    }
-  });
-  $('#liveCount').textContent = '第 ' + (d.stats?.total_steps || 0) + ' 步 · ' + liveSteps.length + ' 条事件';
-  showCard(true);
+ if(d.reset){liveSteps=[];liveCursor=-1;$('#liveList').replaceChildren();}
+ const updates=(d.updates||[]).filter(s=>s.idx>liveCursor);
+ liveSteps.push(...updates);liveCursor=d.cursor??liveCursor;liveStatus=d.status;
+ setBadge(d.status,LogView.statusNames[d.status]||d.status);$('#liveTask').textContent=d.task||'';
+ renderRunRows(false,updates);showCard(true);
+ $('#runLog').hidden=!d.run_log;
 }
-
-// 刷新页面/切任务后：用完整轨迹把已走过的步骤补回来（只调一次，之后靠增量）
-async function loadLiveHistory(dir){
-  if(!dir) return;
-  try {
-    const r = await fetch('/api/task/' + encodeURIComponent(dir));
-    const d = await r.json();
-    if(!d || d.error || !Array.isArray(d.steps) || !d.steps.length) return;
-    liveSteps = d.steps.slice();
-    liveStatus = d.status || 'running';
-    const list = $('#liveList'); if(!list) return;
-    list.innerHTML = liveSteps.map((item, i) => liveItemHTML(item, i === 0 || liveSteps[i-1].step !== item.step)).join('');
-    const c = $('#liveCount'); if(c) c.textContent = '第 ' + (d.stats?.total_steps || 0) + ' 步 · ' + liveSteps.length + ' 条事件';
-    const t = $('#liveTask'); if(t) t.textContent = d.task || '';
-    showCard(true);                       // 必须先显示：面板带 hidden 时是 display:none，
-    list.scrollTop = list.scrollHeight;   // scrollHeight 为 0，此时赋 scrollTop 是空操作，
-                                          // 结果刷新后列表停在顶部第 1 步而不是最新一步
-  } catch(e){}
-}
-
 async function fetchLive(){
-  if(!curDir) return;
-  try {
-    const after = liveSteps.length ? Math.max(...liveSteps.map(s => Number(s.idx) || 0)) : -1;
-    const r = await fetch('/api/live?task=' + encodeURIComponent(curDir) + '&after=' + after);
-    renderLive(await r.json());
-  } catch(e){}
+ const dir=curDir;if(!dir)return null;
+ let d;
+ do{
+  d=await LogView.fetchJSON('/api/live?task='+encodeURIComponent(dir)+'&after='+liveCursor);
+  if(curDir!==dir)return null;renderLive(d);
+ }while(d.has_more);
+ return d;
 }
-
+async function loadLiveHistory(){return fetchLive();}
 async function tick(){
-  if(!curDir) return;                    // 没在跟踪任何任务就保持安静
-  let list = [];
-  try { const r = await fetch('/api/tasks'); list = await r.json(); } catch(e){ return; }
-  if(!Array.isArray(list)) return;
-  const me = list.find(x => x.task_dir === curDir);
-  if(!me){ setMascot('thinking'); setLive('⏳ 启动中…'); return; }   // 日志目录刚建、还没落盘
-  if(me.status === 'running'){
-    setMascot('thinking');
-    // 先刷列表再写文案：反过来的话 cur 取到的是上一轮的末尾步，底部会比列表慢一拍
-    fetchLive().then(() => {
-      // 事件条数 = 已记录的子步骤总数（graph step 下可能有多条）
-      const cur = liveSteps.length ? liveSteps[liveSteps.length - 1] : null;
-      const lastPhase = cur && cur.action ? cur.action.action : '';
-      const lastGraphStep = cur ? cur.step : null;
-      setLive('🔴 运行中 · ' + me.total_steps + ' 步 · 已记录 ' + liveSteps.length + ' 条事件'
-              + (cur ? ' · 最新 ' + lastPhase + (lastGraphStep != null ? '（' + graphStepLabel(lastGraphStep) + '）' : '') : ''));
-    });
-    staleTicks = (me.event_count === lastSteps) ? staleTicks + 1 : 0;
-    lastSteps = me.event_count;
-    if(staleTicks >= 15){                // 30s 步数没动：不假装还在跑
-      setMascot('idle');
-      setLive('⏸ 30 秒无新动作，任务可能已中断（去任务日志确认）');
-      stopPoll();
-    } else { startPoll(); }
-  } else if(me.status === 'aborted'){
-    // 被熔断中止：明确说"中止"而不是"完成"，并引导去看原因
-    setMascot('idle');
-    setLive('⛔ 已中止 · ' + me.total_steps + ' 步 · ' + me.total_time + 's'
-            + '（判定为打转/未完成，去任务日志看原因）');
-    fetchLive();
-    stopPoll();
-  } else {
-    setMascot('happy');
-    setLive('✅ 已完成 · ' + me.total_steps + ' 步 · ' + me.total_time + 's · ' + me.total_tokens + ' tok');
-    fetchLive();                         // 完成后停在最后一步
-    stopPoll();
+ if(!curDir||pollBusy)return;
+ pollBusy=true;const dir=curDir;
+ try{
+  const d=await fetchLive();if(!d||curDir!==dir)return;
+  if(d.status==='running'){
+   setMascot('thinking');const silent=Math.max(0,Math.round(d.stats.total_time-(d.last?.at_time||0)));
+   setLive('运行中 · 第 '+d.stats.total_steps+' 步 · '+d.stats.total_time+'s'+
+    (d.last?' · '+LogView.summary(d.last.action):'')+(silent>=30?' · '+silent+' 秒无新日志，继续等待并刷新':''));
+  }else{
+   setMascot(d.status==='done'?'happy':'idle');
+   setLive((LogView.statusNames[d.status]||d.status)+' · '+d.stats.total_time+'s'+(d.reason?' · '+d.reason:''));stopPoll();
   }
+ }catch(error){if(curDir===dir){setLive('日志连接暂不可用，正在重试：'+error.message);pollEnabled=true;}}
+ finally{pollBusy=false;if(pollEnabled)startPoll();}
 }
+$('#runDebug').onchange=e=>{liveDebug=e.target.checked;renderRunRows(true);};
+$('#runOlder').onclick=()=>{liveLimit+=200;renderRunRows(true);};
 
 $('#runBtn').onclick = async () => {
   const task = $('#taskInput').value.trim();
@@ -1249,11 +1090,11 @@ $('#runBtn').onclick = async () => {
 };
 
 $('#stopBtn').onclick = async () => {
-  try { await fetch('/api/stop', {method:'POST'}); } catch(e){}
-  track(null);                          // 清列表 + 取消「刷新后继续跟踪」
-  showCard(false);                      // 收起卡片：内容已被清空，留着会变成"运行中"空卡片
-  setBadge('stopped', '已停止');
-  setMascot('idle'); setLive('⏹ 已停止');
+  try {
+    await LogView.fetchJSON('/api/stop',{method:'POST'});
+    setLive('停止请求已发送，正在获取最终状态');
+    startPoll(); await tick();
+  } catch(error){setLive('停止失败：'+error.message);}
 };
 
 $('#taskInput').addEventListener('keydown', e => { if(e.key === 'Enter') $('#runBtn').click(); });
@@ -1405,7 +1246,7 @@ if(_ll) _ll.addEventListener('scroll', () => {
 
 // 刷新页面后继续跟踪本面板启动的那个任务（先用完整轨迹补回历史，再进入 2 秒轮询）
 const saved = localStorage.getItem('lga_task_dir');
-if(saved){ track(saved); loadLiveHistory(saved).then(() => { tick(); startPoll(); }); }
+if(saved){track(saved);pollEnabled=true;tick();}
 else { setMascot('idle'); setLive(''); }
 """
 
@@ -1413,125 +1254,64 @@ LOGS_JS = r"""
 // 给本标签命名，下指令页的「任务日志」会复用这个标签（切换），而不是新开一个
 try { window.name = 'lg_logs'; } catch(e){}
 
-let currentDir = null, timer = null;
-function graphStepLabel(n){ return Number(n) === 0 ? '任务准备' : '第 ' + n + ' 步'; }
-
-function xmlLogView(a, taskDir){
-  if(a.action !== 'xml') return null;
-  const elapsed = Number.isFinite(Number(a.dump_ms)) ? ' · ' + (Number(a.dump_ms) / 1000).toFixed(2) + ' 秒' : '';
-  const count = Number(a.chars || 0).toLocaleString('zh-CN');
-  const title = a.status === 'ok' ? 'XML 获取成功 · ' + count + ' 字符' + elapsed
-              : a.status === 'empty' ? 'XML 内容为空' + elapsed
-              : 'XML 获取失败（' + (a.status || '状态未知') + '）' + elapsed;
-  const url = '/api/artifact?task=' + encodeURIComponent(taskDir)
-            + '&file=' + encodeURIComponent(a.artifact || '');
-  const link = a.artifact ? `<a href="${url}" target="_blank" rel="noopener">查看原始 XML</a>` : '';
-  const labels = {status:'状态', adb_detail:'ADB 错误', command:'ADB 命令',
-    dump_exit:'生成退出码', dump_stdout:'生成输出', dump_stderr:'生成错误',
-    read_exit:'读取退出码', remote_file:'设备文件检查', stage:'失败阶段',
-    adb_exit:'ADB 退出码', dump_ms:'耗时（毫秒）', chars:'字符数'};
-  const fields = Object.entries(a).filter(([k,v]) =>
-    !['action','summary','explain','artifact','call_id'].includes(k) && v !== '' && v != null)
-    .map(([k,v]) => `<b>${esc(labels[k] || k)}：</b>${esc(typeof v === 'object' ? JSON.stringify(v) : v)}`)
-    .join(' · ');
-  const diagnostics = a.status === 'ok' ? ''
-    : `<details class="meta"><summary>诊断详情</summary>${fields}</details>`;
-  return {summary: title, detail: link, diagnostics};
+let currentDir=null,timer=null,logsBusy=false,autoRefresh=true,logCursor=-1;
+let logSteps=[],logDebug=false,logLimit=200,lastDetail=null;
+function stopLogTimer(){if(timer!==null)clearTimeout(timer);timer=null;}
+function renderLogRows(rebuild=false,updates=[]){
+ const tl=$('#timeline'),main=$('.main');
+ const atBottom=main.scrollHeight-main.scrollTop-main.clientHeight<48;
+ const selected=logSteps.filter(s=>logDebug||!LogView.diagnostic(s));
+ if(rebuild)tl.innerHTML=selected.slice(-logLimit).map(s=>LogView.card(s,currentDir)).join('');
+ else{
+  const fragment=document.createDocumentFragment();
+  for(const step of updates){if(!logDebug&&LogView.diagnostic(step))continue;
+   const box=document.createElement('div');box.innerHTML=LogView.card(step,currentDir);fragment.appendChild(box.firstElementChild);}
+  tl.appendChild(fragment);while(tl.childElementCount>logLimit)tl.firstElementChild.remove();
+ }
+ $('#logsOlder').hidden=selected.length<=logLimit;
+ if(atBottom&&updates.length)requestAnimationFrame(()=>{main.scrollTop=main.scrollHeight;});
 }
-
 async function loadTasks(prefer){
-  const r = await fetch('/api/tasks'); const list = await r.json();
-  const sel = $('#taskSel'); sel.innerHTML = '';
-  list.forEach(t => {
-    const o = document.createElement('option');
-    o.value = t.task_dir;
-    o.textContent = t.title || t.task;
-    o.title = o.textContent;
-    sel.appendChild(o);
-  });
-  const pick = (prefer && list.find(t => t.task_dir === prefer)) ? prefer
-             : (list.length ? list[0].task_dir : null);
-  if(pick){ sel.value = pick; loadTask(pick, true); }
+ try{
+  const list=await LogView.fetchJSON('/api/tasks');const sel=$('#taskSel');sel.replaceChildren();
+  for(const item of list){const option=document.createElement('option');option.value=item.task_dir;option.textContent=item.title||item.task;sel.appendChild(option);}
+  const dir=list.find(x=>x.task_dir===prefer)?.task_dir||list[0]?.task_dir;
+  if(dir){sel.value=dir;await loadTask(dir,true);}
+ }catch(error){$('#timeline').textContent='读取任务失败：'+error.message;}
 }
-
-async function loadTask(dir, animate){
-  const scroller = $('.main');
-  const tl = $('#timeline');
-  const atBottom = scroller && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 48;
-  const previousCount = tl.dataset.taskDir === dir ? Number(tl.dataset.eventCount || 0) : 0;
-  const wasRunning = tl.dataset.taskDir === dir && tl.dataset.status === 'running';
-  currentDir = dir;
-  const r = await fetch('/api/task/' + encodeURIComponent(dir));
-  const d = await r.json();
-  if(currentDir !== dir) return;
-  if(d.error){ $('#timeline').innerHTML = `<div class="empty">${esc(d.error)}</div>`; return; }
-  // 统计卡
-  $('#stats').innerHTML = `
-    <div class="stat"><div class="k">任务</div><div class="v" style="font-size:14px;white-space:normal;overflow-wrap:anywhere">${esc(d.title || d.task)}</div></div>
-    <div class="stat"><div class="k">状态</div><div class="v"><span class="badge ${d.status}">${d.status==='done'?'已完成':(d.status==='aborted'?'已中止':'运行中')}</span></div></div>
-    <div class="stat"><div class="k">步数</div><div class="v">${d.stats.total_steps}</div></div>
-    <div class="stat"><div class="k">任务总耗时</div><div class="v">${d.stats.total_time}s</div></div>
-    <div class="stat"><div class="k">平均步耗时</div><div class="v">${d.stats.avg_step}s</div></div>
-    <div class="stat"><div class="k">总 Token</div><div class="v">${d.stats.total_tokens}</div></div>
-  `;
-  // 时间线
-  tl.innerHTML = '';
-  if(!d.steps.length){ tl.innerHTML = '<div class="empty">暂无步骤数据</div>'; }
-  let previousGraphStep = null;
-  d.steps.forEach(s => {
-    if(previousGraphStep !== s.step){
-      const heading = document.createElement('div');
-      heading.className = 'phase-group';
-      heading.textContent = graphStepLabel(s.step);
-      tl.appendChild(heading);
-      previousGraphStep = s.step;
-    }
-    const a = s.action || {};
-    const xml = xmlLogView(a, dir);
-    const explain = `<div class="meta"><b>${esc(xml ? xml.summary : eventSummary(a))}</b></div>`;
-    const tech = xml ? xml.diagnostics : eventTechnical(a);
-    const detail = xml ? xml.detail : tech;
-    const ev = s.evidence ? `<div class="evidence">✅ 完成证据：${esc(s.evidence)}</div>` : '';
-    const noop = s.noop ? `<div class="noop">⚠️ 上一步点击后界面无变化（控件树+画面均未变）</div>` : '';
-    const card = document.createElement('div');
-    card.className = 'card p-' + String(a.action || 'log').replace(/[^a-z_]/gi, '');
-    card.innerHTML = `
-      <div class="body">
-        <div class="row1">
-          <span class="step-no">${s.substep}</span>
-          <span class="atype a-${esc(a.action||'')}">${esc(a.action||'?')}</span>
-          ${a.decision_source?`<span class="badge" style="background:#e0e7ff;color:#3730a3">${esc(a.decision_source)}</span>`:''}
-        </div>
-        ${detail?`<div class="meta">${detail}</div>`:''}
-        ${explain}
-        <div class="timing">${s.wall_time ? s.wall_time + '  ' : ''}推理 ${s.inference_time}s · 执行 ${s.execution_time}s · 总 ${s.total_time}s · token ${ (s.tokens.input||0)+(s.tokens.output||0) }</div>
-        ${ev}${noop}
-      </div>`;
-    tl.appendChild(card);
-  });
-  tl.dataset.taskDir = dir;
-  tl.dataset.eventCount = String(d.steps.length);
-  tl.dataset.status = d.status;
-  if(atBottom && d.steps.length > previousCount && (d.status === 'running' || wasRunning)){
-    requestAnimationFrame(() => { if(currentDir === dir) scroller.scrollTop = scroller.scrollHeight; });
+async function loadTask(dir,reset=false){
+ if(!dir)return;
+ if(currentDir!==dir||reset){currentDir=dir;logCursor=-1;logSteps=[];lastDetail=null;logLimit=200;stopLogTimer();$('#timeline').replaceChildren();}
+ if(logsBusy)return;
+ logsBusy=true;const requestDir=dir;
+ try{
+  let d;
+  do{
+   d=await LogView.fetchJSON('/api/live?task='+encodeURIComponent(dir)+'&after='+logCursor);
+   if(currentDir!==requestDir)return;
+   if(d.reset){logSteps=[];logCursor=-1;$('#timeline').replaceChildren();}
+   const updates=d.updates.filter(s=>s.idx>logCursor);logSteps.push(...updates);logCursor=d.cursor;
+   lastDetail=d;$('#stats').innerHTML=LogView.stats(d);renderLogRows(false,updates);
+   $('#logsRunLog').hidden=!d.run_log;$('#logsRunLog').href='/api/run-log?task='+encodeURIComponent(dir);
+  }while(d.has_more);
+  $('#logError').textContent='';
+ }catch(error){if(currentDir===requestDir)$('#logError').textContent='日志连接暂不可用：'+error.message+'；可点击加载重试';}
+ finally{
+  logsBusy=false;
+  if(currentDir!==requestDir){loadTask(currentDir);return;}
+  const active=autoRefresh&&(!lastDetail||lastDetail.status==='running');
+  $('#autoBtn').dataset.on=active?'1':'0';$('#autoBtn').textContent='自动刷新：'+(active?'开':'关');
+  if(active){
+   stopLogTimer();timer=setTimeout(()=>{timer=null;loadTask(currentDir);},2000);
   }
-  // 运行中：自动开刷新，跑完自动停
-  const ab = $('#autoBtn');
-  if(d.status === 'running'){
-    ab.dataset.on = '1'; ab.textContent = '自动刷新：开';
-    if(!timer) timer = setInterval(() => loadTask(currentDir), 2000);
-  } else if(timer){ clearInterval(timer); timer = null; }
+ }
 }
-
-$('#loadBtn').onclick = () => loadTask($('#taskSel').value);
-$('#autoBtn').onclick = () => {
-  const b = $('#autoBtn'); const on = b.dataset.on === '1';
-  b.dataset.on = on ? '0' : '1'; b.textContent = '自动刷新：' + (on ? '关' : '开');
-  if(timer){ clearInterval(timer); timer = null; }
-  if(!on && currentDir) loadTask(currentDir);
-};
-const qsTask = new URLSearchParams(location.search).get('task');
-loadTasks(qsTask);
+$('#taskSel').onchange=()=>loadTask($('#taskSel').value);
+$('#loadBtn').onclick=()=>loadTask($('#taskSel').value);
+$('#autoBtn').onclick=()=>{autoRefresh=$('#autoBtn').dataset.on!=='1';stopLogTimer();$('#autoBtn').dataset.on=autoRefresh?'1':'0';$('#autoBtn').textContent='自动刷新：'+(autoRefresh?'开':'关');if(autoRefresh)loadTask(currentDir);};
+$('#logsDebug').onchange=e=>{logDebug=e.target.checked;renderLogRows(true);};
+$('#logsOlder').onclick=()=>{logLimit+=200;renderLogRows(true);};
+loadTasks(new URLSearchParams(location.search).get('task'));
 """
 
 SETTINGS_JS = r"""
@@ -1827,11 +1607,15 @@ PAGE_RUN_TPL = r"""<!DOCTYPE html>
         <span class="badge running" id="liveBadge">运行中</span>
         <span class="live-task" id="liveTask"></span>
         <span class="live-count" id="liveCount"></span>
+        <label class="mini"><input type="checkbox" id="runDebug"> 调试详情</label>
+        <button class="mini" id="runOlder" hidden>显示更早记录</button>
+        <a class="mini" id="runLog" hidden target="_blank" rel="noopener">进程输出</a>
       </div>
       <div class="live-list" id="liveList"></div>
     </div>
   </div>
 </div>
+<script src="/log_view.js"></script>
 <script>/*__COMMON_JS__*//*__RUN_JS__*/</script>
 </body>
 </html>
@@ -1852,14 +1636,19 @@ PAGE_LOGS_TPL = r"""<!DOCTYPE html>
   <div class="spacer"></div>
   <select id="taskSel"></select>
   <button id="loadBtn" class="mini">加载</button>
-  <button id="autoBtn" class="mini" data-on="0">自动刷新：关</button>
+  <button id="autoBtn" class="mini" data-on="1">自动刷新：开</button>
+  <label class="mini"><input type="checkbox" id="logsDebug"> 调试详情</label>
+  <button class="mini" id="logsOlder" hidden>显示更早记录</button>
+  <a class="mini" id="logsRunLog" hidden target="_blank" rel="noopener">进程输出</a>
   <a class="mini" href="/settings">⚙ 设置</a>
   <a class="mini" href="/" target="lg_run">← 去下指令</a>
 </header>
 <div class="main">
+  <div id="logError" class="meta" role="status"></div>
   <div id="stats" class="stats"></div>
   <div id="timeline" class="timeline"><div class="empty">请在上方选择历史任务加载回放…</div></div>
 </div>
+<script src="/log_view.js"></script>
 <script>/*__COMMON_JS__*//*__LOGS_JS__*/</script>
 </body>
 </html>
@@ -1937,6 +1726,7 @@ PAGE_SETTINGS_TPL = r"""<!DOCTYPE html>
   <div class="settings-actions"><button id="saveBtn" class="primary" type="button">保存设置</button></div>
   <div id="saveStatus" class="settings-message" role="status" aria-live="polite"></div>
 </main>
+<script src="/log_view.js"></script>
 <script>/*__COMMON_JS__*//*__SETTINGS_JS__*/</script>
 </body>
 </html>
