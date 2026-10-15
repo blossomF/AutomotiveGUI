@@ -63,8 +63,8 @@ class ActionSpec:
 ACTIONS: tuple[ActionSpec, ...] = (
     ActionSpec("CLICK", ("node_ref | point | coord", "target_label?"), "Tap one on-screen candidate"),
     ActionSpec("LONG_PRESS", ("node_ref | point | coord",), "Hold ~0.8s — context menus, drag handles"),
-    ActionSpec("TYPE", ("text", "clear_first?", "submit?"),
-               "Type into the focused field; submit=true presses ENTER after typing (search boxes)"),
+    ActionSpec("TYPE", ("text", "node_ref? | point? | coord?", "clear_first?", "submit?"),
+               "Focus the target field and type text; submit=true presses ENTER after confirmed input"),
     ActionSpec("SCROLL", ("direction", "node_ref?", "amount?"),
                "Scroll a specific list by a fraction of its viewport"),
     ActionSpec("ROLL_TO", ("node_ref", "target", "delta_units?"),
@@ -90,6 +90,29 @@ MUTATING: frozenset[str] = frozenset({"CLICK", "LONG_PRESS", "TYPE", "SCROLL", "
 SCROLL_DIRECTIONS = ("down", "up", "left", "right")
 
 
+def _parse_target(raw: dict, out: dict, *, required: bool) -> None:
+    """Preserve an optional TYPE target using the same coordinates as CLICK."""
+    if raw.get("node_ref") is not None:
+        try:
+            out["node_ref"] = int(str(raw["node_ref"]).lstrip("#"))
+        except (TypeError, ValueError):
+            raise ValueError(f"node_ref must be an integer, got {raw['node_ref']!r}")
+    elif raw.get("point") is not None:
+        point = raw["point"]
+        if (not isinstance(point, (list, tuple)) or len(point) != 2
+                or any(isinstance(v, bool) or not isinstance(v, (int, float))
+                       or not math.isfinite(v) for v in point)):
+            raise ValueError("point must be two finite image coordinates [x,y]")
+        out["point"] = tuple(float(v) for v in point)
+    elif raw.get("coord") is not None:
+        coord = parse_coord(raw["coord"])
+        if coord is None:
+            raise ValueError("coord must be device pixel coordinates [x,y]")
+        out["coord"] = coord
+    elif required:
+        raise ValueError(f"{out['type']} needs node_ref, point or coord")
+
+
 def parse_action(raw: dict) -> dict:
     """把模型输出的动作 dict 校验并归一化。
 
@@ -107,28 +130,11 @@ def parse_action(raw: dict) -> dict:
     if name in ("CLICK", "LONG_PRESS"):
         if name == "CLICK" and raw.get("target_label") is not None:
             out["target_label"] = str(raw["target_label"]).strip()[:60]
-        if "node_ref" in raw and raw["node_ref"] is not None:
-            try:
-                out["node_ref"] = int(str(raw["node_ref"]).lstrip("#"))
-            except (TypeError, ValueError):
-                raise ValueError(f"node_ref must be an integer, got {raw['node_ref']!r}")
-        elif raw.get("point") is not None:
-            point = raw["point"]
-            if (not isinstance(point, (list, tuple)) or len(point) != 2
-                    or any(isinstance(v, bool) or not isinstance(v, (int, float))
-                           or not math.isfinite(v) for v in point)):
-                raise ValueError("point must be two finite image coordinates [x,y]")
-            out["point"] = tuple(float(v) for v in point)
-        elif raw.get("coord") is not None:
-            coord = parse_coord(raw["coord"])
-            if coord is None:
-                raise ValueError("coord must be device pixel coordinates [x,y]")
-            out["coord"] = coord
-        else:
-            raise ValueError(f"{name} needs node_ref, point or coord")
+        _parse_target(raw, out, required=True)
     elif name == "TYPE":
         if "text" not in raw:
             raise ValueError("TYPE needs text")
+        _parse_target(raw, out, required=False)
         out["text"] = str(raw["text"])
         out["clear_first"] = bool(raw.get("clear_first", False))
         # submit=true：输入完成后补发一次 ENTER。仅用于搜索框等"回车即提交"

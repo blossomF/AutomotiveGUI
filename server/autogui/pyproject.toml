@@ -3,7 +3,8 @@ name = "autogui"
 version = "0.1.0"
 description = "Automotive GUI Agent — CART Q3 AI Contest. LangGraph brain + thin MCP executor + own ADB bridge."
 requires-python = ">=3.10"
-readme = "README.md"
+# 完整使用文档位于仓库根目录 README.md。
+readme = { text = "Automotive GUI Agent: LangGraph task runner, ADB device control, CLI and local dashboard.", content-type = "text/plain" }
 
 # 运行时依赖刻意冻结在 6 个（见 技术方案评估.md §6）。
 # Demo Day 的复现性值 10 分，每多一个依赖都会在那里耗时间。

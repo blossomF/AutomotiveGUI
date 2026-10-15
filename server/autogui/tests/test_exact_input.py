@@ -4,10 +4,12 @@ from types import SimpleNamespace
 import pytest
 
 from autogui.brain import prompts
+from autogui.actions import parse_action
 from autogui.bridge.input import TextInput, UnicodeInputUnavailable
 from autogui.config import Config
 from autogui.core.graph import Runner
 from autogui.perception.capture import Observation
+from autogui.perception.tree import candidates_from_xml
 
 
 class FakeDevice:
@@ -20,6 +22,16 @@ class FakeDevice:
     def adb_soft(self, *args, **kwargs):
         self.calls.append(args)
         return SimpleNamespace(ok=True)
+
+
+def test_adbkeyboard_is_preferred_for_chinese_input():
+    class Device:
+        def adb_soft(self, *args, **kwargs):
+            assert args == ("shell", "ime", "list", "-a")
+            return SimpleNamespace(ok=True, stdout="com.android.adbkeyboard/.AdbIME")
+
+    assert Config().input_chain[0] == "adbkeyboard"
+    assert TextInput(Device()).probe() == "adbkeyboard"
 
 
 def test_ascii_channel_refuses_chinese_before_clearing_existing_field():
@@ -110,12 +122,14 @@ def test_unicode_submission_requires_exact_edittext_readback(monkeypatch):
     runner = Runner(cfg=Config(), task="搜索会议")
     calls = []
     runner.executor = SimpleNamespace(call=lambda name, **kw: calls.append(name) or "OK")
+    runner.log = SimpleNamespace(phase=lambda *args, **kw: None)
     fake_xml = ('<hierarchy><node class="android.widget.EditText" text="hy" '
                 'resource-id="calendar:id/title" /></hierarchy>')
     monkeypatch.setattr("autogui.core.graph.tools.dev", lambda: SimpleNamespace(dump_xml=lambda: fake_xml))
-    with pytest.raises(UnicodeInputUnavailable):
-        runner._dispatch({"type": "TYPE", "text": "会议", "submit": True})
+    runner._dispatch({"type": "TYPE", "text": "会议", "submit": True})
     assert calls == ["input_text"]  # No ENTER on an unverified value.
+    assert runner.pending_unicode == ""  # A failed readback is not a failed input channel.
+    assert runner.pending_unicode_readback == "会议"
 
 
 def test_empty_xml_after_unicode_input_uses_next_screenshot_instead_of_failing(monkeypatch):
@@ -132,7 +146,67 @@ def test_empty_xml_after_unicode_input_uses_next_screenshot_instead_of_failing(m
     assert runner.pending_unicode == ""
     assert calls == ["input_text"]  # Wait for visual evidence before ENTER.
     assert runner.verify({"last_action": action}) == {"recover_depth": 0, "no_progress": 0}
-    assert not runner.unicode_xml_unavailable_this_step
+    assert not runner.unicode_readback_unconfirmed_this_step
+
+
+def test_qq_music_autocomplete_is_focused_before_exact_chinese_type(monkeypatch):
+    """Replays the search field and action shape from the 王菲 failure log."""
+    xml_before = ('<hierarchy><node class="android.widget.AutoCompleteTextView" '
+                  'resource-id="android:id/search_src_text" text="" focused="false" '
+                  'enabled="true" clickable="true" bounds="[929,128][2192,164]" /></hierarchy>')
+    xml_after = xml_before.replace('text="" focused="false"', 'text="王菲" focused="true"')
+    current = {"xml": xml_before}
+    calls = []
+
+    def call(name, **kwargs):
+        calls.append((name, kwargs))
+        if name == "input_text":
+            current["xml"] = xml_after
+            return "OK input(adbkeyboard) sent='王菲'"
+        return "OK"
+
+    runner = Runner(cfg=Config(), task="用QQ音乐播放王菲的歌")
+    runner.executor = SimpleNamespace(call=call)
+    runner.log = SimpleNamespace(phase=lambda *args, **kwargs: None)
+    runner.obs = Observation(b"", xml_before, 2240, 1260, "sig",
+                             candidates_from_xml(xml_before, screen=(2240, 1260)))
+    monkeypatch.setattr("autogui.core.graph.tools.dev",
+                        lambda: SimpleNamespace(dump_xml=lambda: current["xml"]))
+    monkeypatch.setattr("autogui.core.graph.tools.last_input_result",
+                        lambda: SimpleNamespace(typed="王菲"))
+    monkeypatch.setattr("autogui.core.graph.time.sleep", lambda seconds: None)
+
+    action = parse_action({"type": "TYPE", "text": "王菲", "node_ref": 1, "submit": True})
+    assert action["node_ref"] == 1
+    result = runner._dispatch(action)
+    assert [name for name, _ in calls] == ["tap", "input_text", "keyevent"]
+    assert calls[0][1] == {"x": 1560, "y": 146}
+    assert calls[1][1]["text"] == "王菲"
+    assert "ENTER(submit)" in result
+    assert runner.pending_unicode == runner.pending_unicode_readback == ""
+
+
+def test_unconfirmed_autocomplete_readback_keeps_adb_chinese_path(monkeypatch):
+    xml = ('<hierarchy><node class="android.widget.AutoCompleteTextView" '
+           'resource-id="android:id/search_src_text" text="" focused="true" '
+           'enabled="true" clickable="true" bounds="[929,128][2192,164]" /></hierarchy>')
+    calls = []
+    runner = Runner(cfg=Config(), task="搜索王菲")
+    runner.obs = Observation(b"", xml, 2240, 1260, "sig",
+                             candidates_from_xml(xml, screen=(2240, 1260)))
+    runner.executor = SimpleNamespace(call=lambda name, **kwargs: calls.append(name) or "OK")
+    runner.log = SimpleNamespace(phase=lambda *args, **kwargs: None, debug=False)
+    monkeypatch.setattr("autogui.core.graph.tools.dev", lambda: SimpleNamespace(dump_xml=lambda: xml))
+    monkeypatch.setattr("autogui.core.graph.time.sleep", lambda seconds: None)
+
+    action = parse_action({"type": "TYPE", "text": "王菲", "node_ref": 1, "submit": True})
+    runner._dispatch(action)
+    assert calls == ["input_text"]  # Already focused; no tap and no premature ENTER.
+    assert runner.pending_unicode == ""
+    assert runner.pending_unicode_readback == "王菲"
+    assert "再用 TYPE 输入原文" in runner.context.input_guide
+    assert runner.route({})["route"] == "vlm"
+    assert runner.verify({"last_action": action}) == {"recover_depth": 0, "no_progress": 0}
 
 
 def test_visual_completion_is_allowed_when_unicode_readback_is_unavailable(monkeypatch):

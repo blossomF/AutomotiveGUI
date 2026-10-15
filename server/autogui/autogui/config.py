@@ -146,7 +146,7 @@ class Config(BaseModel):
     exec_mode: Literal["local", "mcp"] = "local"
     device_serial: str = "auto"
     display_id: Optional[int] = None  # 默认捕获不是中控屏时才设置
-    input_chain: list[str] = Field(default_factory=lambda: ["yadb", "adbkeyboard", "ascii"])
+    input_chain: list[str] = Field(default_factory=lambda: ["adbkeyboard", "yadb", "ascii"])
     image: ImageConfig = Field(default_factory=ImageConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     glm: GLMConfig = Field(default_factory=GLMConfig)

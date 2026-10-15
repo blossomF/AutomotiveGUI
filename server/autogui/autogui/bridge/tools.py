@@ -130,7 +130,7 @@ def swipe(x1: int, y1: int, x2: int, y2: int, ms: int = 400) -> str:
 
 
 def input_text(text: str, clear_first: bool = False) -> str:
-    """输入到聚焦的输入框，按 yadb -> ADBKeyboard -> ASCII 降级。"""
+    """输入到聚焦的输入框，优先 ADBKeyboard，再尝试 yadb / ASCII。"""
     global _last_input_result
     _last_input_result = None
     result = text_input().type(text, clear_first=clear_first)

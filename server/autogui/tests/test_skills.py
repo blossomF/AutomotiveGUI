@@ -19,8 +19,9 @@ def test_qq_music_has_one_play_song_entry():
                if skill.name == "play_song"]
     assert len(matches) == 1
     assert matches[0].app == "music"
-    assert "添加到播放队列" in book.guidance("music.play_song", {"song": "晴天"})
-    assert matches[0].steps[-2] == {"act": "wait_for", "text": "暂停", "timeout": 8}
+    guide = book.guidance("music.play_song", {"song": "王菲"})
+    assert "先聚焦输入框" in guide and "歌手" in guide
+    assert matches[0].steps[3] == {"act": "type", "arg": "song", "clear_first": True}
 
 MUSIC_YAML = textwrap.dedent(
     """

@@ -53,7 +53,7 @@ goto :run_task
 
 :fail
   echo.
-  echo [setup] FAILED — see README.md 「环境搭建」 for the manual path.
+  echo [setup] FAILED — see ..\..\README.md 「快速上手」 for the manual path.
   exit /b 1
 
 :end

@@ -10,7 +10,7 @@
 屏幕并开始打转。这里在切换前先读当前 IME，并精确还原那个值。
 
 降级顺序（启动时探测一次，然后缓存）：
-    yadb  ->  ADBKeyboard  ->  input text (仅 ASCII)
+    ADBKeyboard  ->  yadb  ->  input text (仅 ASCII)
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ YADB_CLASSPATH = "/data/local/tmp/yadb"
 YADB_MAIN = "com.ysbing.yadb.Main"
 
 # 探测顺序；第一个可用的成为激活策略。
-STRATEGIES = ("yadb", "adbkeyboard", "ascii")
+STRATEGIES = ("adbkeyboard", "yadb", "ascii")
 
 
 class UnicodeInputUnavailable(ValueError):

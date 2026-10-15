@@ -1,8 +1,8 @@
 # Automotive GUI Agent
 
-从零部署、拉通检测与运行监测见[部署与联调手册](../../doc/部署与联调手册.md)。
+从零部署、拉通检测与运行监测见[部署与联调手册](doc/部署与联调手册.md)。
 
-自检结果的含义见[部署与联调手册第 3 节](../../doc/部署与联调手册.md#3-设备和应用配置)，运行日志的查看方式见该手册第 5 节。
+自检结果的含义见[部署与联调手册第 3 节](doc/部署与联调手册.md#3-设备和应用配置)，运行日志的查看方式见该手册第 5 节。
 
 相关文档的位置如下，路径相对于项目根目录。
 
@@ -11,7 +11,7 @@
 | 部署与联调手册 | `doc/部署与联调手册.md` | 第 2 节部署、第 3 节自检、第 5 节日志 |
 | 队伍分工说明 | `doc/队伍分工说明.md` | 团队分工 |
 
-下文的源码链接相对于本 README 所在的 `server/autogui` 目录。比如 `autogui/core/graph.py` 在项目中的完整相对位置是 `server/autogui/autogui/core/graph.py`。
+本 README 位于项目根目录，文档链接和源码链接均从这里计算。程序入口和依赖文件位于 `server/autogui`，执行命令时按步骤切换工作目录。
 
 看懂车机屏幕、操作车机屏幕的 Agent。LangGraph 做决策大脑，MCP 做执行面，自研 ADB 桥接层直连
 Android Automotive 中控屏。CART Q3 AI 大赛作品。
@@ -52,7 +52,7 @@ adb version
 adb devices -l
 ```
 
-`$repo` 保存项目路径，第二行让电脑和程序能找到 ADB，第三行进入程序目录。应看到 Python 3.10+、ADB 版本，以及状态为 `device` 的设备。如果没有 `py`，用 `python -V` 检查版本，后面的 `py -3` 也改成 `python`。连接异常的逐步处理见[部署手册第 2.1 节](../../doc/部署与联调手册.md#21-电脑与设备)。
+`$repo` 保存项目路径，第二行让电脑和程序能找到 ADB，第三行进入程序目录。应看到 Python 3.10+、ADB 版本，以及状态为 `device` 的设备。如果没有 `py`，用 `python -V` 检查版本，后面的 `py -3` 也改成 `python`。连接异常的逐步处理见[部署手册第 2.1 节](doc/部署与联调手册.md#21-电脑与设备)。
 
 ### 第 2 步：安装依赖并自检
 
@@ -63,7 +63,7 @@ py -3 -m venv .venv
 .\.venv\Scripts\python.exe main.py --check
 ```
 
-已有 `.venv` 时可跳过第一行。`--selftest` 运行离线测试，不需要设备或模型密钥；`--check` 需要设备，但不调用模型。自检中 `[✗]` 表示失败，需先处理；`[!]` 是警告，仍需核对。退出码为 `0` 只代表硬检查通过，详细判据见[部署手册第 3 节](../../doc/部署与联调手册.md#3-设备和应用配置)。
+已有 `.venv` 时可跳过第一行。`--selftest` 运行离线测试，不需要设备或模型密钥；`--check` 需要设备，但不调用模型。自检中 `[✗]` 表示失败，需先处理；`[!]` 是警告，仍需核对。退出码为 `0` 只代表硬检查通过，详细判据见[部署手册第 3 节](doc/部署与联调手册.md#3-设备和应用配置)。
 
 ### 第 3 步：启动面板，配置模型和应用
 
@@ -80,7 +80,7 @@ Set-Location $repo
 
 在设备屏幕上确认应用确实打开，再去[日志页](http://127.0.0.1:8777/logs)查看运行记录。按 `Ctrl+C` 停止服务。关闭窗口后，路径设置和环境变量不会自动保留。
 
-API Key 在设置页保存时，会使用 Windows DPAPI 加密写入本机 `config.yaml`，换机器或 Windows 用户后需重新录入。也可以只用 CLI，通过环境变量提供 Key，方法见[部署手册第 2.3 节](../../doc/部署与联调手册.md#23-配置-glm-与语音凭证)。不要提交明文凭证或本机凭证配置。
+API Key 在设置页保存时，会使用 Windows DPAPI 加密写入本机 `config.yaml`，换机器或 Windows 用户后需重新录入。也可以只用 CLI，通过环境变量提供 Key，方法见[部署手册第 2.3 节](doc/部署与联调手册.md#23-配置-glm-与语音凭证)。不要提交明文凭证或本机凭证配置。
 
 ### 使用 CLI 执行任务
 
@@ -128,7 +128,7 @@ flowchart LR
     GUARD -->|超限| ENDNODE
 ```
 
-`route` 只选 tree/VLM。模型可以在 `decide` 中选择 `SKILL`，加载指南后再决定具体动作；普通指令不会因关键词而直接执行配方。完整条件边见源码 [`autogui/core/graph.py`](autogui/core/graph.py)。
+`route` 只选 tree/VLM。模型可以在 `decide` 中选择 `SKILL`，加载指南后再决定具体动作；普通指令不会因关键词而直接执行配方。完整条件边见源码 [`autogui/core/graph.py`](server/autogui/autogui/core/graph.py)。
 
 主要实现边界：
 
@@ -218,7 +218,7 @@ flowchart LR
 | `apps` | 见配置文件 | 设置页全量维护目标应用名称、包名和别名；`--check` 核对全部目标应用 |
 
 `glm.model`、`glm.base_url` 和 API Key 必须对应实际可用的服务。配置文件中已有的值会覆盖代码默认值；不要把默认值当作当前机器的有效配置。
-面板设置页 `http://127.0.0.1:8777/settings` 可填写模型 URL、名称和 API Key，单独验证连接；`--check` 不发模型请求。逐项自检说明见[部署与联调手册第 3 节](../../doc/部署与联调手册.md#3-设备和应用配置)。
+面板设置页 `http://127.0.0.1:8777/settings` 可填写模型 URL、名称和 API Key，单独验证连接；`--check` 不发模型请求。逐项自检说明见[部署与联调手册第 3 节](doc/部署与联调手册.md#3-设备和应用配置)。
 
 普通任务只有在应用缓存与当前设备匹配、且有可直启应用时，才先发文本模型请求，选择应用 ID 和可选的 Skill 指导。纯打开任务直启成功后结束；复合任务继续抓屏和 XML。缓存不匹配、没有可用应用、模型选择观察或直启失败时，进入屏幕观测流程。该请求的统计计入 `initial_model` 和模型用量。
 
@@ -292,7 +292,7 @@ server/autogui/
 
 ### 提示词维护
 
-- 通用提示词集中在 [`autogui/brain/prompt_text.yaml`](autogui/brain/prompt_text.yaml)。`$task`、`$context_text`、`$width` 等占位符由代码填入；修改后重启服务生效。
+- 通用提示词集中在 [`autogui/brain/prompt_text.yaml`](server/autogui/autogui/brain/prompt_text.yaml)。`$task`、`$context_text`、`$width` 等占位符由代码填入；修改后重启服务生效。
 - 动作名称、动作字段和滚动方向从 `actions.py` 生成，修改动作协议时以该文件为准，不在 YAML 中另维护一份列表。
 - 应用任务指导维护在 `skills/<app>/skill.yaml`；仅在当前 XML 页面标记命中时发送的经验维护在 `skills/<app>/ui_hints.yaml`。
 - 修改模板后运行 `python -m pytest tests -q`，并查看 debug 日志中的 `glm_request` 确认实际发送的文本。
@@ -307,12 +307,12 @@ server/autogui/
 
 以下借鉴关系在源码注释中有记录，对应实现入口如下：
 
-- **LightGUIAgent**：提示词组织、日志和上下文等思路，见 [`brain/prompts.py`](autogui/brain/prompts.py)、[`core/decision_log.py`](autogui/core/decision_log.py)。
-- **android-agent（Ghost in the Droid）**：ADB、文字输入和 MCP 工具注册的适配，见 [`bridge/adb.py`](autogui/bridge/adb.py)、[`bridge/input.py`](autogui/bridge/input.py)、[`mcp_server.py`](autogui/mcp_server.py)。
-- **MobileAgent**：动作前后画面的反思提示与失败上下文保留思路，见 [`brain/prompts.py`](autogui/brain/prompts.py)、[`brain/context.py`](autogui/brain/context.py)。
+- **LightGUIAgent**：提示词组织、日志和上下文等思路，见 [`brain/prompts.py`](server/autogui/autogui/brain/prompts.py)、[`core/decision_log.py`](server/autogui/autogui/core/decision_log.py)。
+- **android-agent（Ghost in the Droid）**：ADB、文字输入和 MCP 工具注册的适配，见 [`bridge/adb.py`](server/autogui/autogui/bridge/adb.py)、[`bridge/input.py`](server/autogui/autogui/bridge/input.py)、[`mcp_server.py`](server/autogui/autogui/mcp_server.py)。
+- **MobileAgent**：动作前后画面的反思提示与失败上下文保留思路，见 [`brain/prompts.py`](server/autogui/autogui/brain/prompts.py)、[`brain/context.py`](server/autogui/autogui/brain/context.py)。
 
 ---
 
 ## 11. 团队分工
 
-见[队伍分工说明](../../doc/队伍分工说明.md)。
+见[队伍分工说明](doc/队伍分工说明.md)。

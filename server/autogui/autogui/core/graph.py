@@ -97,7 +97,8 @@ class Runner:
     decide_attempts: int = 0
     pending_unicode: str = ""
     blocked_unicode_attempts: int = 0
-    unicode_xml_unavailable_this_step: bool = False
+    unicode_readback_unconfirmed_this_step: bool = False
+    pending_unicode_readback: str = ""
     launch_note_decisions: int = 0
     skip_waited_targets: set[str] = field(default_factory=set)
     launch_monotonic: float | None = None
@@ -214,9 +215,11 @@ class Runner:
             target_lost=self.obs.candidate_stats.get("target_lost", 0),
             candidate_tokens=self.obs.candidate_stats.get("candidate_tokens", 0),
         )
-        if self.pending_unicode and self._field_contains(self.obs.xml, self.pending_unicode):
-            self.log.phase("input", f"已从控件树确认目标中文：{self.pending_unicode!r}")
+        expected_input = self.pending_unicode or self.pending_unicode_readback
+        if expected_input and self._field_contains(self.obs.xml, expected_input):
+            self.log.phase("input", f"已从控件树确认目标中文：{expected_input!r}")
             self.pending_unicode = ""
+            self.pending_unicode_readback = ""
             self.blocked_unicode_attempts = 0
             self.context.input_guide = ""
         if not any(self._skip_label(c.label) for c in self.obs.candidates):
@@ -252,8 +255,8 @@ class Runner:
 
     def route(self, state: AgentState) -> dict:
         """固定控件树优先；树不可用时降级到 VLM。"""
-        if self.pending_unicode:
-            self.log.phase("route", "中文输入需观察屏幕键盘 → vlm")
+        if self.pending_unicode or self.pending_unicode_readback:
+            self.log.phase("route", "中文输入待核对 → vlm 截图")
             return {"route": "vlm"}
         if self.obs and any(c.cls.rsplit(".", 1)[-1] == "WheelView"
                             for c in self.obs.candidates):
@@ -413,7 +416,7 @@ class Runner:
                 return {"action": {}, "retry_decision": False,
                         "no_progress": state.get("no_progress", 0) + 1}
             action["image_size"] = image_size
-        if self.pending_unicode and action.get("type") == "COMPLETE":
+        if (self.pending_unicode or self.pending_unicode_readback) and action.get("type") == "COMPLETE":
             # XML can be absent indefinitely on WebView-heavy pages. This
             # decision already saw the current screenshot on the forced VLM
             # route; an unavailable EditText readback must not veto visible
@@ -423,6 +426,7 @@ class Runner:
                 return {"route": "vlm", "action": {}, "retry_decision": True}
             self.log.phase("input", "模型依据当前截图确认任务结果；XML 字段读回未完成，不再阻断 COMPLETE")
             self.pending_unicode = ""
+            self.pending_unicode_readback = ""
             self.context.input_guide = ""
         if (self.pending_unicode and action.get("type") == "TYPE"
                 and action.get("text") == self.pending_unicode):
@@ -539,6 +543,34 @@ class Runner:
         time.sleep(self.cfg.agent.delay_after_action)
         return {"last_action": action}
 
+    def _focus_type_target(self, action: dict) -> None:
+        """Focus the model's TYPE target before ADBKeyboard sends text."""
+        target = None
+        if self.obs and action.get("node_ref") is not None:
+            target = tree_mod.by_ref(self.obs.candidates, action["node_ref"])
+            if target is None or not target.editable or not target.enabled:
+                raise ValueError(f"TYPE node_ref={action['node_ref']} 不是可用输入框")
+        elif self.obs and not any(action.get(k) is not None for k in ("point", "coord")):
+            editable = [c for c in self.obs.candidates if c.editable and c.enabled]
+            focused = [c for c in editable if c.focused]
+            target = focused[0] if len(focused) == 1 else (editable[0] if len(editable) == 1 else None)
+
+        if target and target.focused:
+            return
+        if target:
+            x, y = target.cx, target.cy
+        elif any(action.get(k) is not None for k in ("point", "coord")):
+            x, y = self._resolve_point(action)
+            if x is None:
+                raise ValueError("TYPE 输入框坐标无效")
+        else:
+            return
+        result = self.executor.call("tap", x=x, y=y)
+        if result.startswith("TOOL_ERROR"):
+            raise ValueError(f"无法聚焦 TYPE 输入框：{result}")
+        self.log.phase("input", f"先聚焦输入框 ({x},{y})，再通过 ADB 输入文字")
+        time.sleep(0.2)
+
     def _dispatch(self, action: dict, route: str = "tree") -> str:
         """动作类型 → 执行器调用映射：tap/long_press/input_text/swipe/press_back/press_home/launch_app/sleep。"""
         a_type = action["type"]
@@ -550,17 +582,27 @@ class Runner:
                 raise ValueError(f"cannot resolve target for {a_type}")
             return ex.call("tap", x=x, y=y) if a_type == "CLICK" else ex.call("long_press", x=x, y=y, ms=800)
         if a_type == "TYPE":
-            self.unicode_xml_unavailable_this_step = False
+            self.unicode_readback_unconfirmed_this_step = False
+            self._focus_type_target(action)
             r = ex.call("input_text", text=action["text"], clear_first=action.get("clear_first", False))
             if not action["text"].isascii():
                 xml = tools.dev().dump_xml()
-                if xml and not self._field_contains(xml, action["text"]):
-                    raise UnicodeInputUnavailable(action["text"], "输入命令已发送，但可用控件树未读到目标中文")
-                if not xml:
-                    self.unicode_xml_unavailable_this_step = True
-                    self.log.phase("input", "中文输入命令已发送；XML 超时或为空，留待下一轮截图确认",
+                if self._field_contains(xml, action["text"]):
+                    self.pending_unicode_readback = ""
+                    self.context.input_guide = ""
+                    self.log.phase("input", "中文输入已从控件树确认", target=action["text"], result=r)
+                else:
+                    self.unicode_readback_unconfirmed_this_step = True
+                    self.pending_unicode_readback = action["text"]
+                    self.context.input_guide = (
+                        f"中文 {action['text']!r} 已经通过 ADB 输入通道发送，但控件树还没有读回。"
+                        "这不等于输入通道不可用。先看当前截图；若搜索框仍为空，"
+                        "点击输入框取得焦点，再用 TYPE 输入原文。不要逐字点击屏幕键盘，"
+                        "也不要改填拼音。若截图已经显示原文，继续完成搜索。"
+                    )
+                    self.log.phase("input", "中文输入已发送但未从控件树确认；截图复核，保留 ADB 中文输入",
                                    target=action["text"])
-                    r = "[中文已发送，XML 不可用；下轮看图确认] " + r
+                    r = "[中文已发送，字段未确认；下轮看图确认] " + r
             if action.get("submit"):
                 # 搜索类输入框：输完补发 ENTER 触发提交并收起遮挡结果的软键盘
                 # （车机实测 KEYCODE_ENTER 同时完成两件事；普通表单不带 submit）。
@@ -568,8 +610,8 @@ class Runner:
                 # （会把搜索框残留文本提交出去，制造错误搜索结果）。
                 from autogui.bridge import tools as _tools
                 lr = _tools.last_input_result()
-                if self.unicode_xml_unavailable_this_step:
-                    r += " [ENTER skipped: XML unavailable; inspect screenshot first]"
+                if self.unicode_readback_unconfirmed_this_step:
+                    r += " [ENTER skipped: input not confirmed; inspect screenshot first]"
                 elif lr is None or not (lr.typed or "").strip():
                     r = r + " [ENTER skipped: nothing actually typed]"
                 else:
@@ -601,10 +643,12 @@ class Runner:
             return ex.call("press_back")
         if a_type == "HOME":
             self.pending_unicode = ""
+            self.pending_unicode_readback = ""
             self.context.input_guide = ""
             return ex.call("press_home")
         if a_type == "LAUNCH":
             self.pending_unicode = ""
+            self.pending_unicode_readback = ""
             self.context.input_guide = ""
             result = ex.call("launch_app", package=action["app"])
             if not result.startswith("TOOL_ERROR"):
@@ -747,7 +791,9 @@ class Runner:
     @staticmethod
     def _field_contains(xml: str, expected: str) -> bool:
         return any(expected == node_text(node).strip() for node in nodes(xml)
-                   if ("EditText" in node_class(node) or node_attr(node, "editable") == "true"))
+                   if (node_class(node).rsplit(".", 1)[-1] in
+                       ("EditText", "AutoCompleteTextView", "MultiAutoCompleteTextView")
+                       or node_attr(node, "editable") == "true"))
 
     def _resolve_point(self, action: dict) -> tuple[int | None, int | None]:
         """node_ref 优先于显式设备坐标，再到图片坐标。
@@ -920,9 +966,9 @@ class Runner:
             return {"done": True, "success": ok, "status": "complete" if ok else "failed",
                     "result_text": action.get("result") or action.get("reason", "")}
 
-        if a_type == "TYPE" and self.unicode_xml_unavailable_this_step:
-            self.unicode_xml_unavailable_this_step = False
-            self.log.phase("verify", "中文已发送但 XML 不可用；下一轮截图确认，不按滞后帧触发恢复", vlm=0)
+        if a_type == "TYPE" and self.unicode_readback_unconfirmed_this_step:
+            self.unicode_readback_unconfirmed_this_step = False
+            self.log.phase("verify", "中文已发送但字段未确认；下一轮截图确认，不按滞后帧触发恢复", vlm=0)
             return {"recover_depth": 0, "no_progress": 0}
 
         changed = bool(self.obs) and bool(self.prev_obs) and self.obs.signature != self.prev_obs.signature

@@ -1455,9 +1455,15 @@ async function loadTasks(prefer){
 }
 
 async function loadTask(dir, animate){
+  const scroller = $('.main');
+  const tl = $('#timeline');
+  const atBottom = scroller && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 48;
+  const previousCount = tl.dataset.taskDir === dir ? Number(tl.dataset.eventCount || 0) : 0;
+  const wasRunning = tl.dataset.taskDir === dir && tl.dataset.status === 'running';
   currentDir = dir;
   const r = await fetch('/api/task/' + encodeURIComponent(dir));
   const d = await r.json();
+  if(currentDir !== dir) return;
   if(d.error){ $('#timeline').innerHTML = `<div class="empty">${esc(d.error)}</div>`; return; }
   // 统计卡
   $('#stats').innerHTML = `
@@ -1469,7 +1475,7 @@ async function loadTask(dir, animate){
     <div class="stat"><div class="k">总 Token</div><div class="v">${d.stats.total_tokens}</div></div>
   `;
   // 时间线
-  const tl = $('#timeline'); tl.innerHTML = '';
+  tl.innerHTML = '';
   if(!d.steps.length){ tl.innerHTML = '<div class="empty">暂无步骤数据</div>'; }
   let previousGraphStep = null;
   d.steps.forEach(s => {
@@ -1503,6 +1509,12 @@ async function loadTask(dir, animate){
       </div>`;
     tl.appendChild(card);
   });
+  tl.dataset.taskDir = dir;
+  tl.dataset.eventCount = String(d.steps.length);
+  tl.dataset.status = d.status;
+  if(atBottom && d.steps.length > previousCount && (d.status === 'running' || wasRunning)){
+    requestAnimationFrame(() => { if(currentDir === dir) scroller.scrollTop = scroller.scrollHeight; });
+  }
   // 运行中：自动开刷新，跑完自动停
   const ab = $('#autoBtn');
   if(d.status === 'running'){

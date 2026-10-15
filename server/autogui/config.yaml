@@ -9,7 +9,7 @@ exec_mode: local
 device_serial: auto        # auto = 自动选唯一在线设备，否则直接报错
 display_id: null           # 保持 null；仅当 `--check` 报告多屏且
                             # 捕获到的不是中控屏时才设置
-input_chain: [yadb, adbkeyboard, ascii]
+input_chain: [adbkeyboard, yadb, ascii]
 
 image:
   jpeg_quality: 85
@@ -42,7 +42,7 @@ skills:
 voice:
   appid: "ad8987fe" # python -m autogui.security set voice.appid
   api_key: "dc1a6fb17594d12d553a42ce745d23e2" # 留空 → 回退 IFLYTEK_API_KEY 环境变量；录入：python -m autogui.security set voice.api_key
-  api_secret: "ENC(AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAAUGqbIjO8Fk2fZGdpE2yBUgAAAAACAAAAAAAQZgAAAAEAACAAAADhmw6pRiOzYBY4ibq+7cWAsvOnRhbV/8p8y+qnXGGQBgAAAAAOgAAAAAIAACAAAACo1sq1+nItSEq2sFtvf4F9mRPKwApPO+7G9SVDnMPalzAAAAC6FCqa0oWlL+PY5EA5aGQsrq5OKmcb45ZLWjgsfyzQGaK+gZq/1LSLjgMBWMhhAcRAAAAA0OL7WVxFivMr+zffWpC2Mb2tXXT5EHfg9ywwdwVsqVcUQgkBPcBLi0u4LkmKZym25LKSx52DftOq7H6LZvjARg==)" # python -m autogui.security set voice.api_secret
+  api_secret: "ENC(AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAAUGqbIjO8Fk2fZGdpE2yBUgAAAAACAAAAAAAQZgAAAAEAACAAAABbitJHMi4eg/wgCCMx5373hLF1d3vvL0f+S4758meiMAAAAAAOgAAAAAIAACAAAABp2E91NR6HW2tBowrHqnSwFvOCp+SYSuLWRwkO1hybGTAAAABl3UHv6EkPmEwhpFbjaeSURRWLZX1C+xJOc86vrk1Fw2ItvmjqBBZYdivlmeOzQDNAAAAA0qUzogvns4V/1oB7Ynx7DrdG2SZ/dzATtpuPcuq4/fUBynMQ2btK9qbNNZEJToPCOEkxb1OlXw/DEj0/rL9G8A==)" # python -m autogui.security set voice.api_secret
   iat_url: "wss://iat-api.xfyun.cn/v2/iat" # 留空 = 讯飞公网 wss://iat-api.xfyun.cn/v2/iat
   max_seconds: 15.0 # 最长录音秒数
   silence_seconds: 0.8 # 尾部连续静音后自动停止
@@ -51,7 +51,7 @@ voice:
 glm:
   model: "ts-glm-53-flash"
   base_url: "https://llm.thundersoft.com"
-  api_key: "ENC(AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAAUGqbIjO8Fk2fZGdpE2yBUgAAAAACAAAAAAAQZgAAAAEAACAAAAC3GTFUjoGMECi0gm9EvSPdD9EnIzJ+TKUjYCmBoUhZTgAAAAAOgAAAAAIAACAAAAAWozOM8arwTzt994gtCOfM6jgehMlnFTeYewTYCxPS/lAAAAAevtoE79+tFdburezPSqq1jPk5yP+dAWIL5zK50X4/jlO1do3imFw/DjPz37rpy51ZoyKKIOyQ7bv2X629HR1eounD3WgoFFabTH0QcZNmmUAAAACzAMvpadyc7VimKlkR38fM1nJHTd31YmKGRWv5LpPneeK3PedV28v67F5pha1iztA8aOFwvEQK5DjP7Z7s5mpO)" # 留空 → 回退 GLM_API_KEY 环境变量（我们的 ThunderSoft 官方 key）
+  api_key: "ENC(AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAAUGqbIjO8Fk2fZGdpE2yBUgAAAAACAAAAAAAQZgAAAAEAACAAAACPzyHQeRrQdoO5Ub+8UvLLdCw+5ile1c2ujMnNiFPIiAAAAAAOgAAAAAIAACAAAADL5vQYCF3cSwPxFaNSjVyISNrPJJLFSnmfZI/JuuiLnVAAAABN9xczTkXJnYjmBVPVBAnp1Dxk9XkW68qW9wCIDzz90liVG7SWxDdiQrQ3yn/sRgUzCICT6ocGpB4lroaRgoFUXa02EWHd7SHms7I6wC/mfkAAAAC7a+FVi42jLpLRn+f+M//WhHkecFs1jvlETFSAlK7zM5c+9BZjh16wJ2k9Vzk0RQQU2wDW6S9132CTab/ruKgI)" # 留空 → 回退 GLM_API_KEY 环境变量（我们的 ThunderSoft 官方 key）
   api_key_env: GLM_API_KEY
   temperature: 0.1
   max_tokens: 8192 # 【标记：ts-glm-53-flash 思维链模型，需单独适配】思维链也计入
