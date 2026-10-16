@@ -1,0 +1,1 @@
+当前截图尺寸为 $image_width×$image_height。看图点击使用 point:[x,y]，DRAG 的 from/to 也按这张截图的像素尺寸填写；程序会统一换算为设备坐标。

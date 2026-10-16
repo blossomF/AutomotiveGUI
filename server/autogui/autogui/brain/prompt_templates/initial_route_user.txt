@@ -1,0 +1,5 @@
+指令：$task
+已配置应用：
+$catalog
+已配置应用的专属技能：
+$skill_catalog

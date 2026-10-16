@@ -226,7 +226,7 @@ def test_visual_completion_is_allowed_when_unicode_readback_is_unavailable(monke
         sent = Image.open(io.BytesIO(base64.b64decode(kw["jpeg_b64"])))
         seen.append(sent.getpixel((sent.width // 2, sent.height // 2)))
         return ({"type": "COMPLETE", "result": "已显示晴天搜索结果"},
-                SimpleNamespace(calls=1, prompt_tokens=10, completion_tokens=10))
+                SimpleNamespace(calls=1, prompt_tokens=10, completion_tokens=10, latency_ms=0))
     runner.glm = SimpleNamespace(decide=decide)
 
     result = runner.decide({"step": 4, "route": "vlm"})

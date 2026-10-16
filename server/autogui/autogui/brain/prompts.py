@@ -20,8 +20,6 @@ import re
 from pathlib import Path
 from string import Template
 
-import yaml
-
 from autogui.actions import ACTIONS, ACTION_NAMES, SCROLL_DIRECTIONS
 
 # 每个动作的字段清单，**从 ACTIONS 自动生成**——actions.py 自称是
@@ -42,12 +40,14 @@ def _action_fields(route: str) -> str:
         fields.append(f"{action.name}({', '.join(args)})")
     return "；".join(fields)
 
-_PROMPT_FILE = Path(__file__).with_name("prompt_text.yaml")
-_PROMPT_TEXT = yaml.safe_load(_PROMPT_FILE.read_text(encoding="utf-8"))
+_PROMPT_DIR = Path(__file__).with_name("prompt_templates")
+# 一条模板一个文件；启动时加载，修改后重启服务生效。
+_PROMPT_TEXT = {path.stem: path.read_text(encoding="utf-8")
+                for path in sorted(_PROMPT_DIR.glob("*.txt"))}
 
 
 def render(name: str, **values: object) -> str:
-    """从配置文件取提示词，严格替换动态字段；缺失字段立即报错。"""
+    """按文件名取独立提示词，严格替换动态字段；缺失字段立即报错。"""
     value = _PROMPT_TEXT.get(name)
     if not isinstance(value, str):
         raise ValueError(f"missing prompt template: {name}")

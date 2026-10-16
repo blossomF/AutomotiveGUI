@@ -1,0 +1,1 @@
+{"type":"CLICK","point":[990,127],"explain":"...","progress":"...","entities":{"时间":"19:00"}}

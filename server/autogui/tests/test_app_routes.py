@@ -210,5 +210,5 @@ def test_cmd_run_always_constructs_model_for_initial_decision(monkeypatch):
             return {"success": True}
 
     monkeypatch.setattr(graph_mod, "Runner", FakeRunner)
-    assert main.cmd_run(SimpleNamespace(task="打开美团", skill_only=False), cfg) == 0
+    assert main.cmd_run(SimpleNamespace(task="打开美团"), cfg) == 0
     assert seen[0]["glm"] == "model"

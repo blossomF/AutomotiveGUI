@@ -3,10 +3,6 @@ name: bilibili
 configured_app: 哔哩哔哩
 # 包名不写在这里：统一取 config.yaml apps 段（设置页设备探测）中「哔哩哔哩」的 package
 
-popups:
-  - { detect: "青少年模式", button: "以后再说" }
-  - { detect: "用户协议", button: "同意" }
-
 skills:
   - name: search_video
     summary: 在 B 站搜索关键词并播放第一个视频
@@ -15,13 +11,3 @@ skills:
       适用于用户明确要求在 B 站搜索并播放 {keyword} 相关视频；不要把其它 App 的“看视频”请求当成此技能。
       根据当前界面找搜索入口，输入关键词，等待结果加载。只有当用户说“第一个”时才直接选第一个结果；否则按标题和用户限定条件选择。
       进入视频页后核对标题和播放状态，再判断任务是否完成；结果不符时返回重新选择。
-    steps:
-      - { act: launch }
-      - { act: dismiss_popups }
-      - { act: click, hint: { text: "搜索" } }
-      - { act: type, arg: keyword, clear_first: true }
-      - { act: keyevent, key: "KEYCODE_ENTER" }
-      - { act: wait_for, arg: keyword, timeout: 10 }
-      - { act: click, hint: { text: "{keyword}" }, nth: 0 }
-      - { act: sleep, seconds: 2.0 }
-      - { act: complete }

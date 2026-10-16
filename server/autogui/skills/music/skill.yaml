@@ -1,15 +1,9 @@
 # 音乐（CEA1.3 预装）
-# 普通任务只读取 guide，不执行下面的 steps。
-# steps 属于显式 --skill-only 配方；hint 是占位符，需在车机实测校准。
 name: music
 configured_app: QQ音乐
 # 包名不写在这里：统一取 config.yaml apps 段（设置页设备探测）中「QQ音乐」的 package
 
 # App 级弹窗覆盖项；省略则用 autogui/skills/base.py 的 DEFAULT_POPUPS。
-popups:
-  - { detect: "用户协议", button: "同意" }
-  - { detect: "开启推送", button: "以后再说" }
-
 skills:
   - name: play_song
     summary: 在音乐 App 按歌名或歌手搜索并播放
@@ -18,22 +12,8 @@ skills:
       适用于用户要求在音乐应用按歌名或歌手 {song} 搜索并播放。先确认当前应用和页面；需要时从可用应用列表启动音乐应用。
       找到搜索入口；先聚焦输入框，再用 TYPE 一次输入完整中文原文。已知输入框编号时填写 node_ref。搜索歌手时从该歌手的结果中选曲，不要把歌手当成歌曲名。
       点击目标歌曲后，确认播放页显示正确曲目、歌手且处于播放状态，才可报告完成。找不到时不要猜测或播放其它歌曲。
-    steps:
-      - { act: launch }
-      - { act: dismiss_popups }
-      - { act: click, hint: { text: "搜索" } }
-      - { act: type, arg: song, clear_first: true }
-      - { act: wait_for, arg: song, timeout: 8 }
-      - { act: click, hint: { text: "{song}" } }   # {param} = 从 params 替换
-      - { act: sleep, seconds: 1.5 }
-      - { act: click, hint: { text: "播放全部" } }
-      - { act: complete }
-
   - name: pause
     summary: 暂停当前播放
     guide: |
       仅在用户明确要求暂停当前音乐时使用。先确认处于音乐播放界面且正在播放，找到对应的暂停控件。
       点击后检查播放状态确已暂停；如果已暂停，不要再次点击以免恢复播放。
-    steps:
-      - { act: click, hint: { desc: "暂停" } }
-      - { act: complete }

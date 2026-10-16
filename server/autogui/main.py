@@ -39,47 +39,13 @@ def cmd_run(args, cfg) -> int:
     from autogui.brain.glm_client import GLMClient
     from autogui.core.graph import Runner
 
-    tools = _bootstrap(cfg)
+    _bootstrap(cfg)
     task = args.task.strip()
-    if args.skill_only:
-        return _run_skill_direct(args, cfg, tools)
 
     glm = GLMClient(cfg.glm)
     runner = Runner(cfg=cfg, task=task, glm=glm)
     result = runner.execute()
     return 0 if result["success"] else 1
-
-
-def _run_skill_direct(args, cfg, tools) -> int:
-    """显式 --skill-only 调试入口：跳过模型直接执行配方。"""
-    from autogui.skills.base import SkillBook, SkillMiss
-
-    book = SkillBook(Path(__file__).resolve().parent / cfg.skills.directory, tools.dev(), tools.text_input(),
-                     app_packages={a.name: a.package for a in (cfg.apps or []) if a.package})
-    print("可用配方：\n" + "\n".join(sorted(book.by_id)) + "\n")
-
-    key, _, param = args.task.partition("=")
-    key = key.strip()
-    skill = book.get(key)
-    if skill is None:
-        print(f"找不到技能 {key!r}")
-        return 1
-    params = {}
-    if param:
-        if not skill.params:
-            print(f"{key} 不接收参数")
-            return 1
-        params[skill.params[0]] = param.strip()
-    try:
-        for line in book.run(key, params):
-            print(line)
-        return 0
-    except SkillMiss as e:
-        print(f"SKILL_MISS: {e}")
-        return 1
-    except Exception as e:
-        print(f"FAILED: {type(e).__name__}: {e}")
-        return 1
 
 
 def cmd_packages(cfg) -> int:
@@ -304,7 +270,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("task", nargs="?", default="", help='natural-language task, e.g. "在B站搜索并播放..."; use with --packages/--check/--dump-report/--mcp-check/--selftest"')
     p.add_argument("--config", default=None, help="path to config.yaml")
     p.add_argument("--exec-mode", choices=["local", "mcp"], default=None, help="override config exec_mode")
-    p.add_argument("--skill-only", action="store_true", help='run one recipe with no model, e.g. --skill-only "music.play_song=七里香"')
     p.add_argument("--packages", action="store_true", help="list installed packages and exit")
     p.add_argument("--check", action="store_true", help="device/capture/input self-test and exit")
     p.add_argument("--dump-report", action="store_true", help="measure tree quality per app; write artifacts/dump-report.md")

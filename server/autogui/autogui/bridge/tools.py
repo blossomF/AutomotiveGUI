@@ -204,32 +204,6 @@ def sleep(seconds: float = 1.0) -> str:
     return f"OK slept {seconds}s"
 
 
-# ── 技能 ─────────────────────────────────────────────────────────────────────
-
-
-def run_skill(name: str, params_json: str = "{}") -> str:
-    """外部 MCP 显式调用的 YAML 配方执行器；普通 Agent 不调用它。
-
-    延迟 import 让 ``skills`` 保持在 bridge 依赖方向之外。
-    """
-    import json
-
-    from autogui.skills.base import SkillMiss, run_by_name
-
-    try:
-        params = json.loads(params_json or "{}")
-    except json.JSONDecodeError as e:
-        return f"BAD_PARAMS: {e}"
-    try:
-        trace = run_by_name(name, params)
-    except SkillMiss as e:
-        # 将失败原因交给显式调用方处理。
-        return f"SKILL_MISS {name}: {e}"
-    except ADBError as e:
-        return f"SKILL_ADB_FAIL {name}: {e}"
-    return "OK skill " + name + "\n" + "\n".join(trace)
-
-
 # ── 工具注册表（供 mcp_server.py 消费） ───────────────────────────────────────
 
 TOOLS = [
@@ -251,5 +225,4 @@ TOOLS = [
     list_apps,
     wait_for_text,
     sleep,
-    run_skill,
 ]

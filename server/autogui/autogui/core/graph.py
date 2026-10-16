@@ -38,6 +38,7 @@ from autogui.bridge import tools
 from autogui.bridge.adb import ADBError, node_attr, node_class, node_desc, node_text, nodes
 from autogui.bridge.input import UnicodeInputUnavailable, to_pinyin_syllables
 from autogui.brain.context import Context
+from autogui.brain.scene_hints import match_scene_hints
 from autogui.brain.glm_client import GLMClient, GLMError
 from autogui.app_routes import InitialRoute, choose_initial_route
 from autogui.config import AppConfig, Config, PROJECT_ROOT
@@ -77,7 +78,7 @@ class Runner:
     # 四层上下文管理器（历史/进度/实体/技能索引 + token 预算裁剪）
     # 不进构造器：依赖 cfg 的多个参数，在 __post_init__ 里初始化
     context: Context = field(init=False, default=None)  # type: ignore[assignment]
-    # 技能库：普通流程提供模型指南；显式 --skill-only 才执行 YAML 配方
+    # 技能库：仅提供模型指南，不执行固定配方
     book: SkillBook | None = None
     page_hint_book: PageHintBook | None = None
     device_serial: str = ""
@@ -140,7 +141,7 @@ class Runner:
             if note:
                 print(f"  ⚠ {note}")
         if self.cfg.skills.enabled and self.book is None:
-            self.book = SkillBook(PROJECT_ROOT / self.cfg.skills.directory, tools.dev(), tools.text_input(),
+            self.book = SkillBook(PROJECT_ROOT / self.cfg.skills.directory,
                                   app_packages={a.name: a.package for a in (self.cfg.apps or []) if a.package})
             self.context.skill_index = self.book.index()
         self.page_hint_book = PageHintBook(PROJECT_ROOT / self.cfg.skills.directory)
@@ -317,6 +318,7 @@ class Runner:
             self.log.phase("decide", "本步已重试 2 次仍无可用决策，放弃本步")
             return {"action": {}, "retry_decision": False, "no_progress": state.get("no_progress", 0) + 1}
         self.context.progress = self.context.progress or ""
+        self.context.scene_hints = match_scene_hints(self.obs.xml if self.obs else "")
         active_apps = (self.cfg.apps if self.cfg.app_cache_serial == self.device_serial
                        and self.device_serial else [])
         self.context.page_hints = (
@@ -327,7 +329,8 @@ class Runner:
             self.log.detail("decide", f"页面提示命中: {len(self.context.page_hints)}")
         self.context.focus_terms = self.focus_terms
         wheel_on_screen = route == "vlm" and any(
-            c.cls.rsplit(".", 1)[-1] == "WheelView" for c in self.obs.candidates
+            tree_mod.is_value_wheel(c) or c.cls.rsplit(".", 1)[-1] == "WheelView"
+            for c in self.obs.candidates
         )
         text, kept, counts = self.context.trim(
             self.obs.candidates if route == "tree" or wheel_on_screen else []

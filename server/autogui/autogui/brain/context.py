@@ -51,6 +51,7 @@ class Context:
     input_guide: str = ""
     launch_note: str = ""
     page_hints: list[str] = field(default_factory=list)
+    scene_hints: list[str] = field(default_factory=list)
     focus_terms: list[str] = field(default_factory=list)
 
     history_window: int = 5
@@ -115,6 +116,7 @@ class Context:
             "entities": self.entities_block(),
             "observation": self.observation_text(cands or []),
             "page_hints": "\n".join(self.page_hints),
+            "scene_hints": "\n".join(self.scene_hints),
         }
         counts = {k: estimate_tokens(v) for k, v in parts.items()}
         counts["total"] = sum(counts.values())
@@ -138,6 +140,7 @@ class Context:
                 input_guide=self.input_guide,
                 launch_note=self.launch_note,
                 page_hints=self.page_hints,
+                scene_hints=self.scene_hints,
                 focus_terms=self.focus_terms,
                 history_window=w, candidate_limit=k,
             )
@@ -156,6 +159,7 @@ class Context:
                 prompts.render("context_candidates", candidates=c.observation_text(body)),
                 wheel_guide,
                 custom_wheel_guide,
+                prompts.render("context_scene_hints", scene_hints="\n".join(c.scene_hints)) if c.scene_hints else "",
                 prompts.render("context_page_hints", page_hints="\n".join(c.page_hints)) if c.page_hints else "",
             ) if p)
             return text, estimate_tokens(text)

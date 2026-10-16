@@ -1,0 +1,1 @@
+（上下文因预算已裁剪：保留最近 $history_window 步、$candidate_count 个候选）

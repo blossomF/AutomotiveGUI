@@ -38,7 +38,7 @@ py-modules = ["main"]
 include = ["autogui*"]
 
 [tool.setuptools.package-data]
-"autogui.brain" = ["prompt_text.yaml"]
+"autogui.brain" = ["prompt_templates/*.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

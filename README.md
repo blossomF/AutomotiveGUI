@@ -171,7 +171,6 @@ flowchart LR
 | `python main.py --packages`                         | 列出安装的应用，用于填 `config.yaml` |
 | `python main.py --dump-report`                      | 逐 App 实测控件树质量 → `artifacts/dump-report.md` |
 | `python main.py --mcp-check`                        | 真开一个 MCP 会话，列工具 + 校验与 local 同源 |
-| `python main.py --skill-only "music.play_song=七里香"` | 跳过模型直接跑配方（0 次 VLM） |
 | `python -m autogui.mcp_server`                      | 作为 stdio MCP server 给外部客户端用 |
 | `python -m autogui.mcp_server --list-tools`         | 打印工具名、字段名及说明；也需要已连接设备 |
 | `python main.py --voice-test` | 只验证麦克风和讯飞识别，不操作设备 |
@@ -268,7 +267,6 @@ Node 仅用于前端回归测试，运行面板不需要 Node。完整项目测�
 - **无长期记忆**。上下文只在单次任务内有效，不做跨任务持久化。
 - **不处理登录、支付、验证码**。规则不允许，也没做。
 - **`estimate_tokens` 是启发式**，不是真 tokenizer，只用于决定裁剪多少；对外报告的是 GLM 返回的真实用量。
-- **显式 `--skill-only` 配方的 hint 文本需在真机上实测填写**。仓库里现带的 `music`/`bilibili` 配方含占位文本；普通指令只读取 `guide`，不执行这些步骤。
 
 ---
 
@@ -295,7 +293,7 @@ server/autogui/
 │   ├── brain/
 │   │   ├── glm_client.py  配置的模型服务（OpenAI 兼容）+ JSON 校验 + 用量统计
 │   │   ├── prompts.py     读取模板、填充动态字段、组装消息
-│   │   ├── prompt_text.yaml  通用模型提示词（首次选应用/决策/反思/重试/上下文）
+│   │   ├── prompt_templates/ 独立提示词文件（首次选应用/决策/反思/重试/上下文/场景指导）
 │   │   └── context.py     四层上下文 + token 预算裁剪
 │   ├── core/
 │   │   ├── graph.py       LangGraph 9 节点 + 条件回边
@@ -305,14 +303,14 @@ server/autogui/
 │   │   ├── decision_log.py 规则 4.7 决策链 + JSONL
 │   │   └── executor.py    local / mcp 双通道
 │   └── skills/
-│       └── base.py        模型指南加载 + 显式配方执行器
+│       └── base.py        模型指南加载与参数渲染
 ├── skills/                App 指导与页面经验（<app>/skill.yaml、ui_hints.yaml）
 └── tests/                 离线单测，不需要车机与网络
 ```
 
 ### 提示词维护
 
-- 通用提示词集中在 [`autogui/brain/prompt_text.yaml`](server/autogui/autogui/brain/prompt_text.yaml)。`$task`、`$context_text`、`$width` 等占位符由代码填入；修改后重启服务生效。
+- 提示词位于 [`autogui/brain/prompt_templates/`](server/autogui/autogui/brain/prompt_templates)，一个 `.txt` 文件对应一条提示词，文件名就是模板名。`$task`、`$context_text`、`$width` 等占位符由代码填入；修改后重启服务生效。
 - 动作名称、动作字段和滚动方向从 `actions.py` 生成，修改动作协议时以该文件为准，不在 YAML 中另维护一份列表。
 - 应用任务指导维护在 `skills/<app>/skill.yaml`；仅在当前 XML 页面标记命中时发送的经验维护在 `skills/<app>/ui_hints.yaml`。
 - 修改模板后运行 `python -m pytest tests -q`，并查看 debug 日志中的 `glm_request` 确认实际发送的文本。

@@ -1,0 +1,2 @@
+当前屏幕可寻址候选（#编号 = node_ref，回复时用 node_ref，不要复制坐标）：
+$candidates

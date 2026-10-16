@@ -83,7 +83,7 @@ def test_launch_note_is_in_trimmed_context_and_expires_after_two_decisions(monke
     runner, _ = _runner(monkeypatch, "<hierarchy/>")
     runner.screen = SimpleNamespace(width=1080, height=2400)
     runner.glm = SimpleNamespace(decide=lambda *args, **kw: (
-        {"type": "WAIT", "seconds": 1}, SimpleNamespace(calls=1, prompt_tokens=1, completion_tokens=1)))
+        {"type": "WAIT", "seconds": 1}, SimpleNamespace(calls=1, prompt_tokens=1, completion_tokens=1, latency_ms=0)))
     runner._note_launch("QQ音乐")
     text, _, _ = runner.context.trim([])
     assert "倒计时广告" in text and "QQ音乐" in text

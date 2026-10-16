@@ -25,10 +25,6 @@ def _runner(tmp_path, responses):
         encoding="utf-8",
     )
 
-    class TrapDevice:
-        def __getattr__(self, name):
-            raise AssertionError(f"Skill 不应调用设备方法 {name}")
-
     seen = []
 
     class FakeGLM:
@@ -38,11 +34,11 @@ def _runner(tmp_path, responses):
 
     runner = Runner(Config(), "在音乐 App 播放七里香", glm=FakeGLM())
     runner.log = DecisionLog("skill-test", tmp_path, verbose=False)
-    runner.book = SkillBook(tmp_path, TrapDevice(), None)
+    runner.book = SkillBook(tmp_path)
     runner.context.skill_index = runner.book.index()
     candidate = Candidate(1, "搜索", 50, 50, (0, 0, 100, 100), True, "", "")
     runner.obs = SimpleNamespace(candidates=[candidate, candidate, candidate], tree_usable=True,
-                                 width=100, height=100, png=b"")
+                                 width=100, height=100, png=b"", xml="")
     runner.screen = ScreenGeometry(width=100, height=100)
     return runner, seen
 
