@@ -49,11 +49,15 @@ goto :run_task
 
 :usage
   echo Usage: run.bat check^|selftest^|dump-report^|mcp-check^|setup^|"your task"
+  echo.
+  echo [Tip] Double-clicking runs no task. Re-run with an argument, e.g.:
+  echo       run.bat selftest
+  pause
   goto :end
 
 :fail
   echo.
-  echo [setup] FAILED — see ..\..\README.md 「快速上手」 for the manual path.
+  echo [setup] FAILED — see ..\..\README.md  for the manual path.
   exit /b 1
 
 :end
