@@ -9,6 +9,10 @@ const root=path.resolve(__dirname,'../../..');
 const result=spawnSync('python',['-c',`import importlib.util,json; s=importlib.util.spec_from_file_location('frontend_test',${JSON.stringify(path.join(root,'dist/dashboard_server.py'))});m=importlib.util.module_from_spec(s);s.loader.exec_module(m);print(json.dumps({k:getattr(m,k) for k in ['RUN_JS','LOGS_JS']}))`],{encoding:'utf8'});
 if(result.status!==0)throw new Error(result.stderr);
 const scripts=JSON.parse(result.stdout);
+for(const file of ['dist/dashboard_server.py','dist/dashboard.html']){
+ const source=fs.readFileSync(path.join(root,file),'utf8');
+ assert.doesNotMatch(source,/id="(?:run|logs|offline)(?:Debug|Older)"/);
+}
 const view=require(path.join(root,'dist/log_view.js'));
 class Element{
  constructor(){this.children=[];this.dataset={};this.classList={toggle(){},add(){},remove(){}};this.scrollHeight=100;this.scrollTop=100;this.clientHeight=100;this.value='';this.textContent='';this.hidden=false;}
@@ -59,9 +63,25 @@ function data(extra={}){return {ok:true,status:'running',task:'test',reason:'',s
  logs.run('autoRefresh=true');logs.c.LogView.fetchJSON=async()=>data({status:'done',updates:[]});
  await logs.run("loadTask('test')");assert.equal(logs.$('#autoBtn').dataset.on,'0');
  logs.$('#autoBtn').onclick();assert.equal(logs.run('autoRefresh'),true);
+ // All diagnostics and earlier records stay visible, including across API pages.
+ const all=Array.from({length:260},(_,idx)=>({...row,idx,action:{action:idx%2?'glm_request':'xml',status:'ok',summary:'debug'}}));
+ const full=environment(scripts.RUN_JS,async()=>data());full.run("track('test')");
+ full.c.batch=data({updates:all.slice(0,200),cursor:199});full.run('renderLive(batch)');
+ full.c.batch=data({updates:all.slice(200),cursor:259});full.run('renderLive(batch)');
+ assert.equal(full.$('#liveList').childElementCount,260);assert.equal(full.run('liveSteps[0].idx'),0);
+ const fullLogs=environment(scripts.LOGS_JS,async url=>url==='/api/tasks'?[]:data({updates:all,cursor:259}));
+ await fullLogs.run("loadTask('test')");assert.equal(fullLogs.$('#timeline').childElementCount,260);
+ // Four artifact kinds are clickable and escaped; no file:// links are generated.
+ for(const [phase,file,label] of [['xml','step01_0001_xml.xml','原始 XML'],['glm_request','step01_0002_glm_request.json','LLM Request'],['glm_response','step01_0003_glm_response.json','LLM Response']]){
+  const html=view.card({...row,action:{action:phase,artifact:file}},'中文任务');
+  assert.ok(html.includes(label));assert.ok(html.includes('file='+file));assert.ok(html.includes(encodeURIComponent('中文任务')));
+  assert.ok(html.includes('target="_blank"'));assert.doesNotMatch(html,/file:\/\//);
+ }
+ assert.match(view.card({...row,action:{action:'decide',candidates_artifact:'step01_candidates.txt'}},'test'),/裁剪结果.*step01_candidates.txt/);
+ assert.doesNotMatch(view.card({...row,action:{action:'glm_request',artifact:'../config.json'}},'test'),/<a /);
  // Filtering keeps model/XML errors visible, and never fabricates missing durations.
  assert.equal(view.diagnostic({action:{action:'xml',status:'error'}}),false);
  assert.equal(view.diagnostic({action:{action:'xml',status:'ok'}}),true);
  assert.doesNotMatch(view.timing(row),/推理 0|执行 0|cost:/);
- console.log('PASS frontend: long silence, reconnect, completion, single request, task switch, incremental DOM, manual pause, diagnostics');
+ console.log('PASS frontend: polling, incremental DOM, pause, all diagnostics/history, four artifact links');
 })().catch(error=>{console.error(error);process.exit(1);});

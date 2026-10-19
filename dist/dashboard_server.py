@@ -68,11 +68,13 @@ _LIST_LOCK = threading.RLock()
 _SETTINGS_LOCK = threading.Lock()
 
 
-def task_xml_artifact(task_dir: str, filename: str) -> Path | None:
-    """只允许读取已有任务 debug 目录下的单个 XML 文件。"""
+def task_artifact(task_dir: str, filename: str) -> Path | None:
+    """只读取已有任务 debug 目录内的 XML、候选文本和模型交互文件。"""
     if not task_dir or not filename or Path(task_dir).name != task_dir or Path(filename).name != filename:
         return None
-    if Path(filename).suffix.lower() != ".xml" or not (LOGS_ROOT / f"{task_dir}.jsonl").is_file():
+    if any(char in task_dir + filename for char in "\\/:"):
+        return None
+    if Path(filename).suffix.lower() not in {".xml", ".txt", ".json"} or not (LOGS_ROOT / f"{task_dir}.jsonl").is_file():
         return None
     task_path = (LOGS_ROOT / task_dir).resolve()
     if task_path.parent != LOGS_ROOT.resolve():
@@ -273,9 +275,17 @@ def get_live(task_dir: str, after_idx: int | None = None) -> dict:
     if reset:
         after = -1
     updates = detail["steps"][max(0, after + 1):max(0, after + 1) + 200]
+    # 旧日志仅保存了候选文件而未写入 artifact 指标，按实际文件补充关联。
+    linked_updates = []
+    for row in updates:
+        if row["action"]["action"] == "decide":
+            candidate_name = f"step{row['step']:02d}_candidates.txt"
+            if task_artifact(task_dir, candidate_name):
+                row = {**row, "action": {**row["action"], "candidates_artifact": candidate_name}}
+        linked_updates.append(row)
     cursor = updates[-1]["idx"] if updates else after
     return {**{k: v for k, v in detail.items() if k != "steps"},
-            "ok": True, "updates": updates, "last": detail["steps"][-1] if detail["steps"] else None,
+            "ok": True, "updates": linked_updates, "last": detail["steps"][-1] if detail["steps"] else None,
             "cursor": cursor, "reset": reset, "has_more": cursor < detail["cursor"]}
 
 
@@ -522,11 +532,12 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/artifact":
                 task_dir = qs.get("task", [""])[0]
                 filename = qs.get("file", [""])[0]
-                artifact = task_xml_artifact(task_dir, filename)
+                artifact = task_artifact(task_dir, filename)
                 if artifact is None:
                     self._send(404, b"not found", "text/plain; charset=utf-8")
                 else:
-                    self._send(200, artifact.read_bytes(), "application/xml; charset=utf-8")
+                    # 文本方式打开可完整展示原文，包括无法解析为 JSON 的模型响应。
+                    self._send(200, artifact.read_bytes(), "text/plain; charset=utf-8")
             elif path == "/api/live":
                 task_dir = qs.get("task", [""])[0]
                 try:
@@ -1004,8 +1015,8 @@ RUN_JS = r"""
 try { window.name = 'lg_run'; } catch(e){}
 
 let curDir = null, pollTimer = null, pollBusy = false, pollEnabled = false;
-let liveSteps = [], liveCursor = -1, liveStatus = 'running', liveDebug = false;
-let stickBottom = true, liveLimit = 200;
+let liveSteps = [], liveCursor = -1, liveStatus = 'running';
+let stickBottom = true;
 function setLive(t){ const el=$('#live'); if(el) el.textContent=t||''; }
 function setLogLink(dir){
   $('#logLink').href=dir?'/logs?task='+encodeURIComponent(dir):'/logs';
@@ -1013,24 +1024,23 @@ function setLogLink(dir){
 }
 function stopPoll(){pollEnabled=false;if(pollTimer!==null)clearTimeout(pollTimer);pollTimer=null;}
 function startPoll(){pollEnabled=true;if(pollTimer===null&&!pollBusy)pollTimer=setTimeout(()=>{pollTimer=null;tick();},2000);}
-function track(dir){stopPoll();curDir=dir;liveCursor=-1;liveSteps=[];liveLimit=200;
+function track(dir){stopPoll();curDir=dir;liveCursor=-1;liveSteps=[];stickBottom=true;
   const l=$('#liveList');if(l)l.replaceChildren();
   if(dir)localStorage.setItem('lga_task_dir',dir);else localStorage.removeItem('lga_task_dir');setLogLink(dir);
 }
 function showCard(on){$('#livePanel').classList.toggle('hidden',!on);}
 function setBadge(state,text){const b=$('#liveBadge');b.className='badge '+state;b.textContent=text;}
 function renderRunRows(rebuild=false,updates=[]){
- const list=$('#liveList');const selected=liveSteps.filter(s=>liveDebug||!LogView.diagnostic(s));
- if(rebuild){list.innerHTML=selected.slice(-liveLimit).map(s=>LogView.card(s,curDir,true)).join('');}
+ const list=$('#liveList');
+ if(rebuild){list.innerHTML=liveSteps.map(s=>LogView.card(s,curDir,true)).join('');}
  else{
   const fragment=document.createDocumentFragment();
-  for(const step of updates){if(!liveDebug&&LogView.diagnostic(step))continue;
+  for(const step of updates){
    const box=document.createElement('div');box.innerHTML=LogView.card(step,curDir,true);fragment.appendChild(box.firstElementChild);}
-  list.appendChild(fragment);while(list.childElementCount>liveLimit)list.firstElementChild.remove();
+  list.appendChild(fragment);
  }
  const primary=liveSteps.filter(s=>!LogView.diagnostic(s)).length;
  $('#liveCount').textContent=primary+' 条进度 · '+(liveSteps.length-primary)+' 条调试';
- $('#runOlder').hidden=selected.length<=liveLimit;
  if(stickBottom)list.scrollTop=list.scrollHeight;
 }
 function renderLive(d){
@@ -1038,7 +1048,7 @@ function renderLive(d){
  const updates=(d.updates||[]).filter(s=>s.idx>liveCursor);
  liveSteps.push(...updates);liveCursor=d.cursor??liveCursor;liveStatus=d.status;
  setBadge(d.status,LogView.statusNames[d.status]||d.status);$('#liveTask').textContent=d.task||'';
- renderRunRows(false,updates);showCard(true);
+ showCard(true);renderRunRows(false,updates);
  $('#runLog').hidden=!d.run_log;
 }
 async function fetchLive(){
@@ -1067,8 +1077,6 @@ async function tick(){
  }catch(error){if(curDir===dir){setLive('日志连接暂不可用，正在重试：'+error.message);pollEnabled=true;}}
  finally{pollBusy=false;if(pollEnabled)startPoll();}
 }
-$('#runDebug').onchange=e=>{liveDebug=e.target.checked;renderRunRows(true);};
-$('#runOlder').onclick=()=>{liveLimit+=200;renderRunRows(true);};
 
 $('#runBtn').onclick = async () => {
   const task = $('#taskInput').value.trim();
@@ -1255,20 +1263,18 @@ LOGS_JS = r"""
 try { window.name = 'lg_logs'; } catch(e){}
 
 let currentDir=null,timer=null,logsBusy=false,autoRefresh=true,logCursor=-1;
-let logSteps=[],logDebug=false,logLimit=200,lastDetail=null;
+let logSteps=[],lastDetail=null;
 function stopLogTimer(){if(timer!==null)clearTimeout(timer);timer=null;}
 function renderLogRows(rebuild=false,updates=[]){
  const tl=$('#timeline'),main=$('.main');
  const atBottom=main.scrollHeight-main.scrollTop-main.clientHeight<48;
- const selected=logSteps.filter(s=>logDebug||!LogView.diagnostic(s));
- if(rebuild)tl.innerHTML=selected.slice(-logLimit).map(s=>LogView.card(s,currentDir)).join('');
+ if(rebuild)tl.innerHTML=logSteps.map(s=>LogView.card(s,currentDir)).join('');
  else{
   const fragment=document.createDocumentFragment();
-  for(const step of updates){if(!logDebug&&LogView.diagnostic(step))continue;
+  for(const step of updates){
    const box=document.createElement('div');box.innerHTML=LogView.card(step,currentDir);fragment.appendChild(box.firstElementChild);}
-  tl.appendChild(fragment);while(tl.childElementCount>logLimit)tl.firstElementChild.remove();
+  tl.appendChild(fragment);
  }
- $('#logsOlder').hidden=selected.length<=logLimit;
  if(atBottom&&updates.length)requestAnimationFrame(()=>{main.scrollTop=main.scrollHeight;});
 }
 async function loadTasks(prefer){
@@ -1281,7 +1287,7 @@ async function loadTasks(prefer){
 }
 async function loadTask(dir,reset=false){
  if(!dir)return;
- if(currentDir!==dir||reset){currentDir=dir;logCursor=-1;logSteps=[];lastDetail=null;logLimit=200;stopLogTimer();$('#timeline').replaceChildren();}
+ if(currentDir!==dir||reset){currentDir=dir;logCursor=-1;logSteps=[];lastDetail=null;stopLogTimer();$('#timeline').replaceChildren();}
  if(logsBusy)return;
  logsBusy=true;const requestDir=dir;
  try{
@@ -1309,8 +1315,6 @@ async function loadTask(dir,reset=false){
 $('#taskSel').onchange=()=>loadTask($('#taskSel').value);
 $('#loadBtn').onclick=()=>loadTask($('#taskSel').value);
 $('#autoBtn').onclick=()=>{autoRefresh=$('#autoBtn').dataset.on!=='1';stopLogTimer();$('#autoBtn').dataset.on=autoRefresh?'1':'0';$('#autoBtn').textContent='自动刷新：'+(autoRefresh?'开':'关');if(autoRefresh)loadTask(currentDir);};
-$('#logsDebug').onchange=e=>{logDebug=e.target.checked;renderLogRows(true);};
-$('#logsOlder').onclick=()=>{logLimit+=200;renderLogRows(true);};
 loadTasks(new URLSearchParams(location.search).get('task'));
 """
 
@@ -1607,8 +1611,6 @@ PAGE_RUN_TPL = r"""<!DOCTYPE html>
         <span class="badge running" id="liveBadge">运行中</span>
         <span class="live-task" id="liveTask"></span>
         <span class="live-count" id="liveCount"></span>
-        <label class="mini"><input type="checkbox" id="runDebug"> 调试详情</label>
-        <button class="mini" id="runOlder" hidden>显示更早记录</button>
         <a class="mini" id="runLog" hidden target="_blank" rel="noopener">进程输出</a>
       </div>
       <div class="live-list" id="liveList"></div>
@@ -1637,8 +1639,6 @@ PAGE_LOGS_TPL = r"""<!DOCTYPE html>
   <select id="taskSel"></select>
   <button id="loadBtn" class="mini">加载</button>
   <button id="autoBtn" class="mini" data-on="1">自动刷新：开</button>
-  <label class="mini"><input type="checkbox" id="logsDebug"> 调试详情</label>
-  <button class="mini" id="logsOlder" hidden>显示更早记录</button>
   <a class="mini" id="logsRunLog" hidden target="_blank" rel="noopener">进程输出</a>
   <a class="mini" href="/settings">⚙ 设置</a>
   <a class="mini" href="/" target="lg_run">← 去下指令</a>

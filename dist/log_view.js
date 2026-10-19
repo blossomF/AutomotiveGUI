@@ -75,7 +75,7 @@ function summary(a){
  return msg;
 }
 const labels={artifact:'原始文件',chars:'字符数',request_kind:'请求用途',attempt:'请求尝试',latency_ms:'模型请求耗时（毫秒）',duration_ms:'操作耗时（毫秒）',in_tok:'输入 token',out_tok:'输出 token',status:'结果',state:'阶段状态',adb_detail:'ADB 诊断',command:'ADB 命令',dump_ms:'控件树耗时（毫秒）',dump_exit:'控件树退出码',dump_stdout:'控件树输出',dump_stderr:'控件树错误',remote_file:'设备文件检查',stage:'失败阶段',adb_exit:'ADB 退出码',shot_ms:'截图耗时（毫秒）',sig:'画面指纹',glms:'模型调用次数',calls:'模型请求次数',decisions:'后续观察次数',model_ms:'首次模型请求耗时（毫秒）',model_tokens:'首次模型用量',finish_after_launch:'启动应用后结束任务',candidate_tokens:'控件候选预计 token',omitted_actionable:'被裁剪的可操作控件',omitted_passive:'被裁剪的静态文本',target_lost:'目标候选被裁剪',node_count:'控件数',candidate_count:'候选数',no_progress:'连续无进展次数',wait_ms:'等待时间（毫秒）',result:'工具返回',package:'应用包名',app:'应用',pending_ms:'已等待（毫秒）',retry_wait_ms:'重试等待（毫秒）',error_type:'错误类型',elapsed:'已耗时（秒）',tokens:'本次用量',usage_total:'累计用量',routes:'路径次数',usage:'模型用量',retries:'重试次数'};
-function technical(a){return Object.entries(a).filter(([k,v])=>!['action','summary','explain','task','call_id','pid','process_key','started_at','schema_version','run_log','usage_scope','usage_complete'].includes(k)&&v!==''&&v!=null).map(([k,v])=>'<b>'+esc(labels[k]||k)+'：</b>'+esc(k==='request_kind'?(kindName(v)||v):(typeof v==='object'?JSON.stringify(v):v))).join(' · ');}
+function technical(a){return Object.entries(a).filter(([k,v])=>!['action','summary','explain','task','call_id','pid','process_key','started_at','schema_version','run_log','usage_scope','usage_complete','artifact','candidates_artifact'].includes(k)&&v!==''&&v!=null).map(([k,v])=>'<b>'+esc(labels[k]||k)+'：</b>'+esc(k==='request_kind'?(kindName(v)||v):(typeof v==='object'?JSON.stringify(v):v))).join(' · ');}
 function timing(s){
  const parts=[s.wall_time||`任务开始后 ${s.at_time??'?'} 秒`];
  if(s.inference_time!=null)parts.push(`模型请求 ${s.inference_time}s`);
@@ -89,10 +89,16 @@ function timing(s){
 }
 function diagnostic(s){const a=s.action||{};return ['glm_request','glm_response'].includes(a.action)||(a.action==='xml'&&a.status==='ok')||(a.action==='model'&&a.state==='progress')||(a.action==='guard'&&a.summary==='通过')||(a.action==='route'&&a.summary==='评估')||(a.action==='setup'&&String(a.summary).startsWith('debug 目录'));}
 function finishHTML(a){if(a.action!=='finish')return '';const u=a.usage||{};return '<div class="meta">'+esc(`模型调用 ${u.calls??'未采集'} 次 · 重试 ${u.retries??'未采集'} 次 · 请求累计 ${u.latency_ms==null?'未采集':round(u.latency_ms/1000)+'s'}`)+'</div>'+(Object.keys(a.routes||{}).length?'<div class="meta">路径统计：'+esc(Object.entries(a.routes).map(([k,v])=>`${k} ${v}`).join(' · '))+'</div>':'');}
+function artifactLinks(a,taskDir){
+ const files=[];
+ if(a.artifact)files.push([a.artifact,({xml:'原始 XML',glm_request:'LLM Request',glm_response:'LLM Response'})[a.action]||'原始文件']);
+ if(a.candidates_artifact)files.push([a.candidates_artifact,'裁剪结果']);
+ return files.filter(([file])=>typeof file==='string'&&!/[\\/:]/.test(file)&&/\.(xml|json|txt)$/i.test(file))
+  .map(([file,label])=>'<div class="meta"><a href="/api/artifact?task='+encodeURIComponent(taskDir)+'&amp;file='+encodeURIComponent(file)+'" target="_blank" rel="noopener">'+esc(label)+' · '+esc(file)+'</a></div>').join('');
+}
 function card(s,taskDir,mini=false){
  const a=s.action||{},phase=String(a.action||'log').replace(/[^a-z_]/gi,''),tech=technical(a);
- const xml=a.action==='xml'&&a.artifact?'<a href="/api/artifact?task='+encodeURIComponent(taskDir)+'&amp;file='+encodeURIComponent(a.artifact)+'" target="_blank" rel="noopener">查看原始 XML</a>':'';
- return `<div class="${mini?'live-item':'card p-'+phase}" data-event="${s.idx}"><div class="${mini?'mini-body':'body'}"><div class="${mini?'mini-head':'row1'}"><span class="${mini?'idx-no':'step-no'}">${s.step===0?'准备':'第 '+s.step+' 步'} · ${s.substep}</span><span class="atype a-${phase}" title="${esc(a.action)}">${esc(phases[a.action]||a.action||'日志')}</span></div><div class="${mini?'mini-msg':'meta'}"><b>${esc(summary(a))}</b></div>${finishHTML(a)}${xml}${tech?'<details class="meta"><summary>技术详情</summary>'+tech+'</details>':''}<div class="${mini?'mini-meta':'timing'}">${esc(timing(s))}</div></div></div>`;
+ return `<div class="${mini?'live-item':'card p-'+phase}" data-event="${s.idx}"><div class="${mini?'mini-body':'body'}"><div class="${mini?'mini-head':'row1'}"><span class="${mini?'idx-no':'step-no'}">${s.step===0?'准备':'第 '+s.step+' 步'} · ${s.substep}</span><span class="atype a-${phase}" title="${esc(a.action)}">${esc(phases[a.action]||a.action||'日志')}</span></div><div class="${mini?'mini-msg':'meta'}"><b>${esc(summary(a))}</b></div>${finishHTML(a)}${artifactLinks(a,taskDir)}${tech?'<details class="meta"><summary>技术详情</summary>'+tech+'</details>':''}<div class="${mini?'mini-meta':'timing'}">${esc(timing(s))}</div></div></div>`;
 }
 function stats(d){const s=d.stats,u=d.usage||{};return [
  ['任务',d.title||d.task],['状态',(statusNames[d.status]||d.status)+(d.reason?' · '+(reasons[d.reason]||d.reason):'')],['步数',s.total_steps],

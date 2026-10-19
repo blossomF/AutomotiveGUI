@@ -53,3 +53,51 @@ def test_unfinished_legacy_task_counts_graph_steps_and_recorded_time(tmp_path):
     summary = dashboard.list_tasks()[0]
     assert (summary["status"], summary["total_steps"], summary["total_time"]) == (
         "unknown", 1, 8.0)
+
+
+def test_artifact_links_open_local_files_and_reject_traversal(tmp_path):
+    import threading
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    import pytest
+
+    dashboard = _dashboard(tmp_path)
+    stem = "中文任务-20261016-160000"
+    events = [{"t": 1, "step": 1, "phase": "decide", "msg": "选择下一步"}]
+    (tmp_path / f"{stem}.jsonl").write_text(json.dumps(events[0]), encoding="utf-8")
+    folder = tmp_path / stem
+    folder.mkdir()
+    files = {
+        "step01_0001_xml.xml": "<hierarchy>原始 XML</hierarchy>",
+        "step01_candidates.txt": "#1 搜索（裁剪结果）",
+        "step01_0002_glm_request.json": '{"messages": []}',
+        # Invalid JSON is still viewable as the exact original response.
+        "step01_0003_glm_response.json": "原始模型响应",
+    }
+    for name, content in files.items():
+        (folder / name).write_text(content, encoding="utf-8")
+    live = dashboard.get_live(stem, -1)
+    assert live["updates"][0]["action"]["candidates_artifact"] == "step01_candidates.txt"
+    # Enrichment must not mutate the cached projection.
+    assert "candidates_artifact" not in dashboard.get_task_detail(stem)["steps"][0]["action"]
+
+    server = dashboard.ThreadingHTTPServer(("127.0.0.1", 0), dashboard.Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}/api/artifact?"
+    try:
+        for name, content in files.items():
+            with urllib.request.urlopen(base + urllib.parse.urlencode({"task": stem, "file": name})) as response:
+                assert response.headers.get_content_type() == "text/plain"
+                assert response.read().decode("utf-8") == content
+        for name in ("../config.yaml", "..\\config.json", "secret.yaml", "missing.txt", "step01_candidates.txt:other.txt"):
+            with pytest.raises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(base + urllib.parse.urlencode({"task": stem, "file": name}))
+            assert error.value.code == 404
+        assert dashboard.task_artifact("../other", "step01_candidates.txt") is None
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()

@@ -98,8 +98,6 @@
   <div class="spacer" data-page-node-id="0WuiGSZbAX8RH43vgJkDld"></div>
   <select id="taskSel" data-page-node-id="xEPnMuhyZhksGRpwNrFwKK"></select>
   <button id="loadBtn" class="mini" data-page-node-id="5oLIhOrkhUCCsukhwSSl1Q">加载</button>
-  <label class="mini"><input type="checkbox" id="offlineDebug"> 调试详情</label>
-  <button id="offlineOlder" class="mini" hidden>显示更早记录</button>
   <button id="reloadBtn" class="mini" title="重新读取已选文件（日志更新后点这个）" data-page-node-id="t8LvADt71fAo1Jud1tlLoT">重新读取</button>
   <a class="mini" href="http://localhost:8777/" target="lg_run" data-page-node-id="DOTNmHjrxPjbCdmwIjMYha">下指令 →</a>
 </header>
@@ -163,7 +161,7 @@ const $ = (s) => document.querySelector(s);
 const FILES  = [];   // [{stem, file}]  保留 File 句柄，便于「重新读取」
 const TASKS  = [];   // 概要列表（按启动时间倒序）
 const DETAIL = {};   // stem -> detail
-const ARTIFACTS = {}; // 选择整个日志文件夹时，按「任务名/文件名」索引 XML
+const ARTIFACTS = {}; // 按「任务名/文件名」索引 XML、裁剪文本、模型请求和响应
 
 function setInfo(t){ $('#pickInfo').textContent = t; }
 
@@ -199,20 +197,23 @@ function renderTaskList(){
   if(TASKS.length){ sel.value = TASKS[0].task_dir; renderTask(TASKS[0].task_dir); }
 }
 
-let offlineDebug=false,offlineLimit=200,offlineCurrent=null;
+let offlineCurrent=null;
 function renderTask(stem){
  const d=DETAIL[stem];if(!d)return;offlineCurrent=stem;
  $('#stats').innerHTML=LogView.stats(d);
- const rows=d.steps.filter(s=>offlineDebug||!LogView.diagnostic(s));
- $('#timeline').innerHTML=rows.slice(-offlineLimit).map(s=>LogView.card(s,stem)).join('');
- // XML links resolve to the selected local folder, never to a web server.
+ $('#timeline').innerHTML=d.steps.map(s=>{
+  const candidate='step'+String(s.step).padStart(2,'0')+'_candidates.txt';
+  const row=s.action.action==='decide'&&ARTIFACTS[stem+'/'+candidate]
+   ?{...s,action:{...s.action,candidates_artifact:candidate}}:s;
+  return LogView.card(row,stem);
+ }).join('');
+ // Artifact links open the actual selected file, without requiring a server.
  $('#timeline').querySelectorAll('a[href^="/api/artifact"]').forEach(link=>{
   const url=new URL(link.getAttribute('href'),'http://offline');const filename=url.searchParams.get('file');
   const key=stem+'/'+filename;link.href='#';
-  if(ARTIFACTS[key])link.dataset.xmlKey=encodeURIComponent(key);
-  else{link.replaceWith(document.createTextNode('原始 XML：'+filename+'（选择日志文件夹可打开）'));}
+  if(ARTIFACTS[key])link.dataset.artifactKey=encodeURIComponent(key);
+  else{link.replaceWith(document.createTextNode(link.textContent+'（未选择对应文件，请选择完整日志文件夹）'));}
  });
- $('#offlineOlder').hidden=rows.length<=offlineLimit;
 }
 // 从 File 对象列表解析
 async function loadFromFiles(fileList){
@@ -228,9 +229,9 @@ async function loadFromFiles(fileList){
   Object.keys(ARTIFACTS).forEach(k => delete ARTIFACTS[k]);
 
   for(const f of fileList){
-    if(!/\.xml$/i.test(f.name)) continue;
+    if(!/\.(xml|json|txt)$/i.test(f.name)) continue;
     const parts = String(f.webkitRelativePath || f.relativePath || '').split(/[\\/]/);
-    if(parts.length >= 3) ARTIFACTS[parts[parts.length - 2] + '/' + f.name] = f;
+    if(parts.length >= 2) ARTIFACTS[parts[parts.length - 2] + '/' + f.name] = f;
   }
 
   for(const f of jls){
@@ -264,17 +265,15 @@ $('#pickFileBtn').onclick = () => $('#fileInput').click();
 $('#dirInput').onchange   = e => loadFromFiles(e.target.files);
 $('#fileInput').onchange  = e => loadFromFiles(e.target.files);
 $('#loadBtn').onclick     = () => renderTask($('#taskSel').value);
-$('#offlineDebug').onchange=e=>{offlineDebug=e.target.checked;renderTask(offlineCurrent);};
-$('#offlineOlder').onclick=()=>{offlineLimit+=200;renderTask(offlineCurrent);};
 $('#reloadBtn').onclick   = () => { if(FILES.length) parseAll(); else setInfo('还没选文件'); };
 $('#taskSel').onchange    = e => renderTask(e.target.value);
 $('#timeline').addEventListener('click', e => {
-  const link = e.target.closest('[data-xml-key]');
+  const link = e.target.closest('[data-artifact-key]');
   if(!link) return;
   e.preventDefault();
-  const file = ARTIFACTS[decodeURIComponent(link.dataset.xmlKey)];
+  const file = ARTIFACTS[decodeURIComponent(link.dataset.artifactKey)];
   if(!file) return;
-  const url = URL.createObjectURL(file);
+  const url = URL.createObjectURL(new Blob([file],{type:'text/plain;charset=utf-8'}));
   window.open(url, '_blank', 'noopener');
   setTimeout(() => URL.revokeObjectURL(url), 60000);
 });
