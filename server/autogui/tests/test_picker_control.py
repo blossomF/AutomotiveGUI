@@ -215,7 +215,7 @@ def test_custom_wide_wheels_use_vertical_scroll_and_visual_readback(monkeypatch)
     hour = next(c for c in candidates if c.rid == "wheel_middle")
     assert left.scroll_axis == hour.scroll_axis == "vertical"
     assert not is_value_wheel(hour)
-    assert "自定义滚轮·值需看图" in tree_mod.render_candidates(candidates)
+    assert "自定义滚轮·读关联字段或截图" in tree_mod.render_candidates(candidates)
     context_text, _, _ = Context(task="设为19点").trim(candidates)
     assert "不要对自定义滚轮用 ROLL_TO" in context_text
     runner = Runner(cfg=Config(), task="设为19点")

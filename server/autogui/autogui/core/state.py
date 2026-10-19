@@ -27,7 +27,7 @@ class AgentState(TypedDict, total=False):
 
     # 循环计数与上限
     step: int
-    no_progress: int
+    no_progress: int  # 仅 perceive 更新；同屏每轮 +1，画面变化才清零。
     recover_depth: int
 
     # 观测摘要（完整数据在 Runner 上）

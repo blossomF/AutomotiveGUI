@@ -182,6 +182,22 @@ flowchart LR
 
 ## 5. 怎样查看运行日志
 
+### 指纹兜底故障注入演示（MOCK）
+
+在面板任务框输入 **`[MOCK] 指纹兜底演示`** 并运行，或在 `server/autogui` 目录执行：
+
+```powershell
+.\.venv\Scripts\python.exe main.py --demo-no-progress
+```
+
+这是明确标注的离线模拟：设备固定返回同一张截图和同一份 XML，模拟点击、返回和回桌面均无响应；脚本代替模型反复点击，并返回“动作未生效”的反思。无需连接车机、网络或配置模型密钥，不读取本机 `config.yaml`。
+
+指纹计算、LangGraph 的观测/动作/校验/恢复和 `guard` 均运行正式实现。首次观测建立基线，随后日志显示 `无进展=1/3 → 2/3 → 3/3`，第四次观测后的 `guard` 自动以 `no_progress` 停止，模拟点击共三次。未真正触发或计数不符合预期时，演示命令返回非零退出码；不会伪造停止结果。
+
+日志与截图/XML 保存到 `server/autogui/artifacts/logs`，可从面板日志页查看。结果中的任务状态仍为“未完成 / no_progress”；控制台最后的“MOCK 验证通过”表示停止护栏按预期工作。普通任务不进入此模拟分支。演示机器需同步 `main.py`、新增的 `autogui/demo_no_progress.py`，以及修正过计数的 `autogui/core/graph.py`。
+
+### 正常任务日志
+
 控制台按阶段打印任务进度，JSONL 文件每行记录一个事件：
 
 | 阶段 | 含义 |

@@ -6,6 +6,7 @@
     python main.py --dump-report                  # 逐 App 控件树质量报告
     python main.py --mcp-check                     # 列出 MCP 工具面
     python main.py --selftest                      # 不需要车机、不需要网络
+    python main.py --demo-no-progress              # MOCK 指纹兜底演示，不连接车机或模型
 
 ``--dump-report`` 遍历已配置 App，dump 真实 UI 树，统计可寻址候选并写出
 ``artifacts/dump-report.md``，供定位质量排查与验收使用。
@@ -275,6 +276,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dump-report", action="store_true", help="measure tree quality per app; write artifacts/dump-report.md")
     p.add_argument("--mcp-check", action="store_true", help="open a real MCP session and list tools")
     p.add_argument("--selftest", action="store_true", help="run offline tests")
+    p.add_argument("--demo-no-progress", action="store_true",
+                   help="MOCK 设备无响应：运行正式指纹/guard，连续三次无变化后停止；不需要车机或模型")
     p.add_argument("--voice-test", action="store_true", help="麦克风+讯飞ASR，只打印识别文本（不需要车机/网络GLM）")
     p.add_argument("--voice", action="store_true", help="麦克风+讯飞ASR，识别文本作为任务执行")
     p.add_argument("--voice-seconds", type=float, default=None, help="--voice 最长录音秒数（默认取 config.yaml voice.max_seconds，15）")
@@ -286,6 +289,10 @@ def main(argv: list[str] | None = None) -> int:
     from autogui.config import Config
 
     args = build_parser().parse_args(argv)
+    if args.demo_no_progress or args.task.strip() == "[MOCK] 指纹兜底演示":
+        from autogui.demo_no_progress import run_demo
+
+        return 0 if run_demo()["demo_passed"] else 1
     cfg = Config.load(args.config)
     if args.exec_mode:
         cfg.exec_mode = args.exec_mode

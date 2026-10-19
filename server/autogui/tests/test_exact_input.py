@@ -110,7 +110,7 @@ def test_failed_chinese_type_forces_keyboard_screenshot_without_repeating():
     runner.log = SimpleNamespace(phase=lambda *args, **kw: None)
     result = runner.act({"step": 1, "route": "tree", "action": {"type": "TYPE", "text": "会议"}})
     assert result["last_action"] == {}
-    assert result["no_progress"] == 0
+    assert "no_progress" not in result
     assert runner.pending_unicode == "会议"
     assert "不要再次 TYPE" in runner.context.permanent_block()
     assert runner.route({})["route"] == "vlm"
@@ -145,7 +145,7 @@ def test_empty_xml_after_unicode_input_uses_next_screenshot_instead_of_failing(m
     assert result["last_action"] == action
     assert runner.pending_unicode == ""
     assert calls == ["input_text"]  # Wait for visual evidence before ENTER.
-    assert runner.verify({"last_action": action}) == {"recover_depth": 0, "no_progress": 0}
+    assert runner.verify({"last_action": action}) == {"recover_depth": 0}
     assert not runner.unicode_readback_unconfirmed_this_step
 
 
@@ -206,7 +206,7 @@ def test_unconfirmed_autocomplete_readback_keeps_adb_chinese_path(monkeypatch):
     assert runner.pending_unicode_readback == "王菲"
     assert "再用 TYPE 输入原文" in runner.context.input_guide
     assert runner.route({})["route"] == "vlm"
-    assert runner.verify({"last_action": action}) == {"recover_depth": 0, "no_progress": 0}
+    assert runner.verify({"last_action": action}) == {"recover_depth": 0}
 
 
 def test_visual_completion_is_allowed_when_unicode_readback_is_unavailable(monkeypatch):

@@ -27,8 +27,9 @@ $output_rule
 - type 必填，取值只能是：$action_names。
 - 各动作字段：$action_fields。问号表示可选字段，竖线表示定位方式择一；字段名中不包含问号或竖线。动作参数直接放在 JSON 顶层，SKILL 的技能参数放在 params 对象中。
 - node_ref 为本轮候选编号整数；point 为当前截图像素 [x,y]，仅有截图时使用；coord 为真实设备像素 [x,y]，必须有当前观察提供的可靠依据。$drag_coordinate_rule
-- SCROLL 的 direction 只能是 $scroll_directions；amount 为目标容器可滑动范围的 0.1~0.9。
+- SCROLL 的 direction 只能是 $scroll_directions；down 表示手指向上滑，up 表示手指向下滑，left/right 表示手指向左/右滑。direction 不是数值增减方向；根据实际读数变化选择。amount 为目标容器可滑动范围的 0.1~0.9。
 - 可选 explain 是简短的动作依据；progress 是已有进展；entities 是需跨步骤保留的键值信息，只记录有依据的内容。不得把准备执行的动作写成已完成事实。
+- explain 只写当前动作所需依据，不复述完整任务或已保留的长文本；progress 仅在进展或当前编辑对象变化时更新。entities 只返回新增或修正的信息，省略的旧值由程序保留。
 - explain、progress、result、reason 使用用户任务的语言；entities 中引用的界面原文、动作名、包名和字段名保持原样。
 - 要输入的内容必须放 text，不能只写在 explain 中；COMPLETE 用 result 说明结果，FAIL 用 reason 说明具体阻碍。不要输出动作列表或未来动作序列。
 

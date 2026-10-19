@@ -38,6 +38,7 @@ from autogui.bridge import tools
 from autogui.bridge.adb import ADBError, node_attr, node_class, node_desc, node_text, nodes
 from autogui.bridge.input import UnicodeInputUnavailable, to_pinyin_syllables
 from autogui.brain.context import Context
+from autogui.brain import prompts
 from autogui.brain.scene_hints import match_scene_hints
 from autogui.brain.glm_client import GLMClient, GLMError
 from autogui.app_routes import InitialRoute, choose_initial_route
@@ -50,6 +51,7 @@ from autogui.core.state import AgentState
 from autogui.perception import image as image_mod
 from autogui.perception import tree as tree_mod
 from autogui.perception.capture import Observation, ScreenGeometry, observe
+from autogui.perception.time_picker import FeishuTimePicker, read_feishu_time_picker
 from autogui.skills.base import SkillBook, SkillMiss
 from autogui.skills.ui_hints import PageHintBook
 
@@ -107,6 +109,9 @@ class Runner:
     vlm_image_size: tuple[int, int] | None = None
     skill_focus_params: dict = field(default_factory=dict)
     focus_terms: list[str] = field(default_factory=list)
+    # One successful scroll's pre-action readings; discarded on any other action.
+    time_picker_scroll: tuple[FeishuTimePicker, str, str, float] | None = None
+    time_picker_feedback: str = ""
 
     def _current_focus_terms(self) -> list[str]:
         return tree_mod.focus_terms_from_task(
@@ -207,12 +212,17 @@ class Runner:
                             f"{self.obs.candidate_stats.get('target_in_raw', 0)}；"
                             f"候选约 {self.obs.candidate_stats.get('candidate_tokens', 0)} token")
 
+        # 无进展计数只由观测更新：同屏每轮加一次，实际换屏才清零。
+        # 决策、动作校验与恢复均不能改写它，避免清零或一轮重复计数。
+        same = bool(state.get("screen_sig")) and self.obs.signature == state.get("screen_sig")
+        no_progress = state.get("no_progress", 0) + 1 if same else 0
         self.log.phase(
             "perceive",
             f"{self.obs.width}×{self.obs.height} 树{self.obs.node_count}节点/候选{len(self.obs.candidates)}",
             shot_ms=self.obs.shot_ms,
             dump_ms=self.obs.tree_ms,
-            sig=self.obs.signature[:9],
+            sig=self.obs.signature,
+            no_progress=no_progress,
             omitted_actionable=self.obs.candidate_stats.get("omitted_actionable", 0),
             omitted_passive=self.obs.candidate_stats.get("omitted_passive", 0),
             target_lost=self.obs.candidate_stats.get("target_lost", 0),
@@ -227,8 +237,6 @@ class Runner:
             self.context.input_guide = ""
         if not any(self._skip_label(c.label) for c in self.obs.candidates):
             self.skip_waited_targets.clear()
-        same = bool(state.get("screen_sig")) and self.obs.signature == state.get("screen_sig")
-        no_progress = state.get("no_progress", 0) + 1 if same else 0
         return {
             "step": step,
             "prev_sig": state.get("screen_sig", ""),
@@ -249,7 +257,8 @@ class Runner:
             ),
         )
         if verdict.stop:
-            self.log.phase("guard", f"停止：{verdict.stop_reason} — {verdict.detail}", elapsed=f"{self.elapsed:.0f}s")
+            self.log.phase("guard", f"停止：{verdict.stop_reason} — {verdict.detail}",
+                           no_progress=state.get("no_progress", 0), elapsed=f"{self.elapsed:.0f}s")
             return {"done": True, "success": False, "status": verdict.stop_reason}
         if self.log.debug:
             self.log.phase("guard", "通过", no_progress=state.get("no_progress", 0),
@@ -258,13 +267,32 @@ class Runner:
 
     def route(self, state: AgentState) -> dict:
         """固定控件树优先；树不可用时降级到 VLM。"""
+        self.time_picker_feedback = ""
         if self.pending_unicode or self.pending_unicode_readback:
+            self.time_picker_scroll = None
             self.log.phase("route", "中文输入待核对 → vlm 截图")
             return {"route": "vlm"}
         if self.obs and any(c.cls.rsplit(".", 1)[-1] == "WheelView"
                             for c in self.obs.candidates):
-            self.log.phase("route", "自定义滚轮的选中值不在 XML 中 → vlm 截图读数")
+            picker = read_feishu_time_picker(self.obs.xml, self.obs.candidates)
+            previous = self.time_picker_scroll
+            self.time_picker_scroll = None
+            if (picker and previous and picker.follows_scroll(previous[0], previous[1])
+                    and not state.get("no_progress") and not state.get("recover_depth")
+                    and not self.obs.candidate_stats.get("target_lost")):
+                before, column, direction, amount = previous
+                self.time_picker_feedback = prompts.render(
+                    "wheel_scroll_feedback", column=column, direction=direction, amount=amount,
+                    start_before=f"{before.start[0]:02d}:{before.start[1]:02d}",
+                    start_after=f"{picker.start[0]:02d}:{picker.start[1]:02d}",
+                    end_before=f"{before.end[0]:02d}:{before.end[1]:02d}",
+                    end_after=f"{picker.end[0]:02d}:{picker.end[1]:02d}",
+                )
+                self.log.phase("route", "飞书时间页列布局稳定、关联时间已变化 → tree 读数")
+                return {"route": "tree"}
+            self.log.phase("route", "自定义滚轮首次识别或关联读数需复核 → vlm 截图")
             return {"route": "vlm"}
+        self.time_picker_scroll = None
         if self.obs and getattr(self.obs, "candidate_stats", {}).get("target_lost"):
             self.log.phase("route", "XML 中有任务目标但候选裁剪未保留 → vlm")
             return {"route": "vlm"}
@@ -316,9 +344,18 @@ class Runner:
         self.decide_attempts += 1
         if self.decide_attempts > 2:
             self.log.phase("decide", "本步已重试 2 次仍无可用决策，放弃本步")
-            return {"action": {}, "retry_decision": False, "no_progress": state.get("no_progress", 0) + 1}
+            return {"action": {}, "retry_decision": False}
         self.context.progress = self.context.progress or ""
         self.context.scene_hints = match_scene_hints(self.obs.xml if self.obs else "")
+        picker = read_feishu_time_picker(self.obs.xml, self.obs.candidates) if self.obs else None
+        if picker:
+            self.context.scene_hints.append(prompts.render(
+                "feishu_time_picker_guide",
+                start=f"{picker.dates[0]} {picker.start[0]:02d}:{picker.start[1]:02d}",
+                end=f"{picker.dates[1]} {picker.end[0]:02d}:{picker.end[1]:02d}",
+            ))
+            if self.time_picker_feedback:
+                self.context.scene_hints.append(self.time_picker_feedback)
         active_apps = (self.cfg.apps if self.cfg.app_cache_serial == self.device_serial
                        and self.device_serial else [])
         self.context.page_hints = (
@@ -387,7 +424,7 @@ class Runner:
             if route == "tree":
                 self.log.phase("route", "tree 决策无效 → 本轮降级 vlm")
                 return {"route": "vlm", "action": {}, "retry_decision": True}
-            return {"action": {}, "retry_decision": False, "no_progress": state.get("no_progress", 0) + 1}
+            return {"action": {}, "retry_decision": False}
 
         if action.get("_entities"):
             self.context.merge_entities(action.pop("_entities"))
@@ -407,7 +444,7 @@ class Runner:
             if image_size is None or not (0 <= x < image_size[0] and 0 <= y < image_size[1]):
                 self.log.phase("decide", f"图片坐标越界：{action['point']}，图片尺寸={image_size}")
                 self.context.record(state.get("step", 0), route, "CLICK", "图片坐标越界；请按本轮图片尺寸重新定位", failed=True)
-                return {"action": {}, "retry_decision": False, "no_progress": state.get("no_progress", 0) + 1}
+                return {"action": {}, "retry_decision": False}
             action["image_size"] = image_size
         if route == "vlm" and action.get("type") == "DRAG":
             try:
@@ -419,8 +456,7 @@ class Runner:
             except ValueError as e:
                 self.log.phase("decide", f"拖拽图片坐标无效：{e}")
                 self.context.record(state.get("step", 0), route, "DRAG", str(e), failed=True)
-                return {"action": {}, "retry_decision": False,
-                        "no_progress": state.get("no_progress", 0) + 1}
+                return {"action": {}, "retry_decision": False}
             action["image_size"] = image_size
         if (self.pending_unicode or self.pending_unicode_readback) and action.get("type") == "COMPLETE":
             # XML can be absent indefinitely on WebView-heavy pages. This
@@ -443,8 +479,7 @@ class Runner:
             if self.blocked_unicode_attempts >= 2:
                 return {"action": {"type": "FAIL", "reason": "两次重复了无法完成的中文 TYPE；目标文字未在输入框得到确认"},
                         "route": route, "retry_decision": False}
-            return {"action": {}, "route": route, "retry_decision": False,
-                    "no_progress": 0}
+            return {"action": {}, "route": route, "retry_decision": False}
 
         if route == "tree" and "node_ref" in action and tree_mod.by_ref(self.obs.candidates, action["node_ref"]) is None:
             # 越界 ref：不是错误，而是一次被观测到的 tree→vlm 降级（路径 C 证据）。
@@ -466,7 +501,7 @@ class Runner:
             self.log.phase("route", f"技能 {action.get('skill')!r} 不可用（{why}）→ 下一轮重新观察")
             self.context.record(state.get("step", 0), route, "SKILL",
                                 f"技能不可用（{why}）——请直接操作当前控件", failed=True)
-            return {"action": {}, "retry_decision": False, "no_progress": state.get("no_progress", 0) + 1}
+            return {"action": {}, "retry_decision": False}
 
         return {"action": action, "route": route, "retry_decision": False}
 
@@ -496,6 +531,8 @@ class Runner:
                     detail += f" target={action['target']!r}"
                     if action.get("delta_units") is not None:
                         detail += f" delta_units={action['delta_units']}"
+                if action.get("type") == "SCROLL":
+                    detail += f" direction={action['direction']} amount={action.get('amount', 0.6):g}"
                 return detail
         if action.get("from") and action.get("to"):
             return f"from={action['from']} to={action['to']} ms={action.get('duration', 400)}"
@@ -503,7 +540,7 @@ class Runner:
 
     def act(self, state: AgentState) -> dict:
         """执行节点：分发动作到设备；终止动作（COMPLETE/FAILED）只记入 last_action 不执行；
-        执行失败/异常记入上下文并计一次无进展。"""
+        执行失败/异常记入上下文，无进展次数由下一轮观测更新。"""
         action = state.get("action") or {}
         a_type = action.get("type")
         if not a_type:
@@ -516,10 +553,13 @@ class Runner:
             if refreshed is None:
                 self.context.record(state.get("step", 0), state.get("route", "?"),
                                     "CLICK 跳过", "广告已消失或临近结束；取消过期点击，重新观察")
-                return {"last_action": {}, "no_progress": 0}
+                return {"last_action": {}}
             action = refreshed
 
         started = time.perf_counter()
+        self.time_picker_scroll = None
+        self.time_picker_feedback = ""
+        picker = read_feishu_time_picker(self.obs.xml, self.obs.candidates) if self.obs else None
         self.log.phase("act", f"正在执行 {a_type} {self._action_detail(action)}", state="start")
         try:
             result = self._dispatch(action, route=state.get("route", "tree"))
@@ -537,22 +577,31 @@ class Runner:
             self.log.phase("input", f"中文未获控件树确认，转屏幕观察：{e}", target=e.text, pinyin=pinyin)
             self.context.record(state.get("step", 0), state.get("route", "?"), a_type,
                                 "中文未获 XML 确认，转屏幕观察", failed=True)
-            return {"last_action": {}, "no_progress": 0}
+            return {"last_action": {}}
         except ADBError as e:
             self.log.phase("act", f"ADB 失败：{e}", state="end", status="error",
                            duration_ms=round((time.perf_counter() - started) * 1000, 1))
             self.context.record(state.get("step", 0), state.get("route", "?"), a_type, "执行失败", failed=True)
-            return {"last_action": action, "no_progress": state.get("no_progress", 0) + 1}
+            return {"last_action": action}
         except Exception as e:
             self.log.phase("act", f"动作无法执行：{type(e).__name__}: {e}", state="end", status="error",
                            duration_ms=round((time.perf_counter() - started) * 1000, 1))
             self.context.record(state.get("step", 0), state.get("route", "?"), a_type, "执行异常", failed=True)
-            return {"last_action": action, "no_progress": state.get("no_progress", 0) + 1}
+            return {"last_action": action}
 
+        if (picker and a_type == "SCROLL" and action.get("direction") in ("up", "down")
+                and not (result or "").startswith("TOOL_ERROR")):
+            column = next((c.rid for c in picker.wheels if c.ref == action.get("node_ref")), "")
+            if column in ("wheel_middle", "wheel_right"):
+                self.time_picker_scroll = (picker, column, action["direction"], action.get("amount", 0.6))
         self.log.phase("act", result or f"{a_type} ok", state="end", status="ok",
                        duration_ms=round((time.perf_counter() - started) * 1000, 1))
+        history_detail = result[:60]
+        if a_type == "SCROLL":
+            history_detail = (f"direction={action['direction']} amount={action.get('amount', 0.6):g} "
+                              f"{history_detail}")
         self.context.record(state.get("step", 0), state.get("route", "?"), a_type,
-                            action.get("explain", ""), detail=result[:60])
+                            action.get("explain", ""), detail=history_detail)
         self.log.phase("wait", "等待界面响应", wait_ms=self.cfg.agent.delay_after_action * 1000)
         time.sleep(self.cfg.agent.delay_after_action)
         return {"last_action": action}
@@ -983,7 +1032,7 @@ class Runner:
         if a_type == "TYPE" and self.unicode_readback_unconfirmed_this_step:
             self.unicode_readback_unconfirmed_this_step = False
             self.log.phase("verify", "中文已发送但字段未确认；下一轮截图确认，不按滞后帧触发恢复", vlm=0)
-            return {"recover_depth": 0, "no_progress": 0}
+            return {"recover_depth": 0}
 
         changed = bool(self.obs) and bool(self.prev_obs) and self.obs.signature != self.prev_obs.signature
         mode = self.cfg.agent.reflection
@@ -1001,7 +1050,9 @@ class Runner:
         # "该恢复" → 阶梯一路升到 relaunch，反复按 HOME / 重启前台 App，
         # 把刚做出来的进展（例如已输入的关键词）冲掉，任务永远收敛不了。
         # 实测：一条任务在 step 19 还在"第 4 级：relaunch"，全程没走近目标。
-        ok_state = {"recover_depth": 0, "no_progress": 0}
+        # 恢复深度与无进展计数独立：校验通过只重置恢复阶梯。
+        # no_progress 由 perceive 比较真实指纹维护，不能凭模型判定清零。
+        ok_state = {"recover_depth": 0}
 
         if a_type not in MUTATING:
             self.log.phase("verify", f"{a_type} 无需校验", vlm=0)
@@ -1069,7 +1120,7 @@ class Runner:
             # 没进展"才会一路走到 relaunch（这正是阶梯的语义）。
             depth = int(state.get("recover_depth", 0) or 0) + 1
             self.log.phase("verify", f"反思={verdict} 未生效/进错页 → 恢复第 {depth} 级", vlm=1)
-            return {"recover_depth": depth, "no_progress": 0}
+            return {"recover_depth": depth}
         # UNKNOWN：模型给了无法解析的回答。按有进展处理——错误的
         # 恢复比浪费一次迭代代价更高。见 prompts.py。
         self.log.phase("verify", "反思无法判定 → 保守视为生效", vlm=1)
@@ -1132,7 +1183,7 @@ class Runner:
         # 深度由 verify 决定（连续失败才 +1），这里不再自增——两边都加会让
         # 每次失败跳两级，且下一轮的 verify 无法从"通过"里恢复回 0。
         # 保留当前深度，等下一次 verify 判定。
-        return {"recover_depth": depth, "no_progress": 0}
+        return {"recover_depth": depth}
 
     def _foreground_package(self) -> str:
         """取当前前台 App 的包名（供 recovery 第三级 relaunch 使用），失败返回空串。"""

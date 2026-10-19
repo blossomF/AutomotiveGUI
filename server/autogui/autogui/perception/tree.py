@@ -461,7 +461,7 @@ def render_candidates(cands: list[Candidate]) -> str:
         ident = f" id:{c.rid}" if c.rid and c.rid != c.label and (c.clickable or c.scrollable or c.editable) else ""
         bounds = f" 范围:{c.bounds}" if c.scrollable or c.cls.rsplit(".", 1)[-1] in ("SeekBar", "Slider") else ""
         custom_wheel = c.cls.rsplit(".", 1)[-1] == "WheelView"
-        wheel_hint = " [自定义滚轮·值需看图；不用 ROLL_TO]" if custom_wheel else (" [滚轮]" if wheel else "")
+        wheel_hint = " [自定义滚轮·读关联字段或截图；不用 ROLL_TO]" if custom_wheel else (" [滚轮]" if wheel else "")
         lines.append(f"#{c.ref} {c.label} [{c.cx},{c.cy}] ({','.join(flags)}){wheel_hint}{detail}{ident}{bounds}")
     return "\n".join(lines)
 

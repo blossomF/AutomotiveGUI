@@ -20,7 +20,7 @@ agent:
   wall_clock_limit: 480    # 秒；Demo Day 一个任务的时间槽总共 8 分钟
                            # （原 180 实测不够：B 站任务 8 步就要 212s，模型单次决策 4~10s）
   no_progress_limit: 3     # 屏幕指纹连续不变的步数
-  delay_after_action: 1.0
+  delay_after_action: 0.5
   history_window: 5
   token_budget: 8000       # 近似输入 token 数，超过后触发裁剪
   tree_candidate_limit: 40
@@ -42,7 +42,7 @@ skills:
 voice:
   appid: "ad8987fe" # python -m autogui.security set voice.appid
   api_key: "dc1a6fb17594d12d553a42ce745d23e2" # 留空 → 回退 IFLYTEK_API_KEY 环境变量；录入：python -m autogui.security set voice.api_key
-  api_secret: "ENC(AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAAUGqbIjO8Fk2fZGdpE2yBUgAAAAACAAAAAAAQZgAAAAEAACAAAABbitJHMi4eg/wgCCMx5373hLF1d3vvL0f+S4758meiMAAAAAAOgAAAAAIAACAAAABp2E91NR6HW2tBowrHqnSwFvOCp+SYSuLWRwkO1hybGTAAAABl3UHv6EkPmEwhpFbjaeSURRWLZX1C+xJOc86vrk1Fw2ItvmjqBBZYdivlmeOzQDNAAAAA0qUzogvns4V/1oB7Ynx7DrdG2SZ/dzATtpuPcuq4/fUBynMQ2btK9qbNNZEJToPCOEkxb1OlXw/DEj0/rL9G8A==)" # python -m autogui.security set voice.api_secret
+  api_secret: "ENC(AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAAUGqbIjO8Fk2fZGdpE2yBUgAAAAACAAAAAAAQZgAAAAEAACAAAACmDh9e71osW2LmPUOSF/X1iyPlYeeyNfNCF/BOnziHJwAAAAAOgAAAAAIAACAAAAADy6nnip1VZQ6ldZ/nRDq3DhEOlIfQcvzNzXjPpRqaizAAAAAFjpCmImI2YqjV1m0pMuKarmWeBM0rblzZ6bTBxis6h2sM4g5Oq0T2nCJUToG7q8ZAAAAAN5AZc6U/ofkIsF1kMyzRRwl1b1N3UVRUuqyQkhICL2So9/gYNeWl4o/K67DCe7WQjg3ZONITae7PC41HxValYg==)" # python -m autogui.security set voice.api_secret
   iat_url: "wss://iat-api.xfyun.cn/v2/iat" # 留空 = 讯飞公网 wss://iat-api.xfyun.cn/v2/iat
   max_seconds: 15.0 # 最长录音秒数
   silence_seconds: 0.8 # 尾部连续静音后自动停止
@@ -51,31 +51,38 @@ voice:
 glm:
   model: "ts-glm-53-flash"
   base_url: "https://llm.thundersoft.com"
-  api_key: "ENC(AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAAUGqbIjO8Fk2fZGdpE2yBUgAAAAACAAAAAAAQZgAAAAEAACAAAACPzyHQeRrQdoO5Ub+8UvLLdCw+5ile1c2ujMnNiFPIiAAAAAAOgAAAAAIAACAAAADL5vQYCF3cSwPxFaNSjVyISNrPJJLFSnmfZI/JuuiLnVAAAABN9xczTkXJnYjmBVPVBAnp1Dxk9XkW68qW9wCIDzz90liVG7SWxDdiQrQ3yn/sRgUzCICT6ocGpB4lroaRgoFUXa02EWHd7SHms7I6wC/mfkAAAAC7a+FVi42jLpLRn+f+M//WhHkecFs1jvlETFSAlK7zM5c+9BZjh16wJ2k9Vzk0RQQU2wDW6S9132CTab/ruKgI)" # 留空 → 回退 GLM_API_KEY 环境变量（我们的 ThunderSoft 官方 key）
+  api_key: "ENC(AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAAUGqbIjO8Fk2fZGdpE2yBUgAAAAACAAAAAAAQZgAAAAEAACAAAADvtP9tvL3n/3h0G10TLV6i+YTaT7l1CJs+TjrDMpAajQAAAAAOgAAAAAIAACAAAAAxZUc3sfyFuawJylCHVD8Rs0zm18qjayisj7gI7YkQiFAAAAD1Vd8fAse3N+KjUfjlwIRoNauw2D1wK9rCOH88br+r64KYYz2cwnBJ68sKzJWYRECzYVD5GgVK/bJgzQSEkuZYy5OfWyoTVwoB0R0tJIahP0AAAAAoOBUEND0Htq9exx1uM7NG5oiFoWT0KF2fSPv/NGZK3xfReTmVxmAJFq+GOyID15Ti6D/nZj922157wdY/49fg)" # 留空 → 回退 GLM_API_KEY 环境变量（我们的 ThunderSoft 官方 key）
   api_key_env: GLM_API_KEY
   temperature: 0.1
   max_tokens: 8192 # 【标记：ts-glm-53-flash 思维链模型，需单独适配】思维链也计入
                       # completion_tokens：2048 容易被思维链吃满 → 输出截断/空响应
                       # （9/28 美团外卖任务实测 2 次 empty completion，重试各多花 15~32s）。
                       # 已提升至 4096；若仍出现截断，继续上调并观察单步耗时。
-  timeout: 60.0 # 正常决策实测 5~30s；60s 上限既覆盖慢响应，又让挂死请求
-                      # 尽快超时进入重试（120s 时单步挂死会直接吃掉整个任务预算）
+  timeout: 80.0 # SDK 连接/读写等待超时；流式请求持续收到数据时，总生成时间可超过此值。
+                      # 10/19 飞书时间页有 60s 读超时后重试，调至 80s 观察；不是任务总限时。
   max_retries: 4 # 网关间歇故障会伪装成 400 roles/超时且可自愈：指数退避 1/2/4/8s，共 5 次撞健康实例
 
 # 范围由规则 4.2 固定：CEA1.3 预装集 + 哔哩哔哩 / 飞书 / 外卖。
 # 借到车机后用 `python main.py --packages` 填包名——
 # LightGUIAgent 提示词里的 App 列表（美团/淘宝/微信）是手机端的，在车机上大多不适用。
 # 设置页维护目标应用清单；--check 核对全部目标包名，任务开始时模型可选择 ADB 直启。
-app_cache_serial: "509c27fd"
+app_cache_serial: "7XTKJRIJWSVON7QS"
 apps:
   - name: QQ音乐
-    aliases: ["qqmusic"]
+    aliases: ["qqmusic", "qq yinyue"]
+    package: com.mosi.mosc.onlinemedia.qqmusic
+  - name: 酷我音乐
+    aliases: ["kuwomusic", "kuwo"]
+    package: com.mosi.mosc.onlinemedia.kuwomusic
+  - name: 导航
+    aliases: ["nav", "daohang", "navigation"]
+    package: com.fawvw.vehicle.navi.ceaapp
   - name: 哔哩哔哩
-    aliases: ["bili", "bilibili"]
+    aliases: ["bili", "bilibili", "b站"]
+    package: com.bilibili.bilithings
   - name: 飞书
     aliases: ["feishu", "lark"]
-  - name: 美团
-    aliases: ["meituan"]
+    package: com.ss.android.lark
 log_dir: artifacts/logs
 verbose: true
 
